@@ -55,6 +55,7 @@ make clean    # removes binary
 - Namespace-scoped functions are wrapped in proper namespace blocks in split files
 
 ## Recent Changes
-- 2026-02-07: Static functions now split with unique mangled names per source file
+- 2026-02-07: Incremental re-splitting — only writes files that changed or are missing, removes stale files
+- 2026-02-07: Static functions now split with unique mangled names per source file (direct renaming, no macros)
 - 2026-02-07: Added --compile flag for compiling and linking split files
 - 2026-02-07: Initial implementation

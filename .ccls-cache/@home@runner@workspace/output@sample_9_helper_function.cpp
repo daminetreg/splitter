@@ -4,6 +4,6 @@
 
 #include "sample_preamble.h"
 
-void helper_function() {
+void __static_sample__helper_function() {
     std::cout << "This is a helper" << std::endl;
 }

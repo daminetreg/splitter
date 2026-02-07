@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Add: " << math::add(3, 4) << std::endl;
     std::cout << "Max: " << maximum(10, 20) << std::endl;
 
-    helper_function();
+    __static_sample__helper_function();
     calc.reset();
     return 0;
 }
