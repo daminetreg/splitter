@@ -462,16 +462,23 @@ int main(int argc, char* argv[]) {
     std::string preamble = generate_preamble(source, functions, stem);
 
     {
-        std::ofstream ofs(preamble_path);
-        if (!ofs.is_open()) {
-            std::cerr << "Error: cannot write preamble to " << preamble_path << "\n";
-            clang_disposeTranslationUnit(tu);
-            clang_disposeIndex(index);
-            return 1;
+        std::string existing_preamble;
+        if (fs::exists(preamble_path))
+            existing_preamble = read_file(preamble_path);
+        if (existing_preamble != preamble) {
+            std::ofstream ofs(preamble_path);
+            if (!ofs.is_open()) {
+                std::cerr << "Error: cannot write preamble to " << preamble_path << "\n";
+                clang_disposeTranslationUnit(tu);
+                clang_disposeIndex(index);
+                return 1;
+            }
+            ofs << preamble;
+            ofs.close();
+            std::cout << "Generated preamble: " << preamble_path << " (updated)\n";
+        } else {
+            std::cout << "Preamble unchanged: " << preamble_path << "\n";
         }
-        ofs << preamble;
-        ofs.close();
-        std::cout << "Generated preamble: " << preamble_path << "\n";
     }
 
     std::cout << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
@@ -505,7 +512,10 @@ int main(int argc, char* argv[]) {
     };
 
     std::vector<std::string> compilable_files;
+    std::vector<std::string> current_files;
     int file_counter = 0;
+    int written_count = 0;
+    int skipped_count = 0;
     for (const auto& fn : functions) {
         ++file_counter;
 
@@ -516,19 +526,15 @@ int main(int argc, char* argv[]) {
                                    std::to_string(file_counter) + "_" +
                                    safe_name + ".cpp";
         std::string out_path = (fs::path(output_dir) / out_filename).string();
+        current_files.push_back(out_path);
 
-        std::ofstream ofs(out_path);
-        if (!ofs.is_open()) {
-            std::cerr << "Error: cannot write to " << out_path << "\n";
-            continue;
-        }
-
-        ofs << "// Function: " << fn.signature << "\n";
-        ofs << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
+        std::ostringstream content;
+        content << "// Function: " << fn.signature << "\n";
+        content << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
         if (should_keep_in_header(fn))
-            ofs << "// Note: template - kept in preamble header for compilation\n";
-        ofs << "// ---\n\n";
-        ofs << "#include \"" << preamble_filename << "\"\n\n";
+            content << "// Note: template - kept in preamble header for compilation\n";
+        content << "// ---\n\n";
+        content << "#include \"" << preamble_filename << "\"\n\n";
 
         std::string body = fn.body;
         if (fn.is_static) {
@@ -543,12 +549,31 @@ int main(int argc, char* argv[]) {
         body = apply_static_renames(body);
 
         if (!fn.scope_chain.empty()) {
-            ofs << wrap_in_namespaces(body, fn.scope_chain) << "\n";
+            content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
         } else {
-            ofs << body << "\n";
+            content << body << "\n";
         }
 
-        ofs.close();
+        std::string new_content = content.str();
+        bool needs_write = true;
+        if (fs::exists(out_path)) {
+            std::string existing = read_file(out_path);
+            if (existing == new_content)
+                needs_write = false;
+        }
+
+        if (needs_write) {
+            std::ofstream ofs(out_path);
+            if (!ofs.is_open()) {
+                std::cerr << "Error: cannot write to " << out_path << "\n";
+                continue;
+            }
+            ofs << new_content;
+            ofs.close();
+            ++written_count;
+        } else {
+            ++skipped_count;
+        }
 
         bool kept = should_keep_in_header(fn);
         if (!kept)
@@ -556,12 +581,37 @@ int main(int argc, char* argv[]) {
 
         std::cout << "  [" << file_counter << "] " << fn.signature;
         if (kept) std::cout << "  (header-only)";
+        if (!needs_write) std::cout << "  (unchanged)";
         std::cout << "\n";
         std::cout << "      Lines " << fn.start_line << "-" << fn.end_line
                   << " -> " << out_path << "\n";
     }
 
-    std::cout << "\nWrote " << file_counter << " file(s) to " << output_dir << "/\n";
+    int removed_count = 0;
+    for (const auto& entry : fs::directory_iterator(output_dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string path = entry.path().string();
+        std::string fname = entry.path().filename().string();
+        if (fname == preamble_filename) continue;
+        if (fname.size() < 4 || fname.substr(fname.size() - 4) != ".cpp") continue;
+        if (fname.rfind(stem + "_", 0) != 0) continue;
+        if (std::find(current_files.begin(), current_files.end(), path) == current_files.end()) {
+            fs::remove(entry.path());
+            fs::path obj_path = entry.path();
+            obj_path.replace_extension(".o");
+            if (fs::exists(obj_path))
+                fs::remove(obj_path);
+            std::cout << "  Removed stale: " << fname << "\n";
+            ++removed_count;
+        }
+    }
+
+    std::cout << "\n" << file_counter << " function(s): "
+              << written_count << " written, "
+              << skipped_count << " unchanged";
+    if (removed_count > 0)
+        std::cout << ", " << removed_count << " stale removed";
+    std::cout << "\n";
 
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);

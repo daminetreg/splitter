@@ -72,6 +72,21 @@ static std::string cx_to_string(CXString s) {
     return result;
 }
 
+static std::vector<unsigned> build_line_offsets(const std::string& source) {
+    std::vector<unsigned> offsets;
+    offsets.push_back(0);
+    for (unsigned i = 0; i < source.size(); ++i) {
+        if (source[i] == '\n')
+            offsets.push_back(i + 1);
+    }
+    return offsets;
+}
+
+static unsigned offset_to_line(const std::vector<unsigned>& line_offsets, unsigned offset) {
+    auto it = std::upper_bound(line_offsets.begin(), line_offsets.end(), offset);
+    return static_cast<unsigned>(it - line_offsets.begin());
+}
+
 static std::string sanitize_filename(const std::string& name) {
     std::string result;
     for (char c : name) {
@@ -242,7 +257,8 @@ static std::string generate_forward_decl(const FunctionInfo& fn,
 
 static std::string generate_preamble(const std::string& source,
                                      const std::vector<FunctionInfo>& functions,
-                                     const std::string& stem) {
+                                     const std::string& stem,
+                                     const std::string& source_path) {
     struct Range {
         unsigned start, end;
         bool keep;
@@ -254,8 +270,16 @@ static std::string generate_preamble(const std::string& source,
     std::sort(ranges.begin(), ranges.end(),
               [](const Range& a, const Range& b) { return a.start < b.start; });
 
+    auto line_offsets = build_line_offsets(source);
+
     std::string preamble;
     preamble += "#pragma once\n";
+    preamble += "#line 1 \"" + source_path + "\"\n";
+
+    auto ensure_newline = [&preamble]() {
+        if (!preamble.empty() && preamble.back() != '\n')
+            preamble += '\n';
+    };
 
     unsigned pos = 0;
     for (const auto& r : ranges) {
@@ -263,8 +287,14 @@ static std::string generate_preamble(const std::string& source,
             preamble += source.substr(pos, r.start - pos);
         }
         if (r.keep) {
+            ensure_newline();
+            unsigned keep_line = offset_to_line(line_offsets, r.start);
+            preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
             preamble += source.substr(r.start, r.end - r.start);
         }
+        ensure_newline();
+        unsigned resume_line = offset_to_line(line_offsets, r.end);
+        preamble += "#line " + std::to_string(resume_line) + " \"" + source_path + "\"\n";
         pos = r.end;
     }
     if (pos < source.size()) {
@@ -459,7 +489,7 @@ int main(int argc, char* argv[]) {
 
     std::string preamble_filename = stem + "_preamble.h";
     std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
-    std::string preamble = generate_preamble(source, functions, stem);
+    std::string preamble = generate_preamble(source, functions, stem, abs_path);
 
     {
         std::string existing_preamble;
@@ -547,6 +577,10 @@ int main(int argc, char* argv[]) {
             }
         }
         body = apply_static_renames(body);
+
+        std::string line_directive = "#line " + std::to_string(fn.start_line) +
+                                     " \"" + abs_path + "\"\n";
+        body = line_directive + body;
 
         if (!fn.scope_chain.empty()) {
             content << wrap_in_namespaces(body, fn.scope_chain) << "\n";

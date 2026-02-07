@@ -48,13 +48,17 @@ make clean    # removes binary
 - Output files include comments with function signature, source file, and line range
 - Generates a preamble header with declarations for compilable split files
 - Template functions are kept in the preamble header (header-only)
-- Static functions are split normally but renamed via preprocessor macros to avoid linker collisions
+- Static functions are split normally but renamed via direct text replacement to avoid linker collisions
   - Name pattern: `__static_<filestem>__<funcname>` (e.g., `__static_sample__helper_function`)
-  - `#define` in preamble redirects original name to mangled name for all call sites
 - Forward declarations for namespace/free functions are auto-generated
 - Namespace-scoped functions are wrapped in proper namespace blocks in split files
+- `#line` preprocessor directives in both preamble and split files map compiler errors/debug info back to original source locations
+  - Preamble: `#line 1 "original.cpp"` at top, re-syncs after each skipped function body
+  - Split files: `#line <start_line> "original.cpp"` before each function body
+  - Line offset table built via `build_line_offsets()` for efficient offset-to-line conversion
 
 ## Recent Changes
+- 2026-02-07: Preprocessor location maps — `#line` directives in preamble and split files map to original source
 - 2026-02-07: Incremental re-splitting — only writes files that changed or are missing, removes stale files
 - 2026-02-07: Static functions now split with unique mangled names per source file (direct renaming, no macros)
 - 2026-02-07: Added --compile flag for compiling and linking split files
