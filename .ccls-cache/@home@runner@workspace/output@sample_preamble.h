@@ -43,6 +43,8 @@ T maximum(T a, T b) {
 
 
 
+#define helper_function __static_sample__helper_function
+
 namespace math { int add(int, int); }
 namespace math { double multiply(double, double); }
 void helper_function();

@@ -198,7 +198,8 @@ static std::string make_static_mangled_name(const std::string& stem, const std::
     return "__static_" + safe_stem + "__" + name;
 }
 
-static std::string generate_forward_decl(const FunctionInfo& fn) {
+static std::string generate_forward_decl(const FunctionInfo& fn,
+                                          const std::string& stem) {
     bool is_class_method = false;
     for (const auto& entry : fn.scope_chain) {
         if (entry.kind == ScopeKind::Class) {
@@ -221,7 +222,17 @@ static std::string generate_forward_decl(const FunctionInfo& fn) {
 
     if (!fn.return_type.empty())
         decl += fn.return_type + " ";
-    decl += fn.qualified_name + ";";
+
+    if (fn.is_static) {
+        std::string mangled_qname = fn.qualified_name;
+        size_t npos = mangled_qname.find(fn.name);
+        if (npos != std::string::npos)
+            mangled_qname.replace(npos, fn.name.size(),
+                                  make_static_mangled_name(stem, fn.name));
+        decl += mangled_qname + ";";
+    } else {
+        decl += fn.qualified_name + ";";
+    }
 
     for (size_t i = 0; i < ns_names.size(); ++i)
         decl += " }";
@@ -264,16 +275,7 @@ static std::string generate_preamble(const std::string& source,
     for (const auto& fn : functions) {
         if (should_keep_in_header(fn))
             continue;
-        if (fn.is_static) {
-            std::string mangled = make_static_mangled_name(stem, fn.name);
-            preamble += "#define " + fn.name + " " + mangled + "\n";
-        }
-    }
-    preamble += "\n";
-    for (const auto& fn : functions) {
-        if (should_keep_in_header(fn))
-            continue;
-        std::string decl = generate_forward_decl(fn);
+        std::string decl = generate_forward_decl(fn, stem);
         if (!decl.empty())
             preamble += decl + "\n";
     }
@@ -474,6 +476,34 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
+    std::vector<std::pair<std::string, std::string>> static_renames;
+    for (const auto& fn : functions) {
+        if (fn.is_static) {
+            static_renames.emplace_back(fn.name,
+                                        make_static_mangled_name(stem, fn.name));
+        }
+    }
+
+    auto apply_static_renames = [&](std::string text) -> std::string {
+        for (const auto& [orig, mangled] : static_renames) {
+            size_t pos = 0;
+            while ((pos = text.find(orig, pos)) != std::string::npos) {
+                if (pos > 0 && (std::isalnum(static_cast<unsigned char>(text[pos - 1])) || text[pos - 1] == '_')) {
+                    pos += orig.size();
+                    continue;
+                }
+                size_t end = pos + orig.size();
+                if (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_')) {
+                    pos += orig.size();
+                    continue;
+                }
+                text.replace(pos, orig.size(), mangled);
+                pos += mangled.size();
+            }
+        }
+        return text;
+    };
+
     std::vector<std::string> compilable_files;
     int file_counter = 0;
     for (const auto& fn : functions) {
@@ -510,6 +540,7 @@ int main(int argc, char* argv[]) {
                 body.erase(spos, after - spos);
             }
         }
+        body = apply_static_renames(body);
 
         if (!fn.scope_chain.empty()) {
             ofs << wrap_in_namespaces(body, fn.scope_chain) << "\n";
