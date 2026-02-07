@@ -2,6 +2,8 @@
 // Source: test/sample.cpp (lines 59-70)
 // ---
 
+#include "sample_preamble.h"
+
 int main(int argc, char* argv[]) {
     Calculator calc(10);
     calc.add(5);

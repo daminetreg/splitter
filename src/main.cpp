@@ -187,7 +187,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
 }
 
 static bool should_keep_in_header(const FunctionInfo& fn) {
-    return fn.is_template || fn.is_static;
+    return fn.is_template;
 }
 
 static std::string generate_forward_decl(const FunctionInfo& fn) {
@@ -478,14 +478,25 @@ int main(int argc, char* argv[]) {
         ofs << "// Function: " << fn.signature << "\n";
         ofs << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
         if (should_keep_in_header(fn))
-            ofs << "// Note: " << (fn.is_template ? "template" : "static") << " - kept in preamble header for compilation\n";
+            ofs << "// Note: template - kept in preamble header for compilation\n";
         ofs << "// ---\n\n";
         ofs << "#include \"" << preamble_filename << "\"\n\n";
 
+        std::string body = fn.body;
+        if (fn.is_static) {
+            size_t spos = body.find("static");
+            if (spos != std::string::npos) {
+                size_t after = spos + 6;
+                while (after < body.size() && body[after] == ' ')
+                    ++after;
+                body.erase(spos, after - spos);
+            }
+        }
+
         if (!fn.scope_chain.empty()) {
-            ofs << wrap_in_namespaces(fn.body, fn.scope_chain) << "\n";
+            ofs << wrap_in_namespaces(body, fn.scope_chain) << "\n";
         } else {
-            ofs << fn.body << "\n";
+            ofs << body << "\n";
         }
 
         ofs.close();
