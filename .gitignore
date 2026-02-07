@@ -1,0 +1,6 @@
+cpp-splitter
+output/
+test_output/
+*.o
+*.d
+*.dSYM/

@@ -1,0 +1,30 @@
+modules = ["cpp-clang20"]
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+packages = ["libclang", "llvmPackages.libclang"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Build and Run"
+
+[[workflows.workflow]]
+name = "Build and Run"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "make clean && make && echo \"--- Build successful ---\" && echo \"\" && echo \"Usage: ./cpp-splitter <input.cpp> [output_dir]\" && echo \"\" && echo \"--- Running demo with test/sample.cpp ---\" && rm -rf output && ./cpp-splitter test/sample.cpp output"
+
+[workflows.workflow.metadata]
+outputType = "console"
