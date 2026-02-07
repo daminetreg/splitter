@@ -45,5 +45,5 @@ T maximum(T a, T b) {
 
 namespace math { int add(int, int); }
 namespace math { double multiply(double, double); }
-static void helper_function();
+void helper_function();
 int main(int, char **);

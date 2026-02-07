@@ -47,10 +47,14 @@ make clean    # removes binary
 - Recurses into namespaces, classes, structs, and class templates
 - Output files include comments with function signature, source file, and line range
 - Generates a preamble header with declarations for compilable split files
-- Template and static functions are kept in the preamble header (header-only)
+- Template functions are kept in the preamble header (header-only)
+- Static functions are split normally but renamed via preprocessor macros to avoid linker collisions
+  - Name pattern: `__static_<filestem>__<funcname>` (e.g., `__static_sample__helper_function`)
+  - `#define` in preamble redirects original name to mangled name for all call sites
 - Forward declarations for namespace/free functions are auto-generated
 - Namespace-scoped functions are wrapped in proper namespace blocks in split files
 
 ## Recent Changes
+- 2026-02-07: Static functions now split with unique mangled names per source file
 - 2026-02-07: Added --compile flag for compiling and linking split files
 - 2026-02-07: Initial implementation

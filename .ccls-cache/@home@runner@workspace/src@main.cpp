@@ -211,8 +211,6 @@ static std::string generate_forward_decl(const FunctionInfo& fn) {
     for (const auto& ns : ns_names)
         decl += "namespace " + ns + " { ";
 
-    if (fn.is_static)
-        decl += "static ";
     if (!fn.return_type.empty())
         decl += fn.return_type + " ";
     decl += fn.qualified_name + ";";
@@ -484,10 +482,21 @@ int main(int argc, char* argv[]) {
         ofs << "// ---\n\n";
         ofs << "#include \"" << preamble_filename << "\"\n\n";
 
+        std::string body = fn.body;
+        if (fn.is_static) {
+            size_t spos = body.find("static");
+            if (spos != std::string::npos) {
+                size_t after = spos + 6;
+                while (after < body.size() && body[after] == ' ')
+                    ++after;
+                body.erase(spos, after - spos);
+            }
+        }
+
         if (!fn.scope_chain.empty()) {
-            ofs << wrap_in_namespaces(fn.body, fn.scope_chain) << "\n";
+            ofs << wrap_in_namespaces(body, fn.scope_chain) << "\n";
         } else {
-            ofs << fn.body << "\n";
+            ofs << body << "\n";
         }
 
         ofs.close();

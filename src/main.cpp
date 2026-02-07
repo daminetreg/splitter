@@ -190,6 +190,14 @@ static bool should_keep_in_header(const FunctionInfo& fn) {
     return fn.is_template;
 }
 
+static std::string make_static_mangled_name(const std::string& stem, const std::string& name) {
+    std::string safe_stem;
+    for (char c : stem) {
+        safe_stem += (std::isalnum(static_cast<unsigned char>(c)) ? c : '_');
+    }
+    return "__static_" + safe_stem + "__" + name;
+}
+
 static std::string generate_forward_decl(const FunctionInfo& fn) {
     bool is_class_method = false;
     for (const auto& entry : fn.scope_chain) {
@@ -222,7 +230,8 @@ static std::string generate_forward_decl(const FunctionInfo& fn) {
 }
 
 static std::string generate_preamble(const std::string& source,
-                                     const std::vector<FunctionInfo>& functions) {
+                                     const std::vector<FunctionInfo>& functions,
+                                     const std::string& stem) {
     struct Range {
         unsigned start, end;
         bool keep;
@@ -251,6 +260,15 @@ static std::string generate_preamble(const std::string& source,
         preamble += source.substr(pos);
     }
 
+    preamble += "\n";
+    for (const auto& fn : functions) {
+        if (should_keep_in_header(fn))
+            continue;
+        if (fn.is_static) {
+            std::string mangled = make_static_mangled_name(stem, fn.name);
+            preamble += "#define " + fn.name + " " + mangled + "\n";
+        }
+    }
     preamble += "\n";
     for (const auto& fn : functions) {
         if (should_keep_in_header(fn))
@@ -439,7 +457,7 @@ int main(int argc, char* argv[]) {
 
     std::string preamble_filename = stem + "_preamble.h";
     std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
-    std::string preamble = generate_preamble(source, functions);
+    std::string preamble = generate_preamble(source, functions, stem);
 
     {
         std::ofstream ofs(preamble_path);
