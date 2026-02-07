@@ -1,14 +1,27 @@
 # C++ Function Splitter
 
 ## Overview
-A command-line tool that parses a C++ source file using the libclang AST and generates one output file per function/method implementation body.
+A command-line tool that parses a C++ source file using the libclang AST and generates one output file per function/method implementation body. Supports compiling and linking the split files back into a working binary.
 
 ## How to Use
 ```
-./cpp-splitter <input.cpp> [output_dir]
+./cpp-splitter <input.cpp> [output_dir] [options] [-- <clang_flags>...]
 ```
 - `input.cpp` - the C++ source file to split
 - `output_dir` - directory for output files (default: `./output`)
+
+### Options
+- `--compile` - compile and link the split files into a binary
+- `-o <binary>` - output binary name (default: `<stem>.out`)
+- `--cxx <compiler>` - C++ compiler to use (default: `g++`)
+- `-- <flags>` - extra flags passed to clang parser (e.g., `-I/path/to/include`)
+
+### Examples
+```
+./cpp-splitter src/app.cpp output                          # split only
+./cpp-splitter src/app.cpp output --compile -o myapp       # split + compile + link
+./cpp-splitter src/app.cpp output --compile -- -std=c++20  # with extra clang flags
+```
 
 ## Project Architecture
 ```
@@ -33,6 +46,11 @@ make clean    # removes binary
 - Handles: free functions, class methods, constructors, destructors, function templates
 - Recurses into namespaces, classes, structs, and class templates
 - Output files include comments with function signature, source file, and line range
+- Generates a preamble header with declarations for compilable split files
+- Template and static functions are kept in the preamble header (header-only)
+- Forward declarations for namespace/free functions are auto-generated
+- Namespace-scoped functions are wrapped in proper namespace blocks in split files
 
 ## Recent Changes
+- 2026-02-07: Added --compile flag for compiling and linking split files
 - 2026-02-07: Initial implementation

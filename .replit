@@ -22,9 +22,9 @@ args = "Build and Run"
 name = "Build and Run"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "make clean && make && echo \"--- Build successful ---\" && echo \"\" && echo \"Usage: ./cpp-splitter <input.cpp> [output_dir]\" && echo \"\" && echo \"--- Running demo with test/sample.cpp ---\" && rm -rf output && ./cpp-splitter test/sample.cpp output"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "make clean && make && echo \"--- Build successful ---\" && echo \"\" && echo \"Usage: ./cpp-splitter <input.cpp> [output_dir] [--compile] [-o binary] [-- <clang_flags>]\" && echo \"\" && echo \"--- Demo: Split, compile and run test/sample.cpp ---\" && rm -rf output && ./cpp-splitter test/sample.cpp output --compile -o sample_app && echo \"\" && echo \"--- Running the compiled binary ---\" && ./sample_app"
