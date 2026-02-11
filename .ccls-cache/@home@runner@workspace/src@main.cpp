@@ -1,13 +1,18 @@
 #include <clang-c/Index.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <boost/process.hpp>
 
 namespace fs = std::filesystem;
 
@@ -337,6 +342,8 @@ static std::string wrap_in_namespaces(const std::string& body,
     return result;
 }
 
+namespace bp = boost::process;
+
 static int run_command(const std::string& cmd) {
     std::cout << "  $ " << cmd << "\n";
     int ret = std::system(cmd.c_str());
@@ -346,6 +353,85 @@ static int run_command(const std::string& cmd) {
 static int run_command_quiet(const std::string& cmd) {
     int ret = std::system(cmd.c_str());
     return WEXITSTATUS(ret);
+}
+
+struct CompileJob {
+    std::string cmd;
+    std::string source_file;
+    std::string obj_file;
+};
+
+struct CompileResult {
+    int exit_code;
+    std::string source_file;
+    std::string stderr_output;
+};
+
+static unsigned get_parallelism() {
+    unsigned hw = std::thread::hardware_concurrency();
+    return hw > 0 ? hw : 4;
+}
+
+static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>& jobs,
+                                                    bool verbose) {
+    std::vector<CompileResult> results(jobs.size());
+    std::mutex output_mtx;
+    std::vector<std::thread> threads;
+    std::atomic<size_t> next_job{0};
+
+    unsigned num_threads = std::min(static_cast<unsigned>(jobs.size()), get_parallelism());
+
+    if (verbose) {
+        std::lock_guard<std::mutex> lock(output_mtx);
+        std::cout << "  [parallel: " << num_threads << " threads, "
+                  << jobs.size() << " jobs]\n\n";
+    }
+
+    for (unsigned t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&]() {
+            while (true) {
+                size_t idx = next_job.fetch_add(1);
+                if (idx >= jobs.size()) break;
+
+                const auto& job = jobs[idx];
+                auto& res = results[idx];
+                res.source_file = job.source_file;
+
+                try {
+                    bp::ipstream err_stream;
+                    bp::child proc("/bin/sh", bp::args({"-c", job.cmd}),
+                                   bp::std_out > bp::null,
+                                   bp::std_err > err_stream);
+
+                    std::string stderr_buf;
+                    std::string line;
+                    while (std::getline(err_stream, line)) {
+                        stderr_buf += line + "\n";
+                    }
+
+                    proc.wait();
+                    res.exit_code = proc.exit_code();
+                    res.stderr_output = stderr_buf;
+                } catch (const std::exception& e) {
+                    res.exit_code = 1;
+                    res.stderr_output = std::string("boost::process error: ") + e.what() + "\n";
+                }
+
+                if (verbose) {
+                    std::lock_guard<std::mutex> lock(output_mtx);
+                    std::cout << "  $ " << job.cmd << "\n";
+                    if (!res.stderr_output.empty()) {
+                        std::cerr << res.stderr_output;
+                    }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    return results;
 }
 
 static bool is_source_file(const std::string& path) {
@@ -701,9 +787,10 @@ static int run_as_launcher(int argc, char* argv[]) {
     }
 
     std::vector<std::string> obj_files;
-    bool first_file = true;
+    std::vector<CompileJob> parallel_jobs;
 
-    for (const auto& cpp : sr.compilable_files) {
+    for (size_t fi = 0; fi < sr.compilable_files.size(); ++fi) {
+        const auto& cpp = sr.compilable_files[fi];
         std::string obj = cpp.substr(0, cpp.size() - 4) + ".o";
 
         std::string cmd = shell_quote(compiler);
@@ -713,24 +800,39 @@ static int run_as_launcher(int argc, char* argv[]) {
 
         cmd += " -I" + shell_quote(split_dir);
 
-        if (first_file && (has_md || has_mmd)) {
+        if (fi == 0 && (has_md || has_mmd)) {
             cmd += has_mmd ? " -MMD" : " -MD";
             if (!mf_path.empty())
                 cmd += " -MF " + shell_quote(mf_path);
             std::string mt = mt_target.empty() ? output_file : mt_target;
             if (!mt.empty())
                 cmd += " -MT " + shell_quote(mt);
-            first_file = false;
         }
 
         cmd += " -c -o " + shell_quote(obj) + " " + shell_quote(cpp);
 
-        int ret = run_command_quiet(cmd);
-        if (ret != 0) {
-            std::cerr << "cpp-splitter: compilation failed for split file: " << cpp << "\n";
-            return ret;
+        if (fi == 0 && (has_md || has_mmd)) {
+            int ret = run_command_quiet(cmd);
+            if (ret != 0) {
+                std::cerr << "cpp-splitter: compilation failed for split file: " << cpp << "\n";
+                return ret;
+            }
+        } else {
+            parallel_jobs.push_back({cmd, cpp, obj});
         }
+
         obj_files.push_back(obj);
+    }
+
+    if (!parallel_jobs.empty()) {
+        auto results = compile_parallel(parallel_jobs, false);
+        for (const auto& r : results) {
+            if (r.exit_code != 0) {
+                std::cerr << "cpp-splitter: compilation failed for split file: " << r.source_file << "\n";
+                if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
+                return 1;
+            }
+        }
     }
 
     if (output_file.empty())
@@ -849,8 +951,8 @@ int main(int argc, char* argv[]) {
     if (do_compile) {
         std::cout << "\n--- Compiling split files ---\n\n";
 
+        std::vector<CompileJob> jobs;
         std::vector<std::string> obj_files;
-        bool compile_ok = true;
 
         for (const auto& cpp_file : sr.compilable_files) {
             std::string obj_file = cpp_file.substr(0, cpp_file.size() - 4) + ".o";
@@ -862,13 +964,18 @@ int main(int argc, char* argv[]) {
             for (const auto& f : extra_flags)
                 cmd += " " + f;
 
-            int ret = run_command(cmd);
-            if (ret != 0) {
-                std::cerr << "Error: compilation failed for " << cpp_file << "\n";
-                compile_ok = false;
-                break;
-            }
+            jobs.push_back({cmd, cpp_file, obj_file});
             obj_files.push_back(obj_file);
+        }
+
+        auto results = compile_parallel(jobs, true);
+        bool compile_ok = true;
+        for (const auto& r : results) {
+            if (r.exit_code != 0) {
+                std::cerr << "Error: compilation failed for " << r.source_file << "\n";
+                if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
+                compile_ok = false;
+            }
         }
 
         if (compile_ok) {

@@ -56,6 +56,7 @@ test/sample.cpp    - Sample C++ file for testing
 - AST visitor: `visitor()` extracts FunctionInfo from clang AST
 - Preamble generation: `generate_preamble()` with `#line` directives
 - Split file writing: incremental, with `#line` directives
+- `compile_parallel()` - parallel compilation using Boost.Process + std::thread
 - `do_split()` - core splitting logic (extracted for reuse)
 - `run_as_launcher()` - compiler launcher mode
 - `main()` - mode detection and dispatch
@@ -69,6 +70,7 @@ make clean    # removes binary
 ## Dependencies
 - C++ compiler (g++)
 - libclang (clang-19.1.7 from Nix)
+- Boost 1.87.0 (Boost.Process for parallel compilation)
 - C++17 standard
 - ld (for relocatable linking in launcher mode)
 
@@ -90,8 +92,14 @@ make clean    # removes binary
 - Launcher mode detects source files by extension (.cpp, .cc, .cxx, .C, .c++, .cp, .c)
 - Shell quoting via `shell_quote()` for safe command construction
 - Single .o files skip `ld -r` and use direct copy for efficiency
+- Parallel compilation uses Boost.Process (bp::child) for process spawning and std::thread for worker pool
+  - Work-stealing pattern: atomic job counter, threads grab next job until exhausted
+  - Thread count = min(num_jobs, hardware_concurrency)
+  - stderr captured per-process for clean error reporting
+  - In launcher mode with dep flags, first file runs sequentially (generates .d file), rest run in parallel
 
 ## Recent Changes
+- 2026-02-11: Parallel compilation — split files compiled concurrently using Boost.Process + std::thread
 - 2026-02-11: Compiler launcher mode — acts as CMAKE_CXX_COMPILER_LAUNCHER, splits + compiles + combines via ld -r
 - 2026-02-11: Refactored core splitting into reusable `do_split()` function
 - 2026-02-07: Preprocessor location maps — `#line` directives in preamble and split files map to original source
