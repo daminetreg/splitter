@@ -343,90 +343,61 @@ static int run_command(const std::string& cmd) {
     return WEXITSTATUS(ret);
 }
 
-static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " <input.cpp> [output_dir] [options] [-- <clang_flags>...]\n"
-              << "\n"
-              << "Parses the input .cpp file using libclang AST and generates\n"
-              << "one file per function/method implementation.\n"
-              << "\n"
-              << "Arguments:\n"
-              << "  input.cpp      The C++ source file to split\n"
-              << "  output_dir     Directory for output files (default: ./output)\n"
-              << "\n"
-              << "Options:\n"
-              << "  --compile      Compile and link the split files into a binary\n"
-              << "  -o <binary>    Output binary name (default: <stem>.out)\n"
-              << "  --cxx <comp>   C++ compiler to use (default: g++)\n"
-              << "  -- <flags>     Extra flags passed to clang parser\n"
-              << "\n"
-              << "Examples:\n"
-              << "  " << prog << " src/app.cpp output\n"
-              << "  " << prog << " src/app.cpp output --compile -o myapp\n"
-              << "  " << prog << " src/app.cpp output --compile -- -I/usr/include\n";
+static int run_command_quiet(const std::string& cmd) {
+    int ret = std::system(cmd.c_str());
+    return WEXITSTATUS(ret);
 }
 
-int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        print_usage(argv[0]);
-        return 1;
+static bool is_source_file(const std::string& path) {
+    static const char* exts[] = {".cpp", ".cc", ".cxx", ".C", ".c++", ".cp", ".c"};
+    for (const char* ext : exts) {
+        size_t elen = std::strlen(ext);
+        if (path.size() >= elen && path.compare(path.size() - elen, elen, ext) == 0)
+            return true;
     }
+    return false;
+}
 
-    std::string input_path = argv[1];
-    std::string output_dir = "output";
-    std::vector<std::string> extra_flags;
-    bool do_compile = false;
-    std::string output_binary;
-    std::string cxx_compiler = "g++";
-
-    int i = 2;
-    if (i < argc && argv[i][0] != '-') {
-        output_dir = argv[i];
-        ++i;
+static std::string shell_quote(const std::string& s) {
+    if (s.find_first_of(" \t\n'\"\\$`!#&|;(){}[]<>?*~") == std::string::npos)
+        return s;
+    std::string result = "'";
+    for (char c : s) {
+        if (c == '\'')
+            result += "'\\''";
+        else
+            result += c;
     }
+    result += "'";
+    return result;
+}
 
-    while (i < argc) {
-        std::string arg = argv[i];
-        if (arg == "--") {
-            ++i;
-            for (; i < argc; ++i)
-                extra_flags.emplace_back(argv[i]);
-            break;
-        } else if (arg == "--compile") {
-            do_compile = true;
-            ++i;
-        } else if (arg == "-o" && i + 1 < argc) {
-            output_binary = argv[i + 1];
-            i += 2;
-        } else if (arg == "--cxx" && i + 1 < argc) {
-            cxx_compiler = argv[i + 1];
-            i += 2;
-        } else {
-            std::cerr << "Unknown option: " << arg << "\n";
-            print_usage(argv[0]);
-            return 1;
-        }
-    }
+struct SplitResult {
+    std::vector<std::string> compilable_files;
+    std::string preamble_filename;
+    bool success;
+};
 
-    if (!fs::exists(input_path)) {
-        std::cerr << "Error: input file does not exist: " << input_path << "\n";
-        return 1;
-    }
+static SplitResult do_split(const std::string& input_path,
+                            const std::string& output_dir,
+                            const std::vector<std::string>& extra_flags,
+                            bool verbose) {
+    SplitResult result;
+    result.success = false;
 
     std::string abs_path = fs::absolute(input_path).string();
     std::string source = read_file(abs_path);
     if (source.empty()) {
-        std::cerr << "Error: could not read file or file is empty\n";
-        return 1;
+        if (verbose) std::cerr << "Error: could not read file or file is empty\n";
+        return result;
     }
 
     std::string stem = fs::path(input_path).stem().string();
-    if (output_binary.empty())
-        output_binary = stem + ".out";
 
     CXIndex index = clang_createIndex(0, 0);
     if (!index) {
-        std::cerr << "Error: failed to create clang index\n";
-        return 1;
+        if (verbose) std::cerr << "Error: failed to create clang index\n";
+        return result;
     }
 
     std::vector<std::string> all_flags = {"-std=c++17", "-fsyntax-only", "-Wno-everything"};
@@ -448,26 +419,27 @@ int main(int argc, char* argv[]) {
         &tu);
 
     if (err != CXError_Success || !tu) {
-        std::cerr << "Error: failed to parse translation unit (code: " << err << ")\n";
+        if (verbose) std::cerr << "Error: failed to parse translation unit (code: " << err << ")\n";
         clang_disposeIndex(index);
-        return 1;
+        return result;
     }
 
     unsigned num_diag = clang_getNumDiagnostics(tu);
     unsigned error_count = 0;
-    for (unsigned i = 0; i < num_diag; ++i) {
-        CXDiagnostic diag = clang_getDiagnostic(tu, i);
+    for (unsigned di = 0; di < num_diag; ++di) {
+        CXDiagnostic diag = clang_getDiagnostic(tu, di);
         CXDiagnosticSeverity sev = clang_getDiagnosticSeverity(diag);
         if (sev >= CXDiagnostic_Error) {
-            std::cerr << "Parse error: "
-                      << cx_to_string(clang_formatDiagnostic(diag, CXDiagnostic_DisplaySourceLocation))
-                      << "\n";
+            if (verbose)
+                std::cerr << "Parse error: "
+                          << cx_to_string(clang_formatDiagnostic(diag, CXDiagnostic_DisplaySourceLocation))
+                          << "\n";
             ++error_count;
         }
         clang_disposeDiagnostic(diag);
     }
 
-    if (error_count > 0) {
+    if (error_count > 0 && verbose) {
         std::cerr << "Warning: " << error_count << " parse error(s) found. "
                   << "Output may be incomplete.\n";
     }
@@ -479,15 +451,17 @@ int main(int argc, char* argv[]) {
     clang_visitChildren(root, visitor, &vd);
 
     if (functions.empty()) {
-        std::cout << "No function definitions found in " << input_path << "\n";
+        if (verbose) std::cout << "No function definitions found in " << input_path << "\n";
         clang_disposeTranslationUnit(tu);
         clang_disposeIndex(index);
-        return 0;
+        result.success = true;
+        return result;
     }
 
     fs::create_directories(output_dir);
 
     std::string preamble_filename = stem + "_preamble.h";
+    result.preamble_filename = preamble_filename;
     std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
     std::string preamble = generate_preamble(source, functions, stem, abs_path);
 
@@ -501,17 +475,17 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: cannot write preamble to " << preamble_path << "\n";
                 clang_disposeTranslationUnit(tu);
                 clang_disposeIndex(index);
-                return 1;
+                return result;
             }
             ofs << preamble;
             ofs.close();
-            std::cout << "Generated preamble: " << preamble_path << " (updated)\n";
+            if (verbose) std::cout << "Generated preamble: " << preamble_path << " (updated)\n";
         } else {
-            std::cout << "Preamble unchanged: " << preamble_path << "\n";
+            if (verbose) std::cout << "Preamble unchanged: " << preamble_path << "\n";
         }
     }
 
-    std::cout << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
+    if (verbose) std::cout << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
     std::vector<std::pair<std::string, std::string>> static_renames;
     for (const auto& fn : functions) {
@@ -541,7 +515,6 @@ int main(int argc, char* argv[]) {
         return text;
     };
 
-    std::vector<std::string> compilable_files;
     std::vector<std::string> current_files;
     int file_counter = 0;
     int written_count = 0;
@@ -611,14 +584,16 @@ int main(int argc, char* argv[]) {
 
         bool kept = should_keep_in_header(fn);
         if (!kept)
-            compilable_files.push_back(out_path);
+            result.compilable_files.push_back(out_path);
 
-        std::cout << "  [" << file_counter << "] " << fn.signature;
-        if (kept) std::cout << "  (header-only)";
-        if (!needs_write) std::cout << "  (unchanged)";
-        std::cout << "\n";
-        std::cout << "      Lines " << fn.start_line << "-" << fn.end_line
-                  << " -> " << out_path << "\n";
+        if (verbose) {
+            std::cout << "  [" << file_counter << "] " << fn.signature;
+            if (kept) std::cout << "  (header-only)";
+            if (!needs_write) std::cout << "  (unchanged)";
+            std::cout << "\n";
+            std::cout << "      Lines " << fn.start_line << "-" << fn.end_line
+                      << " -> " << out_path << "\n";
+        }
     }
 
     int removed_count = 0;
@@ -635,20 +610,241 @@ int main(int argc, char* argv[]) {
             obj_path.replace_extension(".o");
             if (fs::exists(obj_path))
                 fs::remove(obj_path);
-            std::cout << "  Removed stale: " << fname << "\n";
+            if (verbose) std::cout << "  Removed stale: " << fname << "\n";
             ++removed_count;
         }
     }
 
-    std::cout << "\n" << file_counter << " function(s): "
-              << written_count << " written, "
-              << skipped_count << " unchanged";
-    if (removed_count > 0)
-        std::cout << ", " << removed_count << " stale removed";
-    std::cout << "\n";
+    if (verbose) {
+        std::cout << "\n" << file_counter << " function(s): "
+                  << written_count << " written, "
+                  << skipped_count << " unchanged";
+        if (removed_count > 0)
+            std::cout << ", " << removed_count << " stale removed";
+        std::cout << "\n";
+    }
 
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);
+
+    result.success = true;
+    return result;
+}
+
+static int run_as_launcher(int argc, char* argv[]) {
+    std::string compiler = argv[1];
+
+    std::string input_file;
+    std::string output_file;
+    bool has_c_flag = false;
+
+    bool has_md = false;
+    bool has_mmd = false;
+    std::string mf_path;
+    std::string mt_target;
+
+    std::vector<std::string> other_flags;
+
+    for (int i = 2; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-c") {
+            has_c_flag = true;
+        } else if (arg == "-o" && i + 1 < argc) {
+            output_file = argv[++i];
+        } else if (arg == "-MD") {
+            has_md = true;
+        } else if (arg == "-MMD") {
+            has_mmd = true;
+        } else if (arg == "-MF" && i + 1 < argc) {
+            mf_path = argv[++i];
+        } else if (arg == "-MT" && i + 1 < argc) {
+            mt_target = argv[++i];
+        } else if (arg == "-MQ" && i + 1 < argc) {
+            ++i;
+        } else if (is_source_file(arg)) {
+            input_file = arg;
+        } else {
+            other_flags.push_back(arg);
+        }
+    }
+
+    if (!has_c_flag || input_file.empty()) {
+        std::string cmd;
+        for (int i = 1; i < argc; i++) {
+            if (i > 1) cmd += " ";
+            cmd += shell_quote(argv[i]);
+        }
+        return run_command_quiet(cmd);
+    }
+
+    if (!fs::exists(input_file)) {
+        std::cerr << "cpp-splitter: source file not found: " << input_file << "\n";
+        return 1;
+    }
+
+    std::string split_dir;
+    if (!output_file.empty()) {
+        split_dir = output_file + ".split";
+    } else {
+        split_dir = fs::path(input_file).stem().string() + ".split";
+    }
+
+    auto sr = do_split(input_file, split_dir, other_flags, false);
+
+    if (!sr.success || sr.compilable_files.empty()) {
+        std::string cmd;
+        for (int i = 1; i < argc; i++) {
+            if (i > 1) cmd += " ";
+            cmd += shell_quote(argv[i]);
+        }
+        return run_command_quiet(cmd);
+    }
+
+    std::vector<std::string> obj_files;
+    bool first_file = true;
+
+    for (const auto& cpp : sr.compilable_files) {
+        std::string obj = cpp.substr(0, cpp.size() - 4) + ".o";
+
+        std::string cmd = shell_quote(compiler);
+
+        for (const auto& f : other_flags)
+            cmd += " " + shell_quote(f);
+
+        cmd += " -I" + shell_quote(split_dir);
+
+        if (first_file && (has_md || has_mmd)) {
+            cmd += has_mmd ? " -MMD" : " -MD";
+            if (!mf_path.empty())
+                cmd += " -MF " + shell_quote(mf_path);
+            std::string mt = mt_target.empty() ? output_file : mt_target;
+            if (!mt.empty())
+                cmd += " -MT " + shell_quote(mt);
+            first_file = false;
+        }
+
+        cmd += " -c -o " + shell_quote(obj) + " " + shell_quote(cpp);
+
+        int ret = run_command_quiet(cmd);
+        if (ret != 0) {
+            std::cerr << "cpp-splitter: compilation failed for split file: " << cpp << "\n";
+            return ret;
+        }
+        obj_files.push_back(obj);
+    }
+
+    if (output_file.empty())
+        output_file = fs::path(input_file).stem().string() + ".o";
+
+    if (obj_files.size() == 1) {
+        fs::copy_file(obj_files[0], output_file, fs::copy_options::overwrite_existing);
+    } else {
+        std::string cmd = "ld -r -o " + shell_quote(output_file);
+        for (const auto& obj : obj_files)
+            cmd += " " + shell_quote(obj);
+        int ret = run_command_quiet(cmd);
+        if (ret != 0) {
+            std::cerr << "cpp-splitter: relocatable link failed\n";
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+static void print_usage(const char* prog) {
+    std::cerr << "Usage: " << prog << " <input.cpp> [output_dir] [options] [-- <clang_flags>...]\n"
+              << "       " << prog << " <compiler> [compiler_flags...] -c -o <output.o> <source.cpp>\n"
+              << "\n"
+              << "Mode 1 - Split (and optionally compile):\n"
+              << "  Parses the input .cpp file using libclang AST and generates\n"
+              << "  one file per function/method implementation.\n"
+              << "\n"
+              << "  Arguments:\n"
+              << "    input.cpp      The C++ source file to split\n"
+              << "    output_dir     Directory for output files (default: ./output)\n"
+              << "\n"
+              << "  Options:\n"
+              << "    --compile      Compile and link the split files into a binary\n"
+              << "    -o <binary>    Output binary name (default: <stem>.out)\n"
+              << "    --cxx <comp>   C++ compiler to use (default: g++)\n"
+              << "    -- <flags>     Extra flags passed to clang parser\n"
+              << "\n"
+              << "Mode 2 - Compiler Launcher (CMAKE_CXX_COMPILER_LAUNCHER):\n"
+              << "  When the first argument is not a source file, acts as a\n"
+              << "  compiler wrapper. Splits the source, compiles each piece,\n"
+              << "  and combines them into a single .o via relocatable linking.\n"
+              << "\n"
+              << "  Non-compilation commands are passed through transparently.\n"
+              << "\n"
+              << "  CMake usage:\n"
+              << "    cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/" << prog << " ..\n"
+              << "\n"
+              << "Examples:\n"
+              << "  " << prog << " src/app.cpp output                          # split only\n"
+              << "  " << prog << " src/app.cpp output --compile -o myapp       # split + compile + link\n"
+              << "  " << prog << " g++ -std=c++17 -c -o foo.o foo.cpp          # launcher mode\n";
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    std::string first_arg = argv[1];
+    if (!first_arg.empty() && first_arg[0] != '-' && !is_source_file(first_arg)) {
+        return run_as_launcher(argc, argv);
+    }
+
+    std::string input_path = argv[1];
+    std::string output_dir = "output";
+    std::vector<std::string> extra_flags;
+    bool do_compile = false;
+    std::string output_binary;
+    std::string cxx_compiler = "g++";
+
+    int i = 2;
+    if (i < argc && argv[i][0] != '-') {
+        output_dir = argv[i];
+        ++i;
+    }
+
+    while (i < argc) {
+        std::string arg = argv[i];
+        if (arg == "--") {
+            ++i;
+            for (; i < argc; ++i)
+                extra_flags.emplace_back(argv[i]);
+            break;
+        } else if (arg == "--compile") {
+            do_compile = true;
+            ++i;
+        } else if (arg == "-o" && i + 1 < argc) {
+            output_binary = argv[i + 1];
+            i += 2;
+        } else if (arg == "--cxx" && i + 1 < argc) {
+            cxx_compiler = argv[i + 1];
+            i += 2;
+        } else {
+            std::cerr << "Unknown option: " << arg << "\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (!fs::exists(input_path)) {
+        std::cerr << "Error: input file does not exist: " << input_path << "\n";
+        return 1;
+    }
+
+    std::string stem = fs::path(input_path).stem().string();
+    if (output_binary.empty())
+        output_binary = stem + ".out";
+
+    auto sr = do_split(input_path, output_dir, extra_flags, true);
+    if (!sr.success) return 1;
+    if (sr.compilable_files.empty()) return 0;
 
     if (do_compile) {
         std::cout << "\n--- Compiling split files ---\n\n";
@@ -656,7 +852,7 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> obj_files;
         bool compile_ok = true;
 
-        for (const auto& cpp_file : compilable_files) {
+        for (const auto& cpp_file : sr.compilable_files) {
             std::string obj_file = cpp_file.substr(0, cpp_file.size() - 4) + ".o";
             std::string cmd = cxx_compiler + " -std=c++17 -c"
                               " -I" + output_dir +
