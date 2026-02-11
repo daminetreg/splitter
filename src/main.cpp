@@ -435,6 +435,17 @@ static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>
     return results;
 }
 
+static bool needs_recompile(const std::string& cpp_file, const std::string& obj_file,
+                            const std::string& preamble_file = "") {
+    if (!fs::exists(obj_file)) return true;
+    auto obj_time = fs::last_write_time(obj_file);
+    if (fs::last_write_time(cpp_file) > obj_time) return true;
+    if (!preamble_file.empty() && fs::exists(preamble_file)) {
+        if (fs::last_write_time(preamble_file) > obj_time) return true;
+    }
+    return false;
+}
+
 static bool is_source_file(const std::string& path) {
     static const char* exts[] = {".cpp", ".cc", ".cxx", ".C", ".c++", ".cp", ".c"};
     for (const char* ext : exts) {
@@ -803,10 +814,18 @@ static int run_as_launcher(int argc, char* argv[]) {
 
     std::vector<std::string> obj_files;
     std::vector<CompileJob> parallel_jobs;
+    int launcher_skipped = 0;
 
     for (size_t fi = 0; fi < sr.compilable_files.size(); ++fi) {
         const auto& cpp = sr.compilable_files[fi];
         std::string obj = cpp.substr(0, cpp.size() - 4) + ".o";
+        obj_files.push_back(obj);
+
+        if (!needs_recompile(cpp, obj, sr.preamble_filename)) {
+            if (verbose) std::cerr << "[cpp-splitter] up-to-date: " << cpp << "\n";
+            ++launcher_skipped;
+            continue;
+        }
 
         std::string cmd = shell_quote(compiler);
 
@@ -836,8 +855,6 @@ static int run_as_launcher(int argc, char* argv[]) {
         } else {
             parallel_jobs.push_back({cmd, cpp, obj});
         }
-
-        obj_files.push_back(obj);
     }
 
     if (!parallel_jobs.empty()) {
@@ -855,7 +872,11 @@ static int run_as_launcher(int argc, char* argv[]) {
     if (output_file.empty())
         output_file = fs::path(input_file).stem().string() + ".o";
 
-    if (obj_files.size() == 1) {
+    bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !fs::exists(output_file);
+
+    if (!need_link) {
+        if (verbose) std::cerr << "[cpp-splitter] all up-to-date, skipping link: " << output_file << "\n";
+    } else if (obj_files.size() == 1) {
         if (verbose) std::cerr << "[cpp-splitter] single .o, copying " << obj_files[0] << " -> " << output_file << "\n";
         fs::copy_file(obj_files[0], output_file, fs::copy_options::overwrite_existing);
     } else {
@@ -973,9 +994,18 @@ int main(int argc, char* argv[]) {
 
         std::vector<CompileJob> jobs;
         std::vector<std::string> obj_files;
+        int skipped = 0;
 
         for (const auto& cpp_file : sr.compilable_files) {
             std::string obj_file = cpp_file.substr(0, cpp_file.size() - 4) + ".o";
+            obj_files.push_back(obj_file);
+
+            if (!needs_recompile(cpp_file, obj_file, sr.preamble_filename)) {
+                std::cout << "  (up-to-date) " << cpp_file << "\n";
+                ++skipped;
+                continue;
+            }
+
             std::string cmd = cxx_compiler + " -std=c++17 -c"
                               " -I" + output_dir +
                               " -o " + obj_file +
@@ -985,16 +1015,21 @@ int main(int argc, char* argv[]) {
                 cmd += " " + f;
 
             jobs.push_back({cmd, cpp_file, obj_file});
-            obj_files.push_back(obj_file);
         }
 
-        auto results = compile_parallel(jobs, true);
         bool compile_ok = true;
-        for (const auto& r : results) {
-            if (r.exit_code != 0) {
-                std::cerr << "Error: compilation failed for " << r.source_file << "\n";
-                if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
-                compile_ok = false;
+        if (jobs.empty()) {
+            std::cout << "\n  All " << skipped << " file(s) up-to-date, nothing to recompile.\n";
+        } else {
+            if (skipped > 0)
+                std::cout << "  (" << skipped << " file(s) up-to-date, recompiling " << jobs.size() << ")\n";
+            auto results = compile_parallel(jobs, true);
+            for (const auto& r : results) {
+                if (r.exit_code != 0) {
+                    std::cerr << "Error: compilation failed for " << r.source_file << "\n";
+                    if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
+                    compile_ok = false;
+                }
             }
         }
 

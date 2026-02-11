@@ -92,6 +92,9 @@ make clean    # removes binary
   - Line offset table built via `build_line_offsets()` for efficient offset-to-line conversion
 - Launcher mode detects source files by extension (.cpp, .cc, .cxx, .C, .c++, .cp, .c)
 - Shell quoting via `shell_quote()` for safe command construction
+- Incremental recompilation via `needs_recompile()`: compares .cpp and preamble timestamps against .o file
+  - Direct mode: shows "(up-to-date)" for skipped files, reports count of skipped vs recompiled
+  - Launcher mode: skips up-to-date files, also skips `ld -r` if all objects and output are current
 - Single .o files skip `ld -r` and use direct copy for efficiency
 - Parallel compilation uses Boost.Process (bp::child) for process spawning and std::thread for worker pool
   - Work-stealing pattern: atomic job counter, threads grab next job until exhausted
@@ -100,6 +103,7 @@ make clean    # removes binary
   - In launcher mode with dep flags, first file runs sequentially (generates .d file), rest run in parallel
 
 ## Recent Changes
+- 2026-02-11: Incremental recompilation — only recompile split files whose .cpp or preamble changed (timestamp-based)
 - 2026-02-11: Parallel compilation — split files compiled concurrently using Boost.Process + std::thread
 - 2026-02-11: Compiler launcher mode — acts as CMAKE_CXX_COMPILER_LAUNCHER, splits + compiles + combines via ld -r
 - 2026-02-11: Refactored core splitting into reusable `do_split()` function
