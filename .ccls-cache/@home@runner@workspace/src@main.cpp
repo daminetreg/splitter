@@ -721,7 +721,10 @@ static SplitResult do_split(const std::string& input_path,
 
 static bool launcher_verbose() {
     const char* val = std::getenv("TIPI_CPP_SPLITTER_VERBOSE");
-    return val && std::string(val) == "on";
+    if (val && std::string(val) == "on") return true;
+    const char* verbose_val = std::getenv("VERBOSE");
+    if (verbose_val && std::string(verbose_val) == "1") return true;
+    return false;
 }
 
 static int run_as_launcher(int argc, char* argv[]) {
