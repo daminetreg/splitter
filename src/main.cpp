@@ -373,7 +373,8 @@ static unsigned get_parallelism() {
 }
 
 static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>& jobs,
-                                                    bool verbose) {
+                                                    bool verbose,
+                                                    std::ostream& out = std::cout) {
     std::vector<CompileResult> results(jobs.size());
     std::mutex output_mtx;
     std::vector<std::thread> threads;
@@ -383,8 +384,8 @@ static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>
 
     if (verbose) {
         std::lock_guard<std::mutex> lock(output_mtx);
-        std::cout << "  [parallel: " << num_threads << " threads, "
-                  << jobs.size() << " jobs]\n\n";
+        out << "  [parallel: " << num_threads << " threads, "
+            << jobs.size() << " jobs]\n\n";
     }
 
     for (unsigned t = 0; t < num_threads; ++t) {
@@ -419,7 +420,7 @@ static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>
 
                 if (verbose) {
                     std::lock_guard<std::mutex> lock(output_mtx);
-                    std::cout << "  $ " << job.cmd << "\n";
+                    out << "  $ " << job.cmd << "\n";
                     if (!res.stderr_output.empty()) {
                         std::cerr << res.stderr_output;
                     }
@@ -467,7 +468,8 @@ struct SplitResult {
 static SplitResult do_split(const std::string& input_path,
                             const std::string& output_dir,
                             const std::vector<std::string>& extra_flags,
-                            bool verbose) {
+                            bool verbose,
+                            std::ostream& out = std::cout) {
     SplitResult result;
     result.success = false;
 
@@ -537,7 +539,7 @@ static SplitResult do_split(const std::string& input_path,
     clang_visitChildren(root, visitor, &vd);
 
     if (functions.empty()) {
-        if (verbose) std::cout << "No function definitions found in " << input_path << "\n";
+        if (verbose) out << "No function definitions found in " << input_path << "\n";
         clang_disposeTranslationUnit(tu);
         clang_disposeIndex(index);
         result.success = true;
@@ -565,13 +567,13 @@ static SplitResult do_split(const std::string& input_path,
             }
             ofs << preamble;
             ofs.close();
-            if (verbose) std::cout << "Generated preamble: " << preamble_path << " (updated)\n";
+            if (verbose) out << "Generated preamble: " << preamble_path << " (updated)\n";
         } else {
-            if (verbose) std::cout << "Preamble unchanged: " << preamble_path << "\n";
+            if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
         }
     }
 
-    if (verbose) std::cout << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
+    if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
     std::vector<std::pair<std::string, std::string>> static_renames;
     for (const auto& fn : functions) {
@@ -673,12 +675,12 @@ static SplitResult do_split(const std::string& input_path,
             result.compilable_files.push_back(out_path);
 
         if (verbose) {
-            std::cout << "  [" << file_counter << "] " << fn.signature;
-            if (kept) std::cout << "  (header-only)";
-            if (!needs_write) std::cout << "  (unchanged)";
-            std::cout << "\n";
-            std::cout << "      Lines " << fn.start_line << "-" << fn.end_line
-                      << " -> " << out_path << "\n";
+            out << "  [" << file_counter << "] " << fn.signature;
+            if (kept) out << "  (header-only)";
+            if (!needs_write) out << "  (unchanged)";
+            out << "\n";
+            out << "      Lines " << fn.start_line << "-" << fn.end_line
+                << " -> " << out_path << "\n";
         }
     }
 
@@ -696,18 +698,18 @@ static SplitResult do_split(const std::string& input_path,
             obj_path.replace_extension(".o");
             if (fs::exists(obj_path))
                 fs::remove(obj_path);
-            if (verbose) std::cout << "  Removed stale: " << fname << "\n";
+            if (verbose) out << "  Removed stale: " << fname << "\n";
             ++removed_count;
         }
     }
 
     if (verbose) {
-        std::cout << "\n" << file_counter << " function(s): "
-                  << written_count << " written, "
-                  << skipped_count << " unchanged";
+        out << "\n" << file_counter << " function(s): "
+            << written_count << " written, "
+            << skipped_count << " unchanged";
         if (removed_count > 0)
-            std::cout << ", " << removed_count << " stale removed";
-        std::cout << "\n";
+            out << ", " << removed_count << " stale removed";
+        out << "\n";
     }
 
     clang_disposeTranslationUnit(tu);
@@ -717,7 +719,13 @@ static SplitResult do_split(const std::string& input_path,
     return result;
 }
 
+static bool launcher_verbose() {
+    const char* val = std::getenv("TIPI_CPP_SPLITTER_VERBOSE");
+    return val && std::string(val) == "on";
+}
+
 static int run_as_launcher(int argc, char* argv[]) {
+    bool verbose = launcher_verbose();
     std::string compiler = argv[1];
 
     std::string input_file;
@@ -760,6 +768,7 @@ static int run_as_launcher(int argc, char* argv[]) {
             if (i > 1) cmd += " ";
             cmd += shell_quote(argv[i]);
         }
+        if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
         return run_command_quiet(cmd);
     }
 
@@ -768,6 +777,8 @@ static int run_as_launcher(int argc, char* argv[]) {
         return 1;
     }
 
+    if (verbose) std::cerr << "[cpp-splitter] splitting: " << input_file << "\n";
+
     std::string split_dir;
     if (!output_file.empty()) {
         split_dir = output_file + ".split";
@@ -775,7 +786,7 @@ static int run_as_launcher(int argc, char* argv[]) {
         split_dir = fs::path(input_file).stem().string() + ".split";
     }
 
-    auto sr = do_split(input_file, split_dir, other_flags, false);
+    auto sr = do_split(input_file, split_dir, other_flags, verbose, std::cerr);
 
     if (!sr.success || sr.compilable_files.empty()) {
         std::string cmd;
@@ -783,6 +794,7 @@ static int run_as_launcher(int argc, char* argv[]) {
             if (i > 1) cmd += " ";
             cmd += shell_quote(argv[i]);
         }
+        if (verbose) std::cerr << "[cpp-splitter] fallback to original compiler: " << cmd << "\n";
         return run_command_quiet(cmd);
     }
 
@@ -812,6 +824,7 @@ static int run_as_launcher(int argc, char* argv[]) {
         cmd += " -c -o " + shell_quote(obj) + " " + shell_quote(cpp);
 
         if (fi == 0 && (has_md || has_mmd)) {
+            if (verbose) std::cerr << "[cpp-splitter] compile (seq): " << cmd << "\n";
             int ret = run_command_quiet(cmd);
             if (ret != 0) {
                 std::cerr << "cpp-splitter: compilation failed for split file: " << cpp << "\n";
@@ -825,7 +838,8 @@ static int run_as_launcher(int argc, char* argv[]) {
     }
 
     if (!parallel_jobs.empty()) {
-        auto results = compile_parallel(parallel_jobs, false);
+        if (verbose) std::cerr << "[cpp-splitter] compiling " << parallel_jobs.size() << " split file(s) in parallel\n";
+        auto results = compile_parallel(parallel_jobs, verbose, std::cerr);
         for (const auto& r : results) {
             if (r.exit_code != 0) {
                 std::cerr << "cpp-splitter: compilation failed for split file: " << r.source_file << "\n";
@@ -839,11 +853,13 @@ static int run_as_launcher(int argc, char* argv[]) {
         output_file = fs::path(input_file).stem().string() + ".o";
 
     if (obj_files.size() == 1) {
+        if (verbose) std::cerr << "[cpp-splitter] single .o, copying " << obj_files[0] << " -> " << output_file << "\n";
         fs::copy_file(obj_files[0], output_file, fs::copy_options::overwrite_existing);
     } else {
         std::string cmd = "ld -r -o " + shell_quote(output_file);
         for (const auto& obj : obj_files)
             cmd += " " + shell_quote(obj);
+        if (verbose) std::cerr << "[cpp-splitter] ld -r: " << cmd << "\n";
         int ret = run_command_quiet(cmd);
         if (ret != 0) {
             std::cerr << "cpp-splitter: relocatable link failed\n";
@@ -851,6 +867,7 @@ static int run_as_launcher(int argc, char* argv[]) {
         }
     }
 
+    if (verbose) std::cerr << "[cpp-splitter] done: " << output_file << "\n";
     return 0;
 }
 

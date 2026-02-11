@@ -43,6 +43,7 @@ cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/cpp-splitter ..
 - Dependency tracking: `-MD`/`-MMD`/`-MF`/`-MT` flags handled correctly
 - Split files stored in `<output>.split/` directory next to the build artifact
 - Single `.o` output via `ld -r` relocatable linking (or direct copy for single-function files)
+- Verbose mode: set `TIPI_CPP_SPLITTER_VERBOSE=on` to see splitting, compilation, and linking details on stderr
 
 ## Project Architecture
 ```
