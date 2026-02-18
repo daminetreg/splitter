@@ -16,6 +16,42 @@
 
 namespace fs = std::filesystem;
 
+static std::vector<std::string> detect_system_includes(const std::string& compiler = "g++") {
+    std::vector<std::string> includes;
+    std::string cmd = compiler + " -E -x c++ /dev/null -v 2>&1";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return includes;
+
+    char buf[4096];
+    std::string output;
+    while (fgets(buf, sizeof(buf), pipe))
+        output += buf;
+    pclose(pipe);
+
+    bool in_search_list = false;
+    std::istringstream iss(output);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.find("#include <...> search starts here:") != std::string::npos) {
+            in_search_list = true;
+            continue;
+        }
+        if (line.find("End of search list.") != std::string::npos)
+            break;
+        if (in_search_list && !line.empty() && line[0] == ' ') {
+            std::string path = line.substr(1);
+            while (!path.empty() && (path.back() == ' ' || path.back() == '\n'))
+                path.pop_back();
+            size_t paren = path.find(" (");
+            if (paren != std::string::npos)
+                path = path.substr(0, paren);
+            if (!path.empty() && fs::exists(path))
+                includes.push_back(path);
+        }
+    }
+    return includes;
+}
+
 enum class ScopeKind { Namespace, Class };
 
 struct ScopeEntry {
@@ -218,8 +254,36 @@ static std::string make_static_mangled_name(const std::string& stem, const std::
     return "__static_" + safe_stem + "__" + name;
 }
 
+static std::string extract_source_signature(const std::string& source,
+                                              const FunctionInfo& fn) {
+    std::string body_text = source.substr(fn.start_offset,
+                                           fn.end_offset - fn.start_offset);
+    int brace_depth = 0;
+    size_t body_start = std::string::npos;
+    for (size_t i = 0; i < body_text.size(); ++i) {
+        if (body_text[i] == '{') {
+            if (brace_depth == 0) {
+                body_start = i;
+                break;
+            }
+            ++brace_depth;
+        } else if (body_text[i] == '}') {
+            --brace_depth;
+        }
+    }
+    if (body_start == std::string::npos)
+        return "";
+
+    std::string sig = body_text.substr(0, body_start);
+    while (!sig.empty() && (sig.back() == ' ' || sig.back() == '\n' ||
+                            sig.back() == '\r' || sig.back() == '\t'))
+        sig.pop_back();
+    return sig;
+}
+
 static std::string generate_forward_decl(const FunctionInfo& fn,
-                                          const std::string& stem) {
+                                          const std::string& stem,
+                                          const std::string& source) {
     bool is_class_method = false;
     for (const auto& entry : fn.scope_chain) {
         if (entry.kind == ScopeKind::Class) {
@@ -230,30 +294,46 @@ static std::string generate_forward_decl(const FunctionInfo& fn,
     if (is_class_method)
         return "";
 
-    std::string decl;
+    std::string sig = extract_source_signature(source, fn);
+    if (sig.empty())
+        return "";
+
+    if (fn.is_static) {
+        {
+            std::string prefix = "static ";
+            size_t spos = sig.find(prefix);
+            if (spos != std::string::npos)
+                sig.erase(spos, prefix.size());
+        }
+        size_t npos = sig.find(fn.name + "(");
+        if (npos == std::string::npos)
+            npos = sig.find(fn.name);
+        if (npos != std::string::npos) {
+            sig.replace(npos, fn.name.size(),
+                        make_static_mangled_name(stem, fn.name));
+        }
+    }
+
     std::vector<std::string> ns_names;
     for (const auto& entry : fn.scope_chain) {
         if (entry.kind == ScopeKind::Namespace)
             ns_names.push_back(entry.name);
     }
 
-    for (const auto& ns : ns_names)
-        decl += "namespace " + ns + " { ";
-
-    if (!fn.return_type.empty())
-        decl += fn.return_type + " ";
-
-    if (fn.is_static) {
-        std::string mangled_qname = fn.qualified_name;
-        size_t npos = mangled_qname.find(fn.name);
-        if (npos != std::string::npos)
-            mangled_qname.replace(npos, fn.name.size(),
-                                  make_static_mangled_name(stem, fn.name));
-        decl += mangled_qname + ";";
-    } else {
-        decl += fn.qualified_name + ";";
+    if (!ns_names.empty()) {
+        std::string ns_prefix;
+        for (const auto& ns : ns_names)
+            ns_prefix += ns + "::";
+        size_t fname_pos = sig.find(ns_prefix + fn.name);
+        if (fname_pos != std::string::npos) {
+            sig.erase(fname_pos, ns_prefix.size());
+        }
     }
 
+    std::string decl;
+    for (const auto& ns : ns_names)
+        decl += "namespace " + ns + " { ";
+    decl += sig + ";";
     for (size_t i = 0; i < ns_names.size(); ++i)
         decl += " }";
 
@@ -310,7 +390,7 @@ static std::string generate_preamble(const std::string& source,
     for (const auto& fn : functions) {
         if (should_keep_in_header(fn))
             continue;
-        std::string decl = generate_forward_decl(fn, stem);
+        std::string decl = generate_forward_decl(fn, stem, source);
         if (!decl.empty())
             preamble += decl + "\n";
     }
@@ -500,6 +580,11 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     std::vector<std::string> all_flags = {"-std=c++17", "-fsyntax-only", "-Wno-everything"};
+    auto sys_includes = detect_system_includes();
+    for (const auto& inc : sys_includes) {
+        all_flags.push_back("-isystem");
+        all_flags.push_back(inc);
+    }
     for (const auto& f : extra_flags)
         all_flags.push_back(f);
 
