@@ -4,7 +4,7 @@ expertMode = true
 
 [nix]
 channel = "stable-25_05"
-packages = ["libclang", "llvmPackages.libclang"]
+packages = ["libclang", "llvmPackages.libclang", "htop"]
 
 [workflows]
 runButton = "Project"
