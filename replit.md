@@ -78,6 +78,7 @@ test/sample.cpp                 - Sample C++ file for testing
 example/data_processing.cpp     - Data processing example (18 functions)
 example/data_processing.h       - Header for data processing example
 example/benchmark.sh            - Benchmark script (monolithic vs split compile)
+example/benchmark_server.sh     - Server mode benchmark (local vs server parsing + compile)
 example/spirit_example.cpp      - Boost.Spirit example (template-heavy, needs lots of RAM)
 example/spirit_example.h        - Header for spirit example
 ```
