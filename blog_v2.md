@@ -111,17 +111,6 @@ Compare to monolithic, where all 19.1 seconds are a single indivisible `g++` inv
 
 These benchmarks run on a single machine with 8 cores, where 17 split files are compiled in ~3 rounds of parallel jobs. But splitting fundamentally turns a sequential problem (one monolithic compilation) into an embarrassingly parallel one (N independent compilations). On a build distribution cluster with enough cores to compile all split files simultaneously — one core per function — the cold compile phase would drop from ~5.7s to the cost of compiling a single split file (~1.2s) plus linking. For source files with 50 or 100 functions, the impact is even more dramatic: monolithic compile time scales linearly with function count, while distributed split compilation stays essentially constant at the cost of one function plus the link step.
 
-### Over a Development Session
-
-In practice, the savings compound. A developer editing a Spirit-heavy file might rebuild 30 times in an afternoon:
-
-| | Monolithic | cpp-splitter + server |
-|---|---|---|
-| 30 rebuilds | 9 min 33s | 1 min 51s |
-| Time saved | — | **7 min 42s** |
-
-That's nearly 8 minutes saved in a single afternoon, on a single file. Across a project with multiple heavy `.cpp` files, the savings scale proportionally.
-
 ## How It Works
 
 ### AST-Based Splitting
@@ -155,12 +144,11 @@ make -j$(nproc)
 
 No CMakeLists.txt changes needed. The tool splits each source file, compiles the pieces, and combines them via `ld -r` into the single `.o` file the build system expects.
 
-## Limitations
+## Consideration
 
-- **Cold build overhead**: The first build is slower (splitting + PCH build + parallel compile). The tool is optimized for the edit-compile-test cycle, not CI/CD clean builds.
-- **Template-heavy code**: Function templates must stay in the header. Files that are mostly templates see less benefit from splitting.
-- **Header changes**: Modifying an included header invalidates all split files and the PCH — same as monolithic. The savings come from source file edits.
-- **Link time**: More `.o` files mean slightly more linker work, though `ld -r` in launcher mode mitigates this.
+- **Cold build overhead**: Without cmake-re and a caching cluster the first build is slower (splitting + PCH build + parallel compile). The tool is optimized for use with build caching and distribution and otherwise to optimize the edit-compile-test cycle, not CI/CD clean builds.
+- **Template-heavy code**: Function templates must stay in the header. Files that are mostly templates see less benefit from splitting, however template instantiations is the expensive part, which is saved thanks to the splitter.
+- **Function prototype changes**: Modifying function prototypes require spliting out only the modified function, but invalidates the precompiled preamble which requires a recompile of all splitted translation units.
 
 ## Conclusion
 

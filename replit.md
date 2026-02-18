@@ -31,10 +31,13 @@ When the first argument is not a source file, the tool acts as a compiler wrappe
 ./cpp-splitter <compiler> [compiler_flags...] -c -o <output.o> <source.cpp>
 ```
 
-The tool splits the source, compiles each piece separately, and combines them into a single `.o` using relocatable linking (`ld -r`). Non-compilation commands are passed through transparently.
+The tool splits the source via the server, compiles each piece separately, and combines them into a single `.o` using relocatable linking (`ld -r`). Non-compilation commands are passed through transparently.
+
+**The server must be running before using launcher mode.** Launcher mode always connects to the server for splitting; there is no fallback to local parsing. This ensures fast splitting via cached translation units during builds.
 
 #### CMake usage
 ```
+./cpp-splitter --server &
 cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/cpp-splitter ..
 ```
 
@@ -52,7 +55,7 @@ Starts a background server that keeps parsed translation units in memory, so sub
 ./cpp-splitter --server [--socket <path>]
 ```
 
-The server listens on a Unix domain socket (default: `/tmp/cpp-splitter-<uid>.sock`). When a client runs `./cpp-splitter` normally, it first tries to connect to the server. If the server is available, parsing happens server-side with cached TUs; if not, it falls back to local parsing.
+The server listens on a Unix domain socket (default: `/tmp/cpp-splitter-<uid>.sock`). In direct mode (Mode 1), the client tries to connect to the server; if unavailable, it falls back to local parsing. In launcher mode (Mode 2), the server is required — the client will fail with an error if the server is not running.
 
 #### Environment Variables
 - `CPP_SPLITTER_SOCKET` - override the Unix socket path
@@ -135,6 +138,7 @@ make clean    # removes binary
   - Preamble: `#line 1 "original.cpp"` at top, re-syncs after each skipped function body
   - Split files: `#line <start_line> "original.cpp"` before each function body
   - Line offset table built via `build_line_offsets()` for efficient offset-to-line conversion
+- Launcher mode requires a running server — always connects via Unix socket, no fallback to local parsing
 - Launcher mode detects source files by extension (.cpp, .cc, .cxx, .C, .c++, .cp, .c)
 - Shell quoting via `shell_quote()` for safe command construction
 - Automatic precompiled headers (PCH) via `build_pch()`: precompiles the preamble header before split file compilation
@@ -163,6 +167,7 @@ make clean    # removes binary
   - Socket path: `/tmp/cpp-splitter-<uid>.sock` (overridable via `CPP_SPLITTER_SOCKET`)
 
 ## Recent Changes
+- 2026-02-18: Launcher mode now requires server — no fallback to local parsing, ensures fast cached splitting during CMake builds
 - 2026-02-18: Persistent server mode — Unix socket server keeps parsed TUs in memory, uses clang_reparseTranslationUnit for preamble reuse across invocations
 - 2026-02-18: Automatic precompiled headers (PCH) — precompiles preamble header before split file compilation, 8.5x per-file speedup for heavy headers
 - 2026-02-18: Auto-detect C++ system include paths for clang parser — resolves all standard library types correctly
