@@ -67,7 +67,7 @@ example/spirit_example.h        - Header for spirit example
 - Split file writing: incremental, with `#line` directives
 - `build_pch()` - precompiles the preamble header for faster split file compilation
 - `compile_parallel()` - parallel compilation using Boost.Process + std::thread
-- `do_split()` - core splitting logic (extracted for reuse), includes AST caching
+- `do_split()` - core splitting logic (extracted for reuse)
 - `run_as_launcher()` - compiler launcher mode
 - `main()` - mode detection and dispatch
 
@@ -112,12 +112,6 @@ make clean    # removes binary
   - Incremental: only rebuilds PCH when preamble header is newer than `.gch` file
   - Graceful fallback: if PCH build fails, continues without PCH
   - Works in both direct mode and launcher mode
-- AST caching via `clang_saveTranslationUnit` / `clang_createTranslationUnit2`
-  - Saves parsed AST to `<output_dir>/<stem>.ast` after first parse
-  - Loads cached AST on subsequent runs if source file hasn't changed (timestamp-based)
-  - Eliminates ~10s libclang parsing overhead for header-heavy files
-  - Cache automatically invalidated when source file is modified
-  - Parsed with `CXTranslationUnit_ForSerialization` flag for reliable serialization
 - Incremental recompilation via `needs_recompile()`: compares .cpp, preamble, and PCH timestamps against .o file
   - Direct mode: shows "(up-to-date)" for skipped files, reports count of skipped vs recompiled
   - Launcher mode: skips up-to-date files, also skips `ld -r` if all objects and output are current
@@ -129,7 +123,6 @@ make clean    # removes binary
   - In launcher mode with dep flags, first file runs sequentially (generates .d file), rest run in parallel
 
 ## Recent Changes
-- 2026-02-18: AST caching — saves parsed AST to disk, loads on subsequent runs if source unchanged, eliminates ~10s parse overhead
 - 2026-02-18: Automatic precompiled headers (PCH) — precompiles preamble header before split file compilation, 8.5x per-file speedup for heavy headers
 - 2026-02-18: Auto-detect C++ system include paths for clang parser — resolves all standard library types correctly
 - 2026-02-18: Source-text-based forward declarations — extracts signatures from source text instead of libclang type resolution

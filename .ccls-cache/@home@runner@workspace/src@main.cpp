@@ -522,9 +522,6 @@ static bool needs_recompile(const std::string& cpp_file, const std::string& obj_
     if (fs::last_write_time(cpp_file) > obj_time) return true;
     if (!preamble_file.empty() && fs::exists(preamble_file)) {
         if (fs::last_write_time(preamble_file) > obj_time) return true;
-        std::string gch_file = preamble_file + ".gch";
-        if (fs::exists(gch_file) && fs::last_write_time(gch_file) > obj_time)
-            return true;
     }
     return false;
 }
@@ -551,37 +548,6 @@ static std::string shell_quote(const std::string& s) {
     }
     result += "'";
     return result;
-}
-
-static bool build_pch(const std::string& preamble_file,
-                      const std::string& compiler,
-                      const std::vector<std::string>& flags,
-                      const std::string& include_dir,
-                      bool verbose,
-                      std::ostream& out = std::cout) {
-    std::string gch_file = preamble_file + ".gch";
-
-    if (fs::exists(gch_file) &&
-        fs::last_write_time(preamble_file) <= fs::last_write_time(gch_file)) {
-        if (verbose) out << "  PCH up-to-date: " << gch_file << "\n";
-        return true;
-    }
-
-    std::string cmd = shell_quote(compiler) + " -x c++-header";
-    for (const auto& f : flags)
-        cmd += " " + shell_quote(f);
-    if (!include_dir.empty())
-        cmd += " -I" + shell_quote(include_dir);
-    cmd += " -o " + shell_quote(gch_file) + " " + shell_quote(preamble_file);
-
-    if (verbose) out << "  Building PCH: " << cmd << "\n";
-    int ret = run_command_quiet(cmd);
-    if (ret != 0) {
-        if (verbose) out << "  PCH build failed (exit " << ret << "), continuing without PCH\n";
-        return false;
-    }
-    if (verbose) out << "  PCH built: " << gch_file << "\n";
-    return true;
 }
 
 struct SplitResult {
@@ -679,8 +645,8 @@ static SplitResult do_split(const std::string& input_path,
     fs::create_directories(output_dir);
 
     std::string preamble_filename = stem + "_preamble.h";
+    result.preamble_filename = preamble_filename;
     std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
-    result.preamble_filename = preamble_path;
     std::string preamble = generate_preamble(source, functions, stem, abs_path);
 
     {
@@ -931,8 +897,6 @@ static int run_as_launcher(int argc, char* argv[]) {
         return run_command_quiet(cmd);
     }
 
-    build_pch(sr.preamble_filename, compiler, other_flags, split_dir, verbose, std::cerr);
-
     std::vector<std::string> obj_files;
     std::vector<CompileJob> parallel_jobs;
     int launcher_skipped = 0;
@@ -1112,11 +1076,6 @@ int main(int argc, char* argv[]) {
 
     if (do_compile) {
         std::cout << "\n--- Compiling split files ---\n\n";
-
-        std::vector<std::string> pch_flags = {"-std=c++17"};
-        for (const auto& f : extra_flags) pch_flags.push_back(f);
-        bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, pch_flags, output_dir, true);
-        if (pch_ok) std::cout << "\n";
 
         std::vector<CompileJob> jobs;
         std::vector<std::string> obj_files;
