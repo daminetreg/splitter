@@ -1440,27 +1440,27 @@ static int run_as_launcher(int argc, char* argv[]) {
 
     std::string split_dir;
     if (!output_file.empty()) {
-        split_dir = output_file + ".split";
+        split_dir = fs::absolute(output_file).string() + ".split";
     } else {
-        split_dir = fs::path(input_file).stem().string() + ".split";
+        split_dir = fs::absolute(fs::path(input_file).stem().string() + ".split").string();
     }
 
-    SplitResult sr;
-    const char* no_server = std::getenv("CPP_SPLITTER_NO_SERVER");
-    if (!no_server || std::string(no_server) != "1") {
-        sr = try_server_split(input_file, split_dir, other_flags, verbose, std::cerr);
-    }
+    SplitResult sr = try_server_split(input_file, split_dir, other_flags, verbose, std::cerr);
+
     if (!sr.success) {
-        sr = do_split(input_file, split_dir, other_flags, verbose, std::cerr);
+        std::cerr << "cpp-splitter: server connection failed. "
+                  << "The server must be running in launcher mode.\n"
+                  << "Start it with: cpp-splitter --server &\n";
+        return 1;
     }
 
-    if (!sr.success || sr.compilable_files.empty()) {
+    if (sr.compilable_files.empty()) {
         std::string cmd;
         for (int i = 1; i < argc; i++) {
             if (i > 1) cmd += " ";
             cmd += shell_quote(argv[i]);
         }
-        if (verbose) std::cerr << "[cpp-splitter] fallback to original compiler: " << cmd << "\n";
+        if (verbose) std::cerr << "[cpp-splitter] no compilable files, passthrough: " << cmd << "\n";
         return run_command_quiet(cmd);
     }
 
@@ -1569,12 +1569,14 @@ static void print_usage(const char* prog) {
               << "\n"
               << "Mode 2 - Compiler Launcher (CMAKE_CXX_COMPILER_LAUNCHER):\n"
               << "  When the first argument is not a source file, acts as a\n"
-              << "  compiler wrapper. Splits the source, compiles each piece,\n"
-              << "  and combines them into a single .o via relocatable linking.\n"
+              << "  compiler wrapper. Splits the source via the server, compiles\n"
+              << "  each piece, and combines them into a single .o via relocatable\n"
+              << "  linking. Requires the server to be running.\n"
               << "\n"
               << "  Non-compilation commands are passed through transparently.\n"
               << "\n"
               << "  CMake usage:\n"
+              << "    " << prog << " --server &\n"
               << "    cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/" << prog << " ..\n"
               << "\n"
               << "Mode 3 - Server (persistent TU cache):\n"

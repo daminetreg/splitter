@@ -9,7 +9,7 @@ int add(int a, int b) {
 }
 
 double multiply(double x, double y) {
-    return x * y;
+    return x * y * y;
 }
 
 }
