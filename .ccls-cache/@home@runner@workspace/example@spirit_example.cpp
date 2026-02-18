@@ -1,3 +1,4 @@
+#include "spirit_example.h"
 #include <boost/spirit/include/qi.hpp>
 #include <boost/spirit/include/karma.hpp>
 #include <boost/spirit/include/phoenix.hpp>
@@ -6,8 +7,6 @@
 #include <boost/variant.hpp>
 #include <boost/optional.hpp>
 #include <iostream>
-#include <string>
-#include <vector>
 #include <map>
 #include <numeric>
 #include <cassert>
@@ -17,22 +16,6 @@ namespace qi = boost::spirit::qi;
 namespace karma = boost::spirit::karma;
 namespace phoenix = boost::phoenix;
 namespace ascii = boost::spirit::ascii;
-
-struct XmlAttribute {
-    std::string name;
-    std::string value;
-};
-
-struct XmlElement {
-    std::string tag;
-    std::vector<XmlAttribute> attributes;
-    std::string text_content;
-};
-
-struct MarkdownSpan {
-    std::string type;
-    std::string content;
-};
 
 typedef boost::variant<double, std::string> ExprValue;
 
