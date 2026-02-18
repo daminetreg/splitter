@@ -72,7 +72,7 @@ Splitting is the work that cpp-splitter does before the compiler is even invoked
 
 Without the server, splitting alone takes 10.7 seconds — more than half the monolithic build time — just to parse Boost.Spirit's template-heavy headers and walk the AST. The server eliminates this entirely on warm cache (0.1s), and even when the source has been edited, reparsing reuses the precompiled preamble and only re-parses the source body (2.9s).
 
-In a real-world project, the splitting results can also be cached externally. A remote build cache like [cmake-re](https://cmake-re.com) can store the split file outputs keyed by source content hash and compiler flags. Once a file has been split on any machine, subsequent builds (on the same or different machines) skip splitting entirely and pull the cached split files. This means the splitting cost — even the 10.7s cold parse — is paid at most once across your entire team.
+In a real-world project, the splitting results can also be cached externally. A remote build cache like [cmake-re](https://engflow.com/cmakere) can store the split file outputs keyed by source content hash and compiler flags. Once a file has been split on any machine, subsequent builds (on the same or different machines) skip splitting entirely and pull the cached split files. This means the splitting cost — even the 10.7s cold parse — is paid at most once across your entire team.
 
 ### Compile + Link Phase
 
@@ -92,11 +92,16 @@ Combining both phases gives the end-to-end comparison against monolithic:
 
 | Scenario | Monolithic | cpp-splitter (server+PCH) | Speedup |
 |---|---|---|---|
-| Cold build (from scratch) | 19.1s | 36.5s | 0.5x (slower) |
+| Cold build (from scratch) | 19.1s | 36.5s (10.8s split + 25.7s compile/link) | 0.5x (slower) |
+| Cold build (split files + PCH cached) | 19.1s | **5.7s** (0s split + 0s PCH + 5.7s compile/link) | **3.4x faster** |
 | Rebuild after editing 1 function | 19.1s | **3.7s** (0.1s split + 3.6s compile/link) | **5.1x faster** |
 | Rebuild with no changes | 19.1s | **2.4s** (0.1s split + 2.3s compile/link) | **8.0x faster** |
 
-The cold build is slower because it pays the one-time costs: full parse, PCH generation, and compiling all 17 files. Every subsequent rebuild benefits from all three caches (server TU cache, PCH, incremental `.o` files).
+The first row is the worst case: everything built from scratch — cold parse (10.8s), PCH generation (~10s), and compiling all 17 files in parallel + linking (~15.7s). This is slower than monolithic.
+
+The second row shows what happens when split files and the PCH are already cached — for example, pulled from a remote build cache like [cmake-re](https://cmake-re.com). Splitting and PCH generation are skipped entirely; only compilation and linking remain. Compiling all 17 files in parallel with PCH takes just ~5.7s — **3.4x faster than monolithic** — because each file compiles in ~1.2s instead of the full 19.1s monolithic build re-parsing all headers and regenerating all functions.
+
+Every subsequent rebuild benefits from all three caches (server TU cache, PCH, incremental `.o` files).
 
 The key insight is that splitting becomes negligible (~0.1s) once the server is warm, so the rebuild time is dominated by compile + link. And with PCH + incremental recompilation, compile + link is dominated by just the one changed file plus the final link step.
 
