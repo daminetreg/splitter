@@ -45,6 +45,31 @@ cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/cpp-splitter ..
 - Single `.o` output via `ld -r` relocatable linking (or direct copy for single-function files)
 - Verbose mode: set `TIPI_CPP_SPLITTER_VERBOSE=on` to see splitting, compilation, and linking details on stderr
 
+### Mode 3: Server (persistent TU cache)
+Starts a background server that keeps parsed translation units in memory, so subsequent split requests reuse the cached preamble instead of re-parsing from scratch.
+
+```
+./cpp-splitter --server [--socket <path>]
+```
+
+The server listens on a Unix domain socket (default: `/tmp/cpp-splitter-<uid>.sock`). When a client runs `./cpp-splitter` normally, it first tries to connect to the server. If the server is available, parsing happens server-side with cached TUs; if not, it falls back to local parsing.
+
+#### Environment Variables
+- `CPP_SPLITTER_SOCKET` - override the Unix socket path
+- `CPP_SPLITTER_NO_SERVER=1` - disable client connections to the server
+
+#### Cache Invalidation
+- Source file mtime changes → `clang_reparseTranslationUnit()` (reuses precompiled preamble)
+- Compiler flags change → full reparse + new cache entry
+- Compilation remains client-side; server only accelerates the parsing/splitting phase
+
+#### Examples
+```
+./cpp-splitter --server &                                 # start server in background
+./cpp-splitter src/app.cpp output --compile -o myapp      # uses server if available
+CPP_SPLITTER_NO_SERVER=1 ./cpp-splitter src/app.cpp out   # force local parsing
+```
+
 ## Project Architecture
 ```
 src/main.cpp                    - Main tool source code (uses libclang C API)
@@ -67,9 +92,14 @@ example/spirit_example.h        - Header for spirit example
 - Split file writing: incremental, with `#line` directives
 - `build_pch()` - precompiles the preamble header for faster split file compilation
 - `compile_parallel()` - parallel compilation using Boost.Process + std::thread
-- `do_split()` - core splitting logic (extracted for reuse)
+- `build_clang_flags()` - assembles clang parser flags (system includes + extra flags)
+- `check_diagnostics()` - checks and reports parse errors from TU
+- `do_split()` - core splitting logic (standalone, creates+disposes TU)
+- `do_split_with_cache()` - splitting with persistent TU cache (server mode)
+- Server infrastructure: `CachedTU`, `g_tu_cache`, Unix socket protocol, `run_server()`
+- `try_server_split()` - client: attempts to split via server, falls back gracefully
 - `run_as_launcher()` - compiler launcher mode
-- `main()` - mode detection and dispatch
+- `main()` - mode detection and dispatch (direct / launcher / server)
 
 ## Build
 ```
@@ -121,8 +151,18 @@ make clean    # removes binary
   - Thread count = min(num_jobs, hardware_concurrency)
   - stderr captured per-process for clean error reporting
   - In launcher mode with dep flags, first file runs sequentially (generates .d file), rest run in parallel
+- Persistent server mode via Unix domain socket for TU cache reuse
+  - `CachedTU` struct owns CXIndex + CXTranslationUnit per source file, with RAII cleanup
+  - Cache keyed by absolute path; invalidated by mtime change (reparse) or flags change (full reparse)
+  - `clang_reparseTranslationUnit()` reuses libclang's precompiled preamble when only source body changes
+  - Length-prefixed binary protocol: 4-byte length header + newline-delimited fields
+  - Single-threaded server with signal handling (SIGINT/SIGTERM) for socket cleanup
+  - Client connection is transparent: `try_server_split()` returns empty SplitResult on failure, caller falls back to local `do_split()`
+  - Compilation remains client-side; server only accelerates parsing/splitting
+  - Socket path: `/tmp/cpp-splitter-<uid>.sock` (overridable via `CPP_SPLITTER_SOCKET`)
 
 ## Recent Changes
+- 2026-02-18: Persistent server mode — Unix socket server keeps parsed TUs in memory, uses clang_reparseTranslationUnit for preamble reuse across invocations
 - 2026-02-18: Automatic precompiled headers (PCH) — precompiles preamble header before split file compilation, 8.5x per-file speedup for heavy headers
 - 2026-02-18: Auto-detect C++ system include paths for clang parser — resolves all standard library types correctly
 - 2026-02-18: Source-text-based forward declarations — extracts signatures from source text instead of libclang type resolution
