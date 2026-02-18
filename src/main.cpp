@@ -1440,9 +1440,9 @@ static int run_as_launcher(int argc, char* argv[]) {
 
     std::string split_dir;
     if (!output_file.empty()) {
-        split_dir = output_file + ".split";
+        split_dir = fs::absolute(output_file).string() + ".split";
     } else {
-        split_dir = fs::path(input_file).stem().string() + ".split";
+        split_dir = fs::absolute(fs::path(input_file).stem().string() + ".split").string();
     }
 
     SplitResult sr = try_server_split(input_file, split_dir, other_flags, verbose, std::cerr);

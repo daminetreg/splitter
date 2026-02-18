@@ -1,6 +1,7 @@
 cpp-splitter
 output/
 test_output/
+example/cmake/build/
 *.o
 *.d
 *.dSYM/
