@@ -1,0 +1,2 @@
+export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+tipi run clang++ -std=c++17 src/main.cpp -I/Users/daminetreg/workspace/tipi/hermetic-fetchcontent.release-archive/build/_deps/Boost-install/include -I/usr/local/share/.tipi/clang/a7e6968/include -L/usr/local/share/.tipi/clang/a7e6968/lib/ -Wl,-rpath,/usr/local/share/.tipi/clang/a7e6968/lib/ -lclang  -o cpp-splitter
