@@ -226,9 +226,35 @@ The warm-cache case is 17x faster because the server skips parsing entirely — 
 | 1-function rebuild | 2,930ms | 1,146ms | **2.6x faster** |
 | No-change rebuild | 2,670ms | 851ms | **3.1x faster** |
 
-For the full compile cycle, the server's impact depends on how much of the total time is spent parsing vs compiling. With lightweight standard library headers, compilation dominates — but the server still provides meaningful savings by eliminating the ~2s parsing overhead on every rebuild.
+For the full compile cycle with lightweight standard library headers, compilation dominates — but the server still provides meaningful savings by eliminating the ~2s parsing overhead on every rebuild.
 
-The savings would be more dramatic with heavier headers (Boost, Qt, Eigen), where parsing can take 10+ seconds — the server would eliminate that cost on every cached invocation.
+### Boost.Spirit with Server (510 lines, 17 functions)
+
+The server's impact is far more dramatic with heavy headers, where parsing dominates the total build time.
+
+**Splitting time only:**
+
+| Scenario | Time | vs Local |
+|---|---|---|
+| Local parse (no server) | 10,739ms | baseline |
+| Server cold (first parse) | 10,841ms | ~same |
+| Server warm (cached TU) | 105ms | **102x faster** |
+| Server reparse (source changed) | 2,917ms | **3.7x faster** |
+
+With Boost.Spirit, the server's warm cache reduces splitting from **10.7 seconds to 105 milliseconds** — a 102x speedup. The parsing cost (10.7s) is entirely eliminated; only the AST walk and file writing remain. Even `clang_reparseTranslationUnit()` after a source edit is 3.7x faster than a cold parse, because it reuses the precompiled preamble (all the Boost template headers stay cached).
+
+**Full build cycle** (split + PCH + compile + link):
+
+| Scenario | Without Server | With Server | Improvement |
+|---|---|---|---|
+| Monolithic | 19,088ms | — | baseline |
+| Cold build | 50,275ms | 36,540ms | 27% faster |
+| 1-function rebuild | 15,129ms | 3,726ms | **4.1x faster** |
+| No-change rebuild | 14,313ms | 2,395ms | **6.0x faster** |
+
+Without the server, a 1-function rebuild (15.1s) was slower than monolithic (19.1s) because the splitting phase alone took 10.7s. With the server, splitting drops to 105ms, and the 1-function rebuild is now **5.1x faster than monolithic** (3.7s vs 19.1s). The no-change rebuild drops from 14.3s to 2.4s — the server eliminates the parsing bottleneck that previously dominated even when nothing needed recompilation.
+
+This is where all three optimizations stack together: the server eliminates reparsing (10.7s → 0.1s), the PCH eliminates per-file header parsing during compilation (~10s → ~1.2s per file), and incremental recompilation skips 16 of 17 files. The result: editing one function in a Boost.Spirit file rebuilds in 3.7s instead of 19.1s.
 
 ### How It Works Internally
 
@@ -250,8 +276,10 @@ Signal handlers (`SIGINT`, `SIGTERM`) ensure the Unix socket file is cleaned up 
 cpp-splitter trades a one-time splitting cost for per-function incremental compilation granularity. Three layers of optimization stack together:
 
 1. **Precompiled headers** eliminate redundant header parsing across split files (8.5x per-file speedup for heavy headers)
-2. **Persistent server mode** eliminates redundant source parsing across invocations (17x faster splitting with warm cache)
+2. **Persistent server mode** eliminates redundant source parsing across invocations (102x faster splitting with warm cache for Boost.Spirit)
 3. **Incremental recompilation** skips unchanged functions entirely
+
+Combined, these bring a Boost.Spirit 1-function rebuild from 19.1s (monolithic) to 3.7s — a 5.1x speedup.
 
 The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are. Start the server once (`./cpp-splitter --server &`), and every subsequent build automatically benefits from cached translation units.
 
