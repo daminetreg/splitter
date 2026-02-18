@@ -65,6 +65,7 @@ example/spirit_example.h        - Header for spirit example
 - `generate_forward_decl()` - generates forward declarations from source-text signatures
 - Preamble generation: `generate_preamble()` with `#line` directives
 - Split file writing: incremental, with `#line` directives
+- `build_pch()` - precompiles the preamble header for faster split file compilation
 - `compile_parallel()` - parallel compilation using Boost.Process + std::thread
 - `do_split()` - core splitting logic (extracted for reuse)
 - `run_as_launcher()` - compiler launcher mode
@@ -105,7 +106,13 @@ make clean    # removes binary
   - Line offset table built via `build_line_offsets()` for efficient offset-to-line conversion
 - Launcher mode detects source files by extension (.cpp, .cc, .cxx, .C, .c++, .cp, .c)
 - Shell quoting via `shell_quote()` for safe command construction
-- Incremental recompilation via `needs_recompile()`: compares .cpp and preamble timestamps against .o file
+- Automatic precompiled headers (PCH) via `build_pch()`: precompiles the preamble header before split file compilation
+  - PCH built with same compiler flags as split files for compatibility
+  - g++ auto-detects `.gch` file alongside the included preamble header
+  - Incremental: only rebuilds PCH when preamble header is newer than `.gch` file
+  - Graceful fallback: if PCH build fails, continues without PCH
+  - Works in both direct mode and launcher mode
+- Incremental recompilation via `needs_recompile()`: compares .cpp, preamble, and PCH timestamps against .o file
   - Direct mode: shows "(up-to-date)" for skipped files, reports count of skipped vs recompiled
   - Launcher mode: skips up-to-date files, also skips `ld -r` if all objects and output are current
 - Single .o files skip `ld -r` and use direct copy for efficiency
@@ -116,6 +123,7 @@ make clean    # removes binary
   - In launcher mode with dep flags, first file runs sequentially (generates .d file), rest run in parallel
 
 ## Recent Changes
+- 2026-02-18: Automatic precompiled headers (PCH) — precompiles preamble header before split file compilation, 8.5x per-file speedup for heavy headers
 - 2026-02-18: Auto-detect C++ system include paths for clang parser — resolves all standard library types correctly
 - 2026-02-18: Source-text-based forward declarations — extracts signatures from source text instead of libclang type resolution
 - 2026-02-18: Added data_processing example (18 functions, data filtering/sorting/reporting)

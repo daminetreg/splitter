@@ -129,19 +129,36 @@ The incremental results are more nuanced:
 - **No changes**: 10.8s — 41% faster than monolithic. The tool detects all `.o` files are up-to-date and skips compilation entirely. The 10.8s is entirely clang re-parsing the source to confirm nothing changed; no compiler is invoked.
 - **1 function changed**: 23.6s — only 1 of 17 files is recompiled, but this single recompilation still takes ~13s because it must re-parse all the Boost.Spirit headers. Combined with the ~10.8s splitting overhead, the total is **slower than monolithic** (23.6s vs 18.2s).
 
-### Why Is 1-Function Rebuild Still Slow?
+### The Fix: Automatic Precompiled Headers
 
-In this benchmark, the per-file compilation cost is dominated by header parsing, not by the function's own code. Since each split file independently includes the full Boost.Spirit header stack, compiling even one file costs nearly as much as the monolithic build. The savings from skipping 16 files are offset by the splitting overhead.
+The bottleneck is clear: each split file independently re-parses the same expensive headers. The solution is to precompile the preamble header once and reuse it across all split files.
 
-This is the fundamental tradeoff: without precompiled headers (PCH), every split file pays the full header parsing cost. The tool saves compilation time proportional to the *code generation* cost of the skipped functions, but not their header parsing cost.
+cpp-splitter now automatically builds a precompiled header (PCH) from the preamble before compiling split files. The PCH is built with the same flags as the split files, and g++ automatically picks it up when it finds a `.gch` file alongside the included header. The PCH is rebuilt only when the preamble changes (timestamp-based), so it adds zero cost to no-change rebuilds.
 
-### Where Splitting Does Win
+### Boost.Spirit with PCH
+
+| Scenario | Without PCH | With PCH | Improvement |
+|---|---|---|---|
+| Monolithic full build | 18,216ms | 19,843ms | baseline |
+| Split + compile (cold) | 95,192ms | 45,523ms | 52% faster |
+| No-change rebuild | 10,786ms | 10,662ms | ~same |
+| 1-function rebuild | 23,594ms | 11,435ms | 52% faster |
+
+The results are dramatic:
+
+- **Cold build**: Cut in half (95s → 46s). The PCH is built once (~10s for Boost.Spirit), then each split file compiles in ~1.2s instead of ~10s.
+- **1-function rebuild**: From 23.6s to 11.4s. Without PCH, this was *slower* than monolithic (23.6s vs 18.2s). With PCH, it's now **42% faster** than monolithic.
+- **Per-file speedup**: 8.5x — a single split file compiles in 1.2s with PCH vs 10.4s without.
+
+The PCH transforms splitting from "mostly useful for no-change rebuilds" into a genuine incremental win for every edit.
+
+### Where Splitting Wins
 
 The benefit grows under specific conditions:
 
-1. **Precompiled headers (PCH)**: The biggest accelerator. When split files reuse a precompiled header, the per-file parsing cost drops from seconds to milliseconds. This turns the 23.6s incremental rebuild into a sub-second operation.
+1. **Heavy headers**: Template-heavy libraries (Boost.Spirit, Eigen, Qt) benefit most from PCH. The heavier the headers, the larger the per-file savings.
 2. **Many functions with substantial bodies**: When function code generation dominates over header parsing, skipping 16 out of 17 functions saves real time. Files with 50+ functions see proportionally larger savings.
-3. **Moderate headers**: Files that include `<algorithm>`, `<string>`, `<vector>` (not extreme template libraries) have lower per-file parsing costs, making the parallel split build competitive with monolithic.
+3. **Moderate headers**: Files that include `<algorithm>`, `<string>`, `<vector>` (not extreme template libraries) have lower per-file parsing costs, making the parallel split build competitive with monolithic even without PCH.
 4. **Frequent edits**: Over an afternoon of development, dozens of incremental rebuilds add up. Even modest per-rebuild savings compound into significant time saved.
 5. **Larger files**: A 2,000-line file with 50 functions has more code generation work to skip per rebuild than our 510-line example.
 
@@ -169,13 +186,13 @@ When the compiler generates dependency files (`-MD`, `-MMD`), cpp-splitter ensur
 
 ## Limitations and Future Work
 
-- **Cold build overhead**: Splitting always adds overhead to the first build. The tool is optimized for the edit-compile-test cycle, not CI/CD pipelines doing clean builds.
+- **Cold build overhead**: Splitting adds overhead to the first build (PCH build + splitting + parallel compile). The tool is optimized for the edit-compile-test cycle, not CI/CD pipelines doing clean builds. With PCH, the cold build penalty is cut roughly in half for header-heavy files.
 - **Template-heavy code**: Function templates must stay in the header (they can't be split into separate translation units). Files that are mostly templates see less benefit.
 - **Link-time overhead**: More `.o` files mean slightly more work for the linker, though `ld -r` in launcher mode mitigates this by combining split objects before the final link.
-- **Header changes invalidate everything**: If you modify a header included by the source file, all split files need recompilation (same as monolithic). The savings come specifically from source file edits.
+- **Header changes invalidate everything**: If you modify a header included by the source file, all split files and the PCH need recompilation (same as monolithic). The savings come specifically from source file edits.
 
 ## Conclusion
 
-cpp-splitter trades a one-time splitting cost for per-function incremental compilation granularity. For large, header-heavy C++ files that you edit frequently, it can dramatically reduce the edit-compile-test cycle time. The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are.
+cpp-splitter trades a one-time splitting cost for per-function incremental compilation granularity. With automatic precompiled headers, even template-heavy files like Boost.Spirit see genuine incremental wins — 1-function rebuilds are 42% faster than monolithic, and the cold build penalty is cut in half. The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are.
 
 The tool is open source and available at the project repository. Try it on your heaviest `.cpp` file and see how much time you save on incremental rebuilds.
