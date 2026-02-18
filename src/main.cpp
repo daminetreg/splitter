@@ -626,20 +626,38 @@ static SplitResult do_split(const std::string& input_path,
     for (const auto& f : all_flags)
         args.push_back(f.c_str());
 
-    CXTranslationUnit tu = nullptr;
-    CXErrorCode err = clang_parseTranslationUnit2(
-        index,
-        abs_path.c_str(),
-        args.data(),
-        static_cast<int>(args.size()),
-        nullptr, 0,
-        CXTranslationUnit_None,
-        &tu);
+    std::string ast_cache = (fs::path(output_dir) / (stem + ".ast")).string();
+    bool loaded_from_cache = false;
 
-    if (err != CXError_Success || !tu) {
-        if (verbose) std::cerr << "Error: failed to parse translation unit (code: " << err << ")\n";
-        clang_disposeIndex(index);
-        return result;
+    CXTranslationUnit tu = nullptr;
+
+    if (fs::exists(ast_cache) && fs::exists(abs_path) &&
+        fs::last_write_time(ast_cache) >= fs::last_write_time(abs_path)) {
+        CXErrorCode cerr = clang_createTranslationUnit2(index, ast_cache.c_str(), &tu);
+        if (cerr == CXError_Success && tu) {
+            loaded_from_cache = true;
+            if (verbose) out << "Loaded cached AST: " << ast_cache << "\n";
+        } else {
+            if (verbose) out << "AST cache load failed (code: " << cerr << "), re-parsing\n";
+            tu = nullptr;
+        }
+    }
+
+    if (!tu) {
+        unsigned parse_flags = CXTranslationUnit_ForSerialization;
+        CXErrorCode cerr = clang_parseTranslationUnit2(
+            index,
+            abs_path.c_str(),
+            args.data(),
+            static_cast<int>(args.size()),
+            nullptr, 0,
+            parse_flags,
+            &tu);
+        if (cerr != CXError_Success || !tu) {
+            if (verbose) std::cerr << "Error: failed to parse translation unit (code: " << cerr << ")\n";
+            clang_disposeIndex(index);
+            return result;
+        }
     }
 
     unsigned num_diag = clang_getNumDiagnostics(tu);
@@ -840,6 +858,14 @@ static SplitResult do_split(const std::string& input_path,
         if (removed_count > 0)
             out << ", " << removed_count << " stale removed";
         out << "\n";
+    }
+
+    if (!loaded_from_cache) {
+        fs::create_directories(output_dir);
+        if (clang_saveTranslationUnit(tu, ast_cache.c_str(),
+                                       CXSaveTranslationUnit_None) == CXSaveError_None) {
+            if (verbose) out << "Saved AST cache: " << ast_cache << "\n";
+        }
     }
 
     clang_disposeTranslationUnit(tu);

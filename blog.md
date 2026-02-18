@@ -152,6 +152,19 @@ The results are dramatic:
 
 The PCH transforms splitting from "mostly useful for no-change rebuilds" into a genuine incremental win for every edit.
 
+### Cached AST: Eliminating Parse Overhead
+
+Even with PCH, the no-change rebuild still takes ~10.7s — almost all of it spent in libclang re-parsing the source file to discover functions. Since our tool runs as a CLI, the parsed AST is thrown away after each invocation.
+
+The fix: serialize the parsed AST to disk with `clang_saveTranslationUnit`, and reload it on subsequent runs with `clang_createTranslationUnit` if the source file hasn't changed. Loading a serialized AST is dramatically faster than re-parsing.
+
+| Scenario | PCH only | + AST cache | Improvement |
+|---|---|---|---|
+| No-change rebuild | 10,662ms | **2,693ms** | 4.0x faster |
+| 1-function rebuild | 11,435ms | **3,739ms** | 3.1x faster |
+
+The no-change rebuild drops from 10.7s to 2.7s. The 1-function rebuild drops from 11.4s to 3.7s — now **4.6x faster than monolithic** (3.7s vs 17.1s). The AST cache is invalidated automatically when the source file changes (timestamp-based).
+
 ### Where Splitting Wins
 
 The benefit grows under specific conditions:
@@ -193,6 +206,6 @@ When the compiler generates dependency files (`-MD`, `-MMD`), cpp-splitter ensur
 
 ## Conclusion
 
-cpp-splitter trades a one-time splitting cost for per-function incremental compilation granularity. With automatic precompiled headers, even template-heavy files like Boost.Spirit see genuine incremental wins — 1-function rebuilds are 42% faster than monolithic, and the cold build penalty is cut in half. The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are.
+cpp-splitter trades a one-time splitting cost for per-function incremental compilation granularity. With automatic precompiled headers and AST caching, even template-heavy files like Boost.Spirit see dramatic incremental wins — 1-function rebuilds are 4.6x faster than monolithic (3.7s vs 17.1s), and no-change rebuilds complete in under 3 seconds. The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are.
 
 The tool is open source and available at the project repository. Try it on your heaviest `.cpp` file and see how much time you save on incremental rebuilds.
