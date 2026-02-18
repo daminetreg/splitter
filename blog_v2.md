@@ -55,7 +55,7 @@ Only modified split files get recompiled. Change one function out of 17? One fil
 
 ## Benchmark: Monolithic vs Split+Server+PCH
 
-Boost.Spirit parser example (510 lines, 17 functions). g++ 14.3.0, `-O0`, 6-core machine. "cpp-splitter" means server mode with warm TU cache and precompiled headers — the steady-state configuration during development.
+Boost.Spirit parser example (510 lines, 17 functions). g++ 14.3.0, `-O0`, running on 8 CPU cores of an Intel Xeon Platinum 8481C @ 2.70GHz. "cpp-splitter" means server mode with warm TU cache and precompiled headers — the steady-state configuration during development.
 
 The total build time has two distinct phases: **splitting** (parsing the source, walking the AST, writing split files) and **compiling + linking** (g++ compiles each split file, then links the objects into a binary). These phases have very different performance characteristics and optimization strategies.
 
@@ -106,6 +106,10 @@ Every subsequent rebuild benefits from all three caches (server TU cache, PCH, i
 The key insight is that splitting becomes negligible (~0.1s) once the server is warm, so the rebuild time is dominated by compile + link. And with PCH + incremental recompilation, compile + link is dominated by just the one changed file plus the final link step.
 
 Compare to monolithic, where all 19.1 seconds are a single indivisible `g++` invocation: ~11 seconds parsing Boost.Spirit headers, ~8 seconds generating code for all 17 functions. There is no way to skip any of it — even if nothing changed.
+
+### Scaling with Distributed Build Clusters
+
+These benchmarks run on a single machine with 8 cores, where 17 split files are compiled in ~3 rounds of parallel jobs. But splitting fundamentally turns a sequential problem (one monolithic compilation) into an embarrassingly parallel one (N independent compilations). On a build distribution cluster with enough cores to compile all split files simultaneously — one core per function — the cold compile phase would drop from ~5.7s to the cost of compiling a single split file (~1.2s) plus linking. For source files with 50 or 100 functions, the impact is even more dramatic: monolithic compile time scales linearly with function count, while distributed split compilation stays essentially constant at the cost of one function plus the link step.
 
 ### Over a Development Session
 
