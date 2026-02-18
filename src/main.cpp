@@ -627,13 +627,15 @@ static SplitResult do_split(const std::string& input_path,
         args.push_back(f.c_str());
 
     CXTranslationUnit tu = nullptr;
+    unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
+                         | CXTranslationUnit_CreatePreambleOnFirstParse;
     CXErrorCode err = clang_parseTranslationUnit2(
         index,
         abs_path.c_str(),
         args.data(),
         static_cast<int>(args.size()),
         nullptr, 0,
-        CXTranslationUnit_None,
+        parse_flags,
         &tu);
 
     if (err != CXError_Success || !tu) {

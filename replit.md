@@ -85,7 +85,7 @@ make clean    # removes binary
 - ld (for relocatable linking in launcher mode)
 
 ## Key Decisions
-- Uses the libclang C API (`clang-c/Index.h`) for AST parsing
+- Uses the libclang C API (`clang-c/Index.h`) for AST parsing with `CXTranslationUnit_PrecompiledPreamble | CXTranslationUnit_CreatePreambleOnFirstParse` flags to enable libclang's internal preamble caching (avoids re-parsing headers on repeated invocations)
 - Auto-detects C++ system include paths by running `g++ -E -x c++ /dev/null -v` and parsing output
   - Passes detected paths as `-isystem` flags to libclang parser
   - Ensures standard library types (std::string, std::vector, etc.) are properly resolved
