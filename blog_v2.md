@@ -57,33 +57,50 @@ Only modified split files get recompiled. Change one function out of 17? One fil
 
 Boost.Spirit parser example (510 lines, 17 functions). g++ 14.3.0, `-O0`, 6-core machine. "cpp-splitter" means server mode with warm TU cache and precompiled headers — the steady-state configuration during development.
 
+The total build time has two distinct phases: **splitting** (parsing the source, walking the AST, writing split files) and **compiling + linking** (g++ compiles each split file, then links the objects into a binary). These phases have very different performance characteristics and optimization strategies.
+
+### Splitting Phase
+
+Splitting is the work that cpp-splitter does before the compiler is even invoked: parse the source with libclang, identify function boundaries, and write out the split `.cpp` files and preamble header.
+
+| Scenario | Time | Notes |
+|---|---|---|
+| Local parse (no server) | 10.7s | Full libclang parse of source + Boost.Spirit headers |
+| Server cold (first parse) | 10.8s | Same as local — TU cache is empty |
+| Server warm (cached TU) | 0.1s | Cached AST, no parsing — **102x faster** |
+| Server reparse (source edited) | 2.9s | `clang_reparseTranslationUnit()` reuses preamble — **3.7x faster** |
+
+Without the server, splitting alone takes 10.7 seconds — more than half the monolithic build time — just to parse Boost.Spirit's template-heavy headers and walk the AST. The server eliminates this entirely on warm cache (0.1s), and even when the source has been edited, reparsing reuses the precompiled preamble and only re-parses the source body (2.9s).
+
+In a real-world project, the splitting results can also be cached externally. A remote build cache like [cmake-re](https://cmake-re.com) can store the split file outputs keyed by source content hash and compiler flags. Once a file has been split on any machine, subsequent builds (on the same or different machines) skip splitting entirely and pull the cached split files. This means the splitting cost — even the 10.7s cold parse — is paid at most once across your entire team.
+
+### Compile + Link Phase
+
+Once the split files exist, g++ compiles and links them. This is where PCH and incremental recompilation pay off.
+
+| Scenario | Time | Notes |
+|---|---|---|
+| Cold compile (all 17 files + PCH build) | ~25.7s | Build PCH once (~10s), then compile 17 files in parallel (~1.2s each) + link |
+| 1-function recompile + link | ~3.6s | PCH cached, compile 1 file (~1.2s), skip 16 files, link (~2.4s) |
+| No-change rebuild | ~2.3s | PCH cached, all `.o` files up-to-date, only timestamp checks + link |
+
+Without PCH, each split file would independently parse Boost.Spirit headers (~10s per file). With PCH, per-file compilation drops to ~1.2s — an **8.5x per-file speedup**. The PCH is rebuilt only when the preamble changes (new includes, changed struct definitions), so it adds zero cost to typical function edits.
+
+### Total: Splitting + Compile + Link
+
+Combining both phases gives the end-to-end comparison against monolithic:
+
 | Scenario | Monolithic | cpp-splitter (server+PCH) | Speedup |
 |---|---|---|---|
 | Cold build (from scratch) | 19.1s | 36.5s | 0.5x (slower) |
-| Rebuild after editing 1 function | 19.1s | 3.7s | **5.1x faster** |
-| Rebuild with no changes | 19.1s | 2.4s | **8.0x faster** |
+| Rebuild after editing 1 function | 19.1s | **3.7s** (0.1s split + 3.6s compile/link) | **5.1x faster** |
+| Rebuild with no changes | 19.1s | **2.4s** (0.1s split + 2.3s compile/link) | **8.0x faster** |
 
-The first row shows the trade-off: a cold split build (including PCH generation, splitting, and compiling all 17 files) is slower than monolithic. This is a one-time cost.
+The cold build is slower because it pays the one-time costs: full parse, PCH generation, and compiling all 17 files. Every subsequent rebuild benefits from all three caches (server TU cache, PCH, incremental `.o` files).
 
-The second row is where it pays off. Monolithic always takes 19.1 seconds regardless of what changed. With cpp-splitter, editing one function takes **3.7 seconds**: the server returns the cached AST in ~0.1s, the PCH is already built, one file compiles in ~1.2s (with PCH skipping header parsing), and the rest is linking. That's a **5.1x speedup** — 15.4 seconds saved on every edit.
+The key insight is that splitting becomes negligible (~0.1s) once the server is warm, so the rebuild time is dominated by compile + link. And with PCH + incremental recompilation, compile + link is dominated by just the one changed file plus the final link step.
 
-The third row shows the best case: nothing changed, so cpp-splitter confirms all `.o` files are up-to-date in 2.4 seconds. The monolithic compiler has no such shortcut — it always does the full 19.1 seconds.
-
-### Where the Time Goes
-
-Breaking down the 3.7-second rebuild after editing one function:
-
-| Phase | Time | What happens |
-|---|---|---|
-| Splitting | ~0.1s | Server returns cached AST, writes split files |
-| PCH check | ~0s | Preamble unchanged, `.gch` is current |
-| Compile 1 file | ~1.2s | g++ compiles one function body (PCH skips header parsing) |
-| Skip 16 files | ~0s | All other `.o` files are up-to-date |
-| Link | ~2.4s | g++ links 17 object files into the binary |
-
-The phases overlap slightly and include process startup overhead, so they don't sum exactly to 3.7s — but the dominant costs are clear: one compilation and one link.
-
-Compare to monolithic, where all 19.1 seconds are a single indivisible `g++` invocation: ~11 seconds parsing Boost.Spirit headers, ~8 seconds generating code for all 17 functions.
+Compare to monolithic, where all 19.1 seconds are a single indivisible `g++` invocation: ~11 seconds parsing Boost.Spirit headers, ~8 seconds generating code for all 17 functions. There is no way to skip any of it — even if nothing changed.
 
 ### Over a Development Session
 
