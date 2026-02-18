@@ -152,19 +152,6 @@ The results are dramatic:
 
 The PCH transforms splitting from "mostly useful for no-change rebuilds" into a genuine incremental win for every edit.
 
-### Cached AST: Eliminating Parse Overhead
-
-Even with PCH, the no-change rebuild still takes ~10.7s — almost all of it spent in libclang re-parsing the source file to discover functions. Since our tool runs as a CLI, the parsed AST is thrown away after each invocation.
-
-The fix: serialize the parsed AST to disk with `clang_saveTranslationUnit`, and reload it on subsequent runs with `clang_createTranslationUnit` if the source file hasn't changed. Loading a serialized AST is dramatically faster than re-parsing.
-
-| Scenario | PCH only | + AST cache | Improvement |
-|---|---|---|---|
-| No-change rebuild | 10,662ms | **2,693ms** | 4.0x faster |
-| 1-function rebuild | 11,435ms | **3,739ms** | 3.1x faster |
-
-The no-change rebuild drops from 10.7s to 2.7s. The 1-function rebuild drops from 11.4s to 3.7s — now **4.6x faster than monolithic** (3.7s vs 17.1s). The AST cache is invalidated automatically when the source file changes (timestamp-based).
-
 ### Where Splitting Wins
 
 The benefit grows under specific conditions:
@@ -197,6 +184,86 @@ This is completely transparent to the build system. No CMakeLists.txt changes ne
 
 When the compiler generates dependency files (`-MD`, `-MMD`), cpp-splitter ensures the first split file runs sequentially to produce the `.d` file, then the remaining files compile in parallel. The dependency output correctly references the original source file, so Make's incremental rebuild logic works as expected.
 
+## Persistent Server Mode: Cached Translation Units
+
+The splitting phase requires libclang to parse the entire source file and its headers to build the AST. Even with libclang's internal preamble caching, this parsing happens fresh on every invocation — the process exits and throws away the parsed state.
+
+The server mode eliminates this redundancy by keeping a background process alive that holds parsed translation units in memory:
+
+```bash
+$ ./cpp-splitter --server &
+[cpp-splitter server] listening on /tmp/cpp-splitter-1000.sock
+```
+
+Once started, every `cpp-splitter` invocation automatically connects to the server via Unix domain socket. The server maintains a cache of `CXTranslationUnit` objects keyed by source file path. On subsequent requests:
+
+- **Same file, unchanged**: Returns the cached AST directly — no parsing at all
+- **Same file, modified**: Calls `clang_reparseTranslationUnit()` which reuses the precompiled preamble (headers aren't re-parsed; only the source body is re-parsed)
+- **Different flags**: Discards the cached TU and does a full parse
+
+The client falls back to local parsing transparently if the server isn't running — no configuration changes needed.
+
+### Server Benchmark Results
+
+Data processing module (374 lines, 18 functions, standard library headers):
+
+**Splitting time only** (parsing + AST walk + file generation):
+
+| Scenario | Time | vs Local |
+|---|---|---|
+| Local parse (no server) | 1,970ms | baseline |
+| Server cold (first parse) | 1,936ms | ~same |
+| Server warm (cached TU) | 118ms | **17x faster** |
+| Server reparse (source changed) | 520ms | **3.8x faster** |
+
+The warm-cache case is 17x faster because the server skips parsing entirely — it walks the already-built AST and generates the split files. When the source changes, `clang_reparseTranslationUnit()` reuses the precompiled preamble (all the `#include` processing is cached), so only the source body is re-parsed — 3.8x faster than a full parse.
+
+**Full build cycle** (split + PCH + compile + link):
+
+| Scenario | Without Server | With Server | Improvement |
+|---|---|---|---|
+| Cold build | 7,883ms | 6,307ms | 20% faster |
+| 1-function rebuild | 2,930ms | 1,146ms | **2.6x faster** |
+| No-change rebuild | 2,670ms | 851ms | **3.1x faster** |
+
+For the full compile cycle with lightweight standard library headers, compilation dominates — but the server still provides meaningful savings by eliminating the ~2s parsing overhead on every rebuild.
+
+### Boost.Spirit with Server (510 lines, 17 functions)
+
+The server's impact is far more dramatic with heavy headers, where parsing dominates the total build time.
+
+**Splitting time only:**
+
+| Scenario | Time | vs Local |
+|---|---|---|
+| Local parse (no server) | 10,739ms | baseline |
+| Server cold (first parse) | 10,841ms | ~same |
+| Server warm (cached TU) | 105ms | **102x faster** |
+| Server reparse (source changed) | 2,917ms | **3.7x faster** |
+
+With Boost.Spirit, the server's warm cache reduces splitting from **10.7 seconds to 105 milliseconds** — a 102x speedup. The parsing cost (10.7s) is entirely eliminated; only the AST walk and file writing remain. Even `clang_reparseTranslationUnit()` after a source edit is 3.7x faster than a cold parse, because it reuses the precompiled preamble (all the Boost template headers stay cached).
+
+**Full build cycle** (split + PCH + compile + link):
+
+| Scenario | Without Server | With Server | Improvement |
+|---|---|---|---|
+| Monolithic | 19,088ms | — | baseline |
+| Cold build | 50,275ms | 36,540ms | 27% faster |
+| 1-function rebuild | 15,129ms | 3,726ms | **4.1x faster** |
+| No-change rebuild | 14,313ms | 2,395ms | **6.0x faster** |
+
+Without the server, a 1-function rebuild (15.1s) was slower than monolithic (19.1s) because the splitting phase alone took 10.7s. With the server, splitting drops to 105ms, and the 1-function rebuild is now **5.1x faster than monolithic** (3.7s vs 19.1s). The no-change rebuild drops from 14.3s to 2.4s — the server eliminates the parsing bottleneck that previously dominated even when nothing needed recompilation.
+
+This is where all three optimizations stack together: the server eliminates reparsing (10.7s → 0.1s), the PCH eliminates per-file header parsing during compilation (~10s → ~1.2s per file), and incremental recompilation skips 16 of 17 files. The result: editing one function in a Boost.Spirit file rebuilds in 3.7s instead of 19.1s.
+
+### How It Works Internally
+
+The server is intentionally simple: single-threaded, no authentication, local Unix socket only. The protocol is a length-prefixed binary message containing the source path, output directory, and compiler flags. The server parses/splits and returns the result (file list + captured output text). Compilation always happens client-side.
+
+The `CachedTU` struct owns both the `CXIndex` and `CXTranslationUnit` with RAII cleanup. Cache invalidation is timestamp-based: if the source file's mtime changes, the server calls `clang_reparseTranslationUnit()` (which reuses libclang's precompiled preamble). If the compiler flags change, the cached TU is discarded and a full re-parse occurs.
+
+Signal handlers (`SIGINT`, `SIGTERM`) ensure the Unix socket file is cleaned up on shutdown. The socket path defaults to `/tmp/cpp-splitter-<uid>.sock` but can be overridden via `CPP_SPLITTER_SOCKET`. Setting `CPP_SPLITTER_NO_SERVER=1` disables the client-side connection attempt.
+
 ## Limitations and Future Work
 
 - **Cold build overhead**: Splitting adds overhead to the first build (PCH build + splitting + parallel compile). The tool is optimized for the edit-compile-test cycle, not CI/CD pipelines doing clean builds. With PCH, the cold build penalty is cut roughly in half for header-heavy files.
@@ -206,6 +273,14 @@ When the compiler generates dependency files (`-MD`, `-MMD`), cpp-splitter ensur
 
 ## Conclusion
 
-cpp-splitter trades a one-time splitting cost for per-function incremental compilation granularity. With automatic precompiled headers and AST caching, even template-heavy files like Boost.Spirit see dramatic incremental wins — 1-function rebuilds are 4.6x faster than monolithic (3.7s vs 17.1s), and no-change rebuilds complete in under 3 seconds. The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are.
+cpp-splitter trades a one-time splitting cost for per-function incremental compilation granularity. Three layers of optimization stack together:
 
-The tool is open source and available at the project repository. Try it on your heaviest `.cpp` file and see how much time you save on incremental rebuilds.
+1. **Precompiled headers** eliminate redundant header parsing across split files (8.5x per-file speedup for heavy headers)
+2. **Persistent server mode** eliminates redundant source parsing across invocations (102x faster splitting with warm cache for Boost.Spirit)
+3. **Incremental recompilation** skips unchanged functions entirely
+
+Combined, these bring a Boost.Spirit 1-function rebuild from 19.1s (monolithic) to 3.7s — a 5.1x speedup.
+
+The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are. Start the server once (`./cpp-splitter --server &`), and every subsequent build automatically benefits from cached translation units.
+
+The tool is proprietary and available for early access on request if you are an EngFlow customer. Try it on your heaviest `.cpp` file and see how much time you save on incremental rebuilds.

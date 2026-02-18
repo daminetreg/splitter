@@ -31,10 +31,13 @@ When the first argument is not a source file, the tool acts as a compiler wrappe
 ./cpp-splitter <compiler> [compiler_flags...] -c -o <output.o> <source.cpp>
 ```
 
-The tool splits the source, compiles each piece separately, and combines them into a single `.o` using relocatable linking (`ld -r`). Non-compilation commands are passed through transparently.
+The tool splits the source via the server, compiles each piece separately, and combines them into a single `.o` using relocatable linking (`ld -r`). Non-compilation commands are passed through transparently.
+
+**The server must be running before using launcher mode.** Launcher mode always connects to the server for splitting; there is no fallback to local parsing. This ensures fast splitting via cached translation units during builds.
 
 #### CMake usage
 ```
+./cpp-splitter --server &
 cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/cpp-splitter ..
 ```
 
@@ -45,6 +48,31 @@ cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/cpp-splitter ..
 - Single `.o` output via `ld -r` relocatable linking (or direct copy for single-function files)
 - Verbose mode: set `TIPI_CPP_SPLITTER_VERBOSE=on` to see splitting, compilation, and linking details on stderr
 
+### Mode 3: Server (persistent TU cache)
+Starts a background server that keeps parsed translation units in memory, so subsequent split requests reuse the cached preamble instead of re-parsing from scratch.
+
+```
+./cpp-splitter --server [--socket <path>]
+```
+
+The server listens on a Unix domain socket (default: `/tmp/cpp-splitter-<uid>.sock`). In direct mode (Mode 1), the client tries to connect to the server; if unavailable, it falls back to local parsing. In launcher mode (Mode 2), the server is required — the client will fail with an error if the server is not running.
+
+#### Environment Variables
+- `CPP_SPLITTER_SOCKET` - override the Unix socket path
+- `CPP_SPLITTER_NO_SERVER=1` - disable client connections to the server
+
+#### Cache Invalidation
+- Source file mtime changes → `clang_reparseTranslationUnit()` (reuses precompiled preamble)
+- Compiler flags change → full reparse + new cache entry
+- Compilation remains client-side; server only accelerates the parsing/splitting phase
+
+#### Examples
+```
+./cpp-splitter --server &                                 # start server in background
+./cpp-splitter src/app.cpp output --compile -o myapp      # uses server if available
+CPP_SPLITTER_NO_SERVER=1 ./cpp-splitter src/app.cpp out   # force local parsing
+```
+
 ## Project Architecture
 ```
 src/main.cpp                    - Main tool source code (uses libclang C API)
@@ -53,6 +81,10 @@ test/sample.cpp                 - Sample C++ file for testing
 example/data_processing.cpp     - Data processing example (18 functions)
 example/data_processing.h       - Header for data processing example
 example/benchmark.sh            - Benchmark script (monolithic vs split compile)
+example/cmake/                  - CMake integration example (uses test/sample.cpp)
+example/cmake/CMakeLists.txt    - CMake project file
+example/cmake/build.sh          - Script to build with cpp-splitter as launcher
+example/benchmark_server.sh     - Server mode benchmark (local vs server parsing + compile)
 example/spirit_example.cpp      - Boost.Spirit example (template-heavy, needs lots of RAM)
 example/spirit_example.h        - Header for spirit example
 ```
@@ -67,9 +99,14 @@ example/spirit_example.h        - Header for spirit example
 - Split file writing: incremental, with `#line` directives
 - `build_pch()` - precompiles the preamble header for faster split file compilation
 - `compile_parallel()` - parallel compilation using Boost.Process + std::thread
-- `do_split()` - core splitting logic (extracted for reuse), includes AST caching
+- `build_clang_flags()` - assembles clang parser flags (system includes + extra flags)
+- `check_diagnostics()` - checks and reports parse errors from TU
+- `do_split()` - core splitting logic (standalone, creates+disposes TU)
+- `do_split_with_cache()` - splitting with persistent TU cache (server mode)
+- Server infrastructure: `CachedTU`, `g_tu_cache`, Unix socket protocol, `run_server()`
+- `try_server_split()` - client: attempts to split via server, falls back gracefully
 - `run_as_launcher()` - compiler launcher mode
-- `main()` - mode detection and dispatch
+- `main()` - mode detection and dispatch (direct / launcher / server)
 
 ## Build
 ```
@@ -85,7 +122,7 @@ make clean    # removes binary
 - ld (for relocatable linking in launcher mode)
 
 ## Key Decisions
-- Uses the libclang C API (`clang-c/Index.h`) for AST parsing
+- Uses the libclang C API (`clang-c/Index.h`) for AST parsing with `CXTranslationUnit_PrecompiledPreamble | CXTranslationUnit_CreatePreambleOnFirstParse` flags to enable libclang's internal preamble caching (avoids re-parsing headers on repeated invocations)
 - Auto-detects C++ system include paths by running `g++ -E -x c++ /dev/null -v` and parsing output
   - Passes detected paths as `-isystem` flags to libclang parser
   - Ensures standard library types (std::string, std::vector, etc.) are properly resolved
@@ -104,6 +141,7 @@ make clean    # removes binary
   - Preamble: `#line 1 "original.cpp"` at top, re-syncs after each skipped function body
   - Split files: `#line <start_line> "original.cpp"` before each function body
   - Line offset table built via `build_line_offsets()` for efficient offset-to-line conversion
+- Launcher mode requires a running server — always connects via Unix socket, no fallback to local parsing
 - Launcher mode detects source files by extension (.cpp, .cc, .cxx, .C, .c++, .cp, .c)
 - Shell quoting via `shell_quote()` for safe command construction
 - Automatic precompiled headers (PCH) via `build_pch()`: precompiles the preamble header before split file compilation
@@ -112,12 +150,6 @@ make clean    # removes binary
   - Incremental: only rebuilds PCH when preamble header is newer than `.gch` file
   - Graceful fallback: if PCH build fails, continues without PCH
   - Works in both direct mode and launcher mode
-- AST caching via `clang_saveTranslationUnit` / `clang_createTranslationUnit2`
-  - Saves parsed AST to `<output_dir>/<stem>.ast` after first parse
-  - Loads cached AST on subsequent runs if source file hasn't changed (timestamp-based)
-  - Eliminates ~10s libclang parsing overhead for header-heavy files
-  - Cache automatically invalidated when source file is modified
-  - Parsed with `CXTranslationUnit_ForSerialization` flag for reliable serialization
 - Incremental recompilation via `needs_recompile()`: compares .cpp, preamble, and PCH timestamps against .o file
   - Direct mode: shows "(up-to-date)" for skipped files, reports count of skipped vs recompiled
   - Launcher mode: skips up-to-date files, also skips `ld -r` if all objects and output are current
@@ -127,9 +159,19 @@ make clean    # removes binary
   - Thread count = min(num_jobs, hardware_concurrency)
   - stderr captured per-process for clean error reporting
   - In launcher mode with dep flags, first file runs sequentially (generates .d file), rest run in parallel
+- Persistent server mode via Unix domain socket for TU cache reuse
+  - `CachedTU` struct owns CXIndex + CXTranslationUnit per source file, with RAII cleanup
+  - Cache keyed by absolute path; invalidated by mtime change (reparse) or flags change (full reparse)
+  - `clang_reparseTranslationUnit()` reuses libclang's precompiled preamble when only source body changes
+  - Length-prefixed binary protocol: 4-byte length header + newline-delimited fields
+  - Single-threaded server with signal handling (SIGINT/SIGTERM) for socket cleanup
+  - Client connection is transparent: `try_server_split()` returns empty SplitResult on failure, caller falls back to local `do_split()`
+  - Compilation remains client-side; server only accelerates parsing/splitting
+  - Socket path: `/tmp/cpp-splitter-<uid>.sock` (overridable via `CPP_SPLITTER_SOCKET`)
 
 ## Recent Changes
-- 2026-02-18: AST caching — saves parsed AST to disk, loads on subsequent runs if source unchanged, eliminates ~10s parse overhead
+- 2026-02-18: Launcher mode now requires server — no fallback to local parsing, ensures fast cached splitting during CMake builds
+- 2026-02-18: Persistent server mode — Unix socket server keeps parsed TUs in memory, uses clang_reparseTranslationUnit for preamble reuse across invocations
 - 2026-02-18: Automatic precompiled headers (PCH) — precompiles preamble header before split file compilation, 8.5x per-file speedup for heavy headers
 - 2026-02-18: Auto-detect C++ system include paths for clang parser — resolves all standard library types correctly
 - 2026-02-18: Source-text-based forward declarations — extracts signatures from source text instead of libclang type resolution
