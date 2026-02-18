@@ -283,4 +283,4 @@ Combined, these bring a Boost.Spirit 1-function rebuild from 19.1s (monolithic) 
 
 The CMake launcher integration makes it a drop-in addition to existing build workflows, and the source-text-based approach ensures reliable forward declarations regardless of how complex your types are. Start the server once (`./cpp-splitter --server &`), and every subsequent build automatically benefits from cached translation units.
 
-The tool is open source and available at the project repository. Try it on your heaviest `.cpp` file and see how much time you save on incremental rebuilds.
+The tool is proprietary and available for early access on request if you are an EngFlow customer. Try it on your heaviest `.cpp` file and see how much time you save on incremental rebuilds.
