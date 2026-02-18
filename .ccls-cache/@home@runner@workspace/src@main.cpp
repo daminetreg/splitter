@@ -546,6 +546,20 @@ static bool is_source_file(const std::string& path) {
     return false;
 }
 
+static bool is_header_file(const std::string& path) {
+    static const char* exts[] = {".h", ".hpp", ".hxx", ".H", ".h++", ".hh"};
+    for (const char* ext : exts) {
+        size_t elen = std::strlen(ext);
+        if (path.size() >= elen && path.compare(path.size() - elen, elen, ext) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool is_splittable_file(const std::string& path) {
+    return is_source_file(path) || is_header_file(path);
+}
+
 static std::string shell_quote(const std::string& s) {
     if (s.find_first_of(" \t\n'\"\\$`!#&|;(){}[]<>?*~") == std::string::npos)
         return s;
