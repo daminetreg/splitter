@@ -530,6 +530,17 @@ static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>
     return results;
 }
 
+static std::string file_content_hash(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "";
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    size_t h = std::hash<std::string>{}(ss.str());
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016zx", h);
+    return std::string(buf);
+}
+
 static bool needs_recompile(const std::string& cpp_file, const std::string& obj_file,
                             const std::string& preamble_file = "") {
     if (!fs::exists(obj_file)) return true;
@@ -587,12 +598,17 @@ static bool build_pch(const std::string& preamble_file,
                       const std::vector<std::string>& flags,
                       const std::string& include_dir,
                       bool verbose,
-                      std::ostream& out = std::cout,
-                      bool force = false) {
-    std::string gch_file = preamble_file + ".gch";
+                      std::ostream& out = std::cout) {
+    std::string hash = file_content_hash(preamble_file);
+    if (hash.empty()) {
+        if (verbose) out << "  PCH: cannot read preamble, skipping\n";
+        return false;
+    }
 
-    if (!force && fs::exists(gch_file) &&
-        fs::last_write_time(preamble_file) <= fs::last_write_time(gch_file)) {
+    std::string gch_file = preamble_file + ".gch";
+    std::string hash_marker = gch_file + "." + hash;
+
+    if (fs::exists(gch_file) && fs::exists(hash_marker)) {
         if (verbose) out << "  PCH up-to-date: " << gch_file << "\n";
         return true;
     }
@@ -610,6 +626,20 @@ static bool build_pch(const std::string& preamble_file,
         if (verbose) out << "  PCH build failed (exit " << ret << "), continuing without PCH\n";
         return false;
     }
+
+    std::string dir = fs::path(gch_file).parent_path().string();
+    std::string gch_name = fs::path(gch_file).filename().string();
+    if (dir.empty()) dir = ".";
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        std::string name = entry.path().filename().string();
+        if (name.size() > gch_name.size() + 1 &&
+            name.substr(0, gch_name.size() + 1) == gch_name + "." &&
+            entry.path().string() != hash_marker) {
+            fs::remove(entry.path());
+        }
+    }
+    { std::ofstream m(hash_marker); }
+
     if (verbose) out << "  PCH built: " << gch_file << "\n";
     return true;
 }
@@ -618,7 +648,6 @@ struct SplitResult {
     std::vector<std::string> compilable_files;
     std::string preamble_filename;
     bool success;
-    bool preamble_changed = false;
     std::vector<std::string> header_obj_dirs;
     std::vector<std::string> header_obj_files;
 };
@@ -745,7 +774,6 @@ static DecodedRequest decode_request(const std::string& msg) {
 static std::string encode_response(const SplitResult& sr, const std::string& output_text) {
     std::ostringstream oss;
     oss << (sr.success ? "1" : "0") << '\n';
-    oss << (sr.preamble_changed ? "1" : "0") << '\n';
     oss << sr.preamble_filename << '\n';
     oss << sr.compilable_files.size() << '\n';
     for (const auto& f : sr.compilable_files) oss << f << '\n';
@@ -762,8 +790,6 @@ static SplitResult decode_response(const std::string& msg, std::string& output_t
     std::istringstream iss(msg);
     std::string s; std::getline(iss, s);
     sr.success = (s == "1");
-    std::string pc; std::getline(iss, pc);
-    sr.preamble_changed = (pc == "1");
     std::getline(iss, sr.preamble_filename);
     std::string n; std::getline(iss, n);
     int nfiles = 0;
@@ -1211,7 +1237,6 @@ static SplitResult do_split_with_cache(const std::string& input_path,
             }
             ofs << preamble;
             ofs.close();
-            result.preamble_changed = true;
             if (verbose) out << "Generated preamble: " << preamble_path << " (updated)\n";
         } else {
             if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
@@ -1458,7 +1483,6 @@ static SplitResult do_split(const std::string& input_path,
             }
             ofs << preamble;
             ofs.close();
-            result.preamble_changed = true;
             if (verbose) out << "Generated preamble: " << preamble_path << " (updated)\n";
         } else {
             if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
@@ -1721,7 +1745,7 @@ static int run_as_launcher(int argc, char* argv[]) {
         return run_command_quiet(cmd);
     }
 
-    build_pch(sr.preamble_filename, compiler, other_flags, split_dir, verbose, std::cerr, sr.preamble_changed);
+    build_pch(sr.preamble_filename, compiler, other_flags, split_dir, verbose, std::cerr);
 
     std::vector<std::string> obj_files;
     std::vector<CompileJob> parallel_jobs;
@@ -2008,7 +2032,7 @@ int main(int argc, char* argv[]) {
 
         std::vector<std::string> pch_flags = {"-std=c++17"};
         for (const auto& f : extra_flags) pch_flags.push_back(f);
-        bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, pch_flags, output_dir, true, std::cout, sr.preamble_changed);
+        bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, pch_flags, output_dir, true, std::cout);
         if (pch_ok) std::cout << "\n";
 
         std::vector<CompileJob> jobs;
