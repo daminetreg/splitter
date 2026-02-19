@@ -1678,21 +1678,26 @@ static int run_as_launcher(int argc, char* argv[]) {
         split_dir = fs::absolute(fs::path(input_file).stem().string() + ".split").string();
     }
 
-    SplitResult sr = try_server_split(input_file, split_dir, other_flags, verbose, std::cerr);
-
-    if (!sr.success) {
-        std::cerr << "cpp-splitter: server connection failed. "
-                  << "The server must be running in launcher mode.\n"
-                  << "Start it with: cpp-splitter --server &\n";
-        return 1;
-    }
-
-    if (sr.compilable_files.empty()) {
+    auto build_passthrough_cmd = [&]() {
         std::string cmd;
         for (int i = 1; i < argc; i++) {
             if (i > 1) cmd += " ";
             cmd += shell_quote(argv[i]);
         }
+        return cmd;
+    };
+
+    SplitResult sr = try_server_split(input_file, split_dir, other_flags, verbose, std::cerr);
+
+    if (!sr.success) {
+        if (verbose) std::cerr << "[cpp-splitter] splitting failed, falling back to normal compilation\n";
+        std::string cmd = build_passthrough_cmd();
+        if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
+        return run_command_quiet(cmd);
+    }
+
+    if (sr.compilable_files.empty()) {
+        std::string cmd = build_passthrough_cmd();
         if (verbose) std::cerr << "[cpp-splitter] no compilable files, passthrough: " << cmd << "\n";
         return run_command_quiet(cmd);
     }
@@ -1702,6 +1707,7 @@ static int run_as_launcher(int argc, char* argv[]) {
     std::vector<std::string> obj_files;
     std::vector<CompileJob> parallel_jobs;
     int launcher_skipped = 0;
+    bool split_build_failed = false;
 
     for (size_t fi = 0; fi < sr.compilable_files.size(); ++fi) {
         const auto& cpp = sr.compilable_files[fi];
@@ -1739,21 +1745,23 @@ static int run_as_launcher(int argc, char* argv[]) {
             int ret = run_command_quiet(cmd);
             if (ret != 0) {
                 std::cerr << "cpp-splitter: compilation failed for split file: " << cpp << "\n";
-                return ret;
+                split_build_failed = true;
+                break;
             }
         } else {
             parallel_jobs.push_back({cmd, cpp, obj});
         }
     }
 
-    if (!parallel_jobs.empty()) {
+    if (!split_build_failed && !parallel_jobs.empty()) {
         if (verbose) std::cerr << "[cpp-splitter] compiling " << parallel_jobs.size() << " split file(s) in parallel\n";
         auto results = compile_parallel(parallel_jobs, verbose, std::cerr);
         for (const auto& r : results) {
             if (r.exit_code != 0) {
                 std::cerr << "cpp-splitter: compilation failed for split file: " << r.source_file << "\n";
                 if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
-                return 1;
+                split_build_failed = true;
+                break;
             }
         }
     }
@@ -1761,7 +1769,7 @@ static int run_as_launcher(int argc, char* argv[]) {
     if (output_file.empty())
         output_file = fs::path(input_file).stem().string() + ".o";
 
-    {
+    if (!split_build_failed) {
         std::vector<CompileJob> hdr_compile_jobs;
         for (const auto& hobj : sr.header_obj_files) {
             std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
@@ -1785,29 +1793,39 @@ static int run_as_launcher(int argc, char* argv[]) {
                 if (r.exit_code != 0) {
                     std::cerr << "cpp-splitter: compilation failed for header dep: " << r.source_file << "\n";
                     if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
-                    return 1;
+                    split_build_failed = true;
+                    break;
                 }
             }
         }
     }
 
-    bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file);
+    if (!split_build_failed) {
+        bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file);
 
-    if (!need_link) {
-        if (verbose) std::cerr << "[cpp-splitter] all up-to-date, skipping link: " << output_file << "\n";
-    } else if (obj_files.size() == 1) {
-        if (verbose) std::cerr << "[cpp-splitter] single .o, copying " << obj_files[0] << " -> " << output_file << "\n";
-        fs::copy_file(obj_files[0], output_file, fs::copy_options::overwrite_existing);
-    } else {
-        std::string cmd = "ld -r -o " + shell_quote(output_file);
-        for (const auto& obj : obj_files)
-            cmd += " " + shell_quote(obj);
-        if (verbose) std::cerr << "[cpp-splitter] ld -r: " << cmd << "\n";
-        int ret = run_command_quiet(cmd);
-        if (ret != 0) {
-            std::cerr << "cpp-splitter: relocatable link failed\n";
-            return ret;
+        if (!need_link) {
+            if (verbose) std::cerr << "[cpp-splitter] all up-to-date, skipping link: " << output_file << "\n";
+        } else if (obj_files.size() == 1) {
+            if (verbose) std::cerr << "[cpp-splitter] single .o, copying " << obj_files[0] << " -> " << output_file << "\n";
+            fs::copy_file(obj_files[0], output_file, fs::copy_options::overwrite_existing);
+        } else {
+            std::string cmd = "ld -r -o " + shell_quote(output_file);
+            for (const auto& obj : obj_files)
+                cmd += " " + shell_quote(obj);
+            if (verbose) std::cerr << "[cpp-splitter] ld -r: " << cmd << "\n";
+            int ret = run_command_quiet(cmd);
+            if (ret != 0) {
+                std::cerr << "cpp-splitter: relocatable link failed\n";
+                split_build_failed = true;
+            }
         }
+    }
+
+    if (split_build_failed) {
+        std::cerr << "[cpp-splitter] split build failed, falling back to normal compilation\n";
+        std::string cmd = build_passthrough_cmd();
+        if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
+        return run_command_quiet(cmd);
     }
 
     if (verbose) std::cerr << "[cpp-splitter] done: " << output_file << "\n";
@@ -1945,7 +1963,25 @@ int main(int argc, char* argv[]) {
             sr = do_split(input_path, output_dir, extra_flags, true);
         }
     }
-    if (!sr.success) return 1;
+
+    if (!sr.success) {
+        std::cerr << "Warning: splitting failed, falling back to normal compilation\n";
+        if (do_compile) {
+            std::string cmd = cxx_compiler + " -std=c++17";
+            for (const auto& f : extra_flags) cmd += " " + f;
+            cmd += " -o " + output_binary + " " + input_path;
+            std::cout << "\n--- Compiling without splitting ---\n\n";
+            std::cout << "  $ " << cmd << "\n";
+            int ret = run_command(cmd);
+            if (ret != 0) {
+                std::cerr << "Error: compilation failed\n";
+                return 1;
+            }
+            std::cout << "\nBuild successful: " << output_binary << "\n";
+        }
+        return 0;
+    }
+
     if (sr.compilable_files.empty()) return 0;
 
     if (do_compile) {
@@ -2069,7 +2105,18 @@ int main(int argc, char* argv[]) {
 
             std::cout << "\nBuild successful: " << output_binary << "\n";
         } else {
-            return 1;
+            std::cerr << "Warning: split compilation failed, falling back to normal compilation\n";
+            std::string cmd = cxx_compiler + " -std=c++17";
+            for (const auto& f : extra_flags) cmd += " " + f;
+            cmd += " -o " + output_binary + " " + input_path;
+            std::cout << "\n--- Compiling without splitting ---\n\n";
+            std::cout << "  $ " << cmd << "\n";
+            int ret = run_command(cmd);
+            if (ret != 0) {
+                std::cerr << "Error: compilation failed\n";
+                return 1;
+            }
+            std::cout << "\nBuild successful (fallback): " << output_binary << "\n";
         }
     }
 
