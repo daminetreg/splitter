@@ -1679,7 +1679,12 @@ static int run_as_launcher(int argc, char* argv[]) {
         split_dir = fs::absolute(fs::path(input_file).stem().string() + ".split").string();
     }
 
-    SplitResult sr = try_server_split(input_file, split_dir, other_flags, verbose, std::cerr);
+    auto split_flags = other_flags;
+    if (compiler == "tipi-compiler-driver") {
+      auto actual_compiler = *split_flags.begin();
+      split_flags = std::vector<std::string>(split_flags.begin()+1, split_flags.end());
+    }
+    SplitResult sr = try_server_split(input_file, split_dir, split_flags, verbose, std::cerr);
 
     if (!sr.success) {
         std::cerr << "cpp-splitter: server connection failed. "
