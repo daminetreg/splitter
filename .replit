@@ -27,4 +27,4 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "make clean && make && echo \"--- Build successful ---\" && echo \"\" && echo \"Usage: ./cpp-splitter <input.cpp> [output_dir] [--compile] [-o binary] [-- <clang_flags>]\" && echo \"\" && echo \"--- Demo: Split, compile and run test/sample.cpp ---\" && rm -rf output && ./cpp-splitter test/sample.cpp output --compile -o sample_app && echo \"\" && echo \"--- Running the compiled binary ---\" && ./sample_app"
+args = "make clean && make && echo \"--- Build successful ---\" && echo \"\" && echo \"Usage: ./cpp-splitter <input.cpp> [output_dir] [--compile] [-o binary] [-- <clang_flags>]\" && echo \"\" && echo \"--- Demo: Split, compile and run test/sample.cpp ---\" && rm -rf output && ./cpp-splitter test/sample.cpp output --compile -o sample_app && echo \"\" && echo \"--- Running the compiled binary ---\" && ./sample_app && echo \"\" && echo \"--- Demo: Auto-detect & split headers (test/use_mylib.cpp includes test/mylib.h) ---\" && rm -rf output && ./cpp-splitter test/use_mylib.cpp output --compile -o test_app -- -Itest && echo \"\" && echo \"--- Running test_app ---\" && ./test_app"

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -305,6 +306,13 @@ static std::string generate_forward_decl(const FunctionInfo& fn,
     if (sig.empty())
         return "";
 
+    {
+        std::string inline_prefix = "inline ";
+        size_t ipos = sig.find(inline_prefix);
+        if (ipos != std::string::npos)
+            sig.erase(ipos, inline_prefix.size());
+    }
+
     if (fn.is_static) {
         {
             std::string prefix = "static ";
@@ -546,6 +554,20 @@ static bool is_source_file(const std::string& path) {
     return false;
 }
 
+static bool is_header_file(const std::string& path) {
+    static const char* exts[] = {".h", ".hpp", ".hxx", ".H", ".h++", ".hh"};
+    for (const char* ext : exts) {
+        size_t elen = std::strlen(ext);
+        if (path.size() >= elen && path.compare(path.size() - elen, elen, ext) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool is_splittable_file(const std::string& path) {
+    return is_source_file(path) || is_header_file(path);
+}
+
 static std::string shell_quote(const std::string& s) {
     if (s.find_first_of(" \t\n'\"\\$`!#&|;(){}[]<>?*~") == std::string::npos)
         return s;
@@ -596,7 +618,17 @@ struct SplitResult {
     std::vector<std::string> compilable_files;
     std::string preamble_filename;
     bool success;
+    std::vector<std::string> header_obj_dirs;
+    std::vector<std::string> header_obj_files;
 };
+
+struct SplitHeaderInfo {
+    std::string split_dir;
+    std::string preamble_path;
+    std::vector<std::string> compilable_files;
+};
+
+static std::unordered_map<std::string, SplitHeaderInfo> g_split_headers;
 
 struct CachedTU {
     CXIndex index = nullptr;
@@ -715,6 +747,10 @@ static std::string encode_response(const SplitResult& sr, const std::string& out
     oss << sr.preamble_filename << '\n';
     oss << sr.compilable_files.size() << '\n';
     for (const auto& f : sr.compilable_files) oss << f << '\n';
+    oss << sr.header_obj_dirs.size() << '\n';
+    for (const auto& d : sr.header_obj_dirs) oss << d << '\n';
+    oss << sr.header_obj_files.size() << '\n';
+    for (const auto& f : sr.header_obj_files) oss << f << '\n';
     oss << output_text;
     return oss.str();
 }
@@ -732,10 +768,149 @@ static SplitResult decode_response(const std::string& msg, std::string& output_t
         std::string f; std::getline(iss, f);
         sr.compilable_files.push_back(f);
     }
+    std::string nd; std::getline(iss, nd);
+    int ndirs = 0;
+    try { ndirs = std::stoi(nd); } catch (...) {}
+    for (int i = 0; i < ndirs; ++i) {
+        std::string d; std::getline(iss, d);
+        sr.header_obj_dirs.push_back(d);
+    }
+    std::string no; std::getline(iss, no);
+    int nobjs = 0;
+    try { nobjs = std::stoi(no); } catch (...) {}
+    for (int i = 0; i < nobjs; ++i) {
+        std::string f; std::getline(iss, f);
+        sr.header_obj_files.push_back(f);
+    }
     std::ostringstream rest;
     rest << iss.rdbuf();
     output_text = rest.str();
     return sr;
+}
+
+static void inclusion_visitor(CXFile included_file, CXSourceLocation* /*stack*/,
+                              unsigned /*include_len*/, CXClientData client_data) {
+    auto* includes = static_cast<std::vector<std::string>*>(client_data);
+    std::string path = cx_to_string(clang_getFileName(included_file));
+    if (!path.empty()) {
+        std::error_code ec;
+        std::string abs = fs::absolute(path, ec).string();
+        if (!ec) includes->push_back(abs);
+    }
+}
+
+static bool is_stdlib_header(const std::string& abs_path) {
+    static std::vector<std::string> stdlib_paths;
+    static bool init = false;
+    if (!init) {
+        stdlib_paths = detect_system_includes();
+        init = true;
+    }
+    for (const auto& sp : stdlib_paths) {
+        if (abs_path.size() >= sp.size() &&
+            abs_path.compare(0, sp.size(), sp) == 0)
+            return true;
+    }
+    return false;
+}
+
+static SplitResult do_split(const std::string& input_path,
+                            const std::string& output_dir,
+                            const std::vector<std::string>& extra_flags,
+                            bool verbose,
+                            std::ostream& out = std::cout);
+
+static void resolve_header_deps(CXTranslationUnit tu,
+                                 SplitResult& result,
+                                 const std::string& output_dir,
+                                 const std::vector<std::string>& extra_flags,
+                                 bool verbose,
+                                 std::ostream& out) {
+    std::vector<std::string> includes;
+    clang_getInclusions(tu, inclusion_visitor, &includes);
+
+    std::set<std::string> seen_includes;
+    for (const auto& inc_path : includes) {
+        if (!seen_includes.insert(inc_path).second) continue;
+        if (!is_header_file(inc_path)) continue;
+        if (is_stdlib_header(inc_path)) continue;
+        if (g_split_headers.find(inc_path) != g_split_headers.end()) continue;
+
+        std::string manifest = (fs::path(output_dir) /
+            (fs::path(inc_path).stem().string() + ".h.split")).string();
+        bool stale = false;
+        if (fs::exists(manifest)) {
+            auto hdr_time = fs::last_write_time(inc_path);
+            auto man_time = fs::last_write_time(manifest);
+            stale = (hdr_time > man_time);
+        }
+
+        if (!fs::exists(manifest) || stale) {
+            if (verbose) out << "\n[auto-split] " << inc_path << "\n";
+            SplitResult hdr_sr = do_split(inc_path, output_dir, extra_flags, verbose, out);
+            if (!hdr_sr.success && verbose)
+                out << "[auto-split] warning: failed to split " << inc_path << "\n";
+        }
+    }
+
+    std::set<std::string> seen_dirs;
+    for (const auto& inc_path : includes) {
+        auto it = g_split_headers.find(inc_path);
+        if (it != g_split_headers.end()) {
+            if (verbose) out << "[header-dep] " << inc_path << " -> " << it->second.split_dir << "\n";
+            if (seen_dirs.insert(it->second.split_dir).second) {
+                result.header_obj_dirs.push_back(it->second.split_dir);
+            }
+            for (const auto& cpp : it->second.compilable_files) {
+                std::string obj = cpp.substr(0, cpp.size() - 4) + ".o";
+                result.header_obj_files.push_back(obj);
+            }
+        }
+    }
+}
+
+static void write_header_manifest(const std::string& output_dir,
+                                   const std::string& header_filename,
+                                   const std::string& abs_header_path,
+                                   const std::vector<std::string>& compilable_files) {
+    std::string manifest_path = (fs::path(output_dir) / (header_filename + ".split")).string();
+    std::ofstream ofs(manifest_path);
+    if (!ofs.is_open()) return;
+    ofs << abs_header_path << "\n";
+    ofs << compilable_files.size() << "\n";
+    for (const auto& f : compilable_files) ofs << f << "\n";
+}
+
+static void load_header_manifests(const std::string& output_dir) {
+    if (!fs::exists(output_dir)) return;
+    for (const auto& entry : fs::directory_iterator(output_dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string fname = entry.path().filename().string();
+        if (fname.size() < 6 || fname.substr(fname.size() - 6) != ".split") continue;
+
+        std::ifstream ifs(entry.path());
+        if (!ifs.is_open()) continue;
+
+        std::string abs_path;
+        std::getline(ifs, abs_path);
+        std::string n;
+        std::getline(ifs, n);
+        int nfiles = 0;
+        try { nfiles = std::stoi(n); } catch (...) {}
+
+        SplitHeaderInfo info;
+        info.split_dir = output_dir;
+        info.preamble_path = (fs::path(output_dir) / fname.substr(0, fname.size() - 6)).string();
+        for (int i = 0; i < nfiles; ++i) {
+            std::string f;
+            std::getline(ifs, f);
+            if (!f.empty()) info.compilable_files.push_back(f);
+        }
+
+        if (!abs_path.empty() && !info.compilable_files.empty()) {
+            g_split_headers[abs_path] = std::move(info);
+        }
+    }
 }
 
 static SplitResult do_split_with_cache(const std::string& input_path,
@@ -852,8 +1027,11 @@ static int run_server(const std::string& sock_path) {
     }
 }
 
-static std::vector<std::string> build_clang_flags(const std::vector<std::string>& extra_flags) {
+static std::vector<std::string> build_clang_flags(const std::vector<std::string>& extra_flags,
+                                                   bool force_cxx = false) {
     std::vector<std::string> all_flags = {"-std=c++17", "-fsyntax-only", "-Wno-everything"};
+    if (force_cxx)
+        all_flags.insert(all_flags.begin(), {"-x", "c++-header"});
     auto sys_includes = detect_system_includes();
     for (const auto& inc : sys_includes) {
         all_flags.push_back("-isystem");
@@ -902,7 +1080,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     }
 
     std::string stem = fs::path(input_path).stem().string();
-    auto all_flags = build_clang_flags(extra_flags);
+    auto all_flags = build_clang_flags(extra_flags, is_header_file(abs_path));
 
     auto it = g_tu_cache.find(abs_path);
     bool cache_hit = false;
@@ -973,15 +1151,22 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
 
+    bool input_is_header = is_header_file(abs_path);
+
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
         result.success = true;
+        if (!input_is_header) {
+            resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
+        }
         return result;
     }
 
     fs::create_directories(output_dir);
 
-    std::string preamble_filename = stem + "_preamble.h";
+    std::string preamble_filename = input_is_header
+        ? fs::path(input_path).filename().string()
+        : stem + "_preamble.h";
     std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
     result.preamble_filename = preamble_path;
     std::string preamble = generate_preamble(source, functions, stem, abs_path);
@@ -1072,6 +1257,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
 
         std::string line_directive = "#line " + std::to_string(fn.start_line) +
                                      " \"" + abs_path + "\"\n";
+
         body = line_directive + body;
 
         if (!fn.scope_chain.empty()) {
@@ -1143,6 +1329,18 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         out << "\n";
     }
 
+    if (input_is_header) {
+        SplitHeaderInfo hdr_info;
+        hdr_info.split_dir = fs::absolute(output_dir).string();
+        hdr_info.preamble_path = preamble_path;
+        hdr_info.compilable_files = result.compilable_files;
+        g_split_headers[abs_path] = std::move(hdr_info);
+        write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
+        if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
+    } else {
+        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
+    }
+
     result.success = true;
     return result;
 }
@@ -1151,7 +1349,7 @@ static SplitResult do_split(const std::string& input_path,
                             const std::string& output_dir,
                             const std::vector<std::string>& extra_flags,
                             bool verbose,
-                            std::ostream& out = std::cout) {
+                            std::ostream& out) {
     SplitResult result;
     result.success = false;
 
@@ -1163,7 +1361,7 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     std::string stem = fs::path(input_path).stem().string();
-    auto all_flags = build_clang_flags(extra_flags);
+    auto all_flags = build_clang_flags(extra_flags, is_header_file(abs_path));
 
     std::vector<const char*> args;
     for (const auto& f : all_flags)
@@ -1195,8 +1393,13 @@ static SplitResult do_split(const std::string& input_path,
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
 
+    bool input_is_header = is_header_file(abs_path);
+
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
+        if (!input_is_header) {
+            resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
+        }
         clang_disposeTranslationUnit(tu);
         clang_disposeIndex(index);
         result.success = true;
@@ -1205,7 +1408,9 @@ static SplitResult do_split(const std::string& input_path,
 
     fs::create_directories(output_dir);
 
-    std::string preamble_filename = stem + "_preamble.h";
+    std::string preamble_filename = input_is_header
+        ? fs::path(input_path).filename().string()
+        : stem + "_preamble.h";
     std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
     result.preamble_filename = preamble_path;
     std::string preamble = generate_preamble(source, functions, stem, abs_path);
@@ -1298,6 +1503,7 @@ static SplitResult do_split(const std::string& input_path,
 
         std::string line_directive = "#line " + std::to_string(fn.start_line) +
                                      " \"" + abs_path + "\"\n";
+
         body = line_directive + body;
 
         if (!fn.scope_chain.empty()) {
@@ -1367,6 +1573,18 @@ static SplitResult do_split(const std::string& input_path,
         if (removed_count > 0)
             out << ", " << removed_count << " stale removed";
         out << "\n";
+    }
+
+    if (input_is_header) {
+        SplitHeaderInfo hdr_info;
+        hdr_info.split_dir = fs::absolute(output_dir).string();
+        hdr_info.preamble_path = preamble_path;
+        hdr_info.compilable_files = result.compilable_files;
+        g_split_headers[abs_path] = std::move(hdr_info);
+        write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
+        if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
+    } else {
+        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
     }
 
     clang_disposeTranslationUnit(tu);
@@ -1497,6 +1715,8 @@ static int run_as_launcher(int argc, char* argv[]) {
             cmd += " " + shell_quote(f);
 
         cmd += " -I" + shell_quote(split_dir);
+        for (const auto& hdr_dir : sr.header_obj_dirs)
+            cmd += " -I" + shell_quote(hdr_dir);
 
         if (fi == 0 && (has_md || has_mmd)) {
             cmd += has_mmd ? " -MMD" : " -MD";
@@ -1536,7 +1756,37 @@ static int run_as_launcher(int argc, char* argv[]) {
     if (output_file.empty())
         output_file = fs::path(input_file).stem().string() + ".o";
 
-    bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !fs::exists(output_file);
+    {
+        std::vector<CompileJob> hdr_compile_jobs;
+        for (const auto& hobj : sr.header_obj_files) {
+            std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
+            if (!fs::exists(hcpp)) continue;
+            if (!fs::exists(hobj) || needs_recompile(hcpp, hobj, "")) {
+                std::string cmd = shell_quote(compiler) + " -fkeep-inline-functions";
+                for (const auto& f : other_flags)
+                    cmd += " " + shell_quote(f);
+                for (const auto& hdr_dir : sr.header_obj_dirs)
+                    cmd += " -I" + shell_quote(hdr_dir);
+                cmd += " -c -o " + shell_quote(hobj) + " " + shell_quote(hcpp);
+                hdr_compile_jobs.push_back({cmd, hcpp, hobj});
+            }
+            obj_files.push_back(hobj);
+            if (verbose) std::cerr << "[cpp-splitter] header dep .o: " << hobj << "\n";
+        }
+        if (!hdr_compile_jobs.empty()) {
+            if (verbose) std::cerr << "[cpp-splitter] compiling " << hdr_compile_jobs.size() << " header dep file(s)\n";
+            auto hdr_results = compile_parallel(hdr_compile_jobs, verbose, std::cerr);
+            for (const auto& r : hdr_results) {
+                if (r.exit_code != 0) {
+                    std::cerr << "cpp-splitter: compilation failed for header dep: " << r.source_file << "\n";
+                    if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
+                    return 1;
+                }
+            }
+        }
+    }
+
+    bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file);
 
     if (!need_link) {
         if (verbose) std::cerr << "[cpp-splitter] all up-to-date, skipping link: " << output_file << "\n";
@@ -1629,7 +1879,7 @@ int main(int argc, char* argv[]) {
         return run_server(sock_path);
     }
 
-    if (!first_arg.empty() && first_arg[0] != '-' && !is_source_file(first_arg)) {
+    if (!first_arg.empty() && first_arg[0] != '-' && !is_splittable_file(first_arg)) {
         return run_as_launcher(argc, argv);
     }
 
@@ -1678,6 +1928,8 @@ int main(int argc, char* argv[]) {
     if (output_binary.empty())
         output_binary = stem + ".out";
 
+    load_header_manifests(output_dir);
+
     SplitResult sr;
     {
         const char* no_server = std::getenv("CPP_SPLITTER_NO_SERVER");
@@ -1714,9 +1966,11 @@ int main(int argc, char* argv[]) {
             }
 
             std::string cmd = cxx_compiler + " -std=c++17 -c"
-                              " -I" + output_dir +
-                              " -o " + obj_file +
-                              " " + cpp_file;
+                              " -I" + output_dir;
+            for (const auto& hdr_dir : sr.header_obj_dirs)
+                cmd += " -I" + hdr_dir;
+            cmd += " -o " + obj_file +
+                   " " + cpp_file;
 
             for (const auto& f : extra_flags)
                 cmd += " " + f;
@@ -1740,8 +1994,63 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (compile_ok && !sr.header_obj_files.empty()) {
+            std::cout << "\n--- Compiling header dependencies ---\n\n";
+
+            std::vector<CompileJob> hdr_jobs;
+            for (size_t hi = 0; hi < sr.header_obj_files.size(); ++hi) {
+                const auto& hobj = sr.header_obj_files[hi];
+                std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
+                if (!fs::exists(hcpp)) continue;
+
+                std::string hdr_preamble;
+                for (const auto& hdir : sr.header_obj_dirs) {
+                    for (const auto& entry : fs::directory_iterator(hdir)) {
+                        std::string fn = entry.path().filename().string();
+                        if (is_header_file(fn) && fn.find("_preamble") == std::string::npos) {
+                            hdr_preamble = entry.path().string();
+                            break;
+                        }
+                    }
+                    if (!hdr_preamble.empty()) break;
+                }
+
+                if (!needs_recompile(hcpp, hobj, hdr_preamble)) {
+                    std::cout << "  (up-to-date) " << hcpp << "\n";
+                    continue;
+                }
+
+                std::string cmd = cxx_compiler + " -std=c++17 -fkeep-inline-functions -c";
+                for (const auto& hdr_dir : sr.header_obj_dirs)
+                    cmd += " -I" + hdr_dir;
+                cmd += " -o " + hobj + " " + hcpp;
+                for (const auto& f : extra_flags)
+                    cmd += " " + f;
+
+                hdr_jobs.push_back({cmd, hcpp, hobj});
+            }
+
+            if (!hdr_jobs.empty()) {
+                auto hdr_results = compile_parallel(hdr_jobs, true);
+                for (const auto& r : hdr_results) {
+                    if (r.exit_code != 0) {
+                        std::cerr << "Error: compilation failed for header dep " << r.source_file << "\n";
+                        if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
+                        compile_ok = false;
+                    }
+                }
+            }
+        }
+
         if (compile_ok) {
             std::cout << "\n--- Linking ---\n\n";
+
+            for (const auto& hobj : sr.header_obj_files) {
+                if (fs::exists(hobj)) {
+                    obj_files.push_back(hobj);
+                    std::cout << "  (header dep) " << hobj << "\n";
+                }
+            }
 
             std::string link_cmd = cxx_compiler + " -o " + output_binary;
             for (const auto& obj : obj_files)
