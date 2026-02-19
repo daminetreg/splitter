@@ -38,6 +38,7 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 - Fixed `launcher_verbose()` to check `CPP_SPLITTER_VERBOSE` env var (was incorrectly checking `TIPI_CPP_SPLITTER_VERBOSE` and `VERBOSE`).
 - Added verbose logging in launcher, server handler, and `do_split_with_cache` to trace flag flow from launcher → server → libclang.
 - Added `cached_system_includes()` to avoid re-spawning `g++ -E -v` on every server request.
+- Implemented fallback-to-normal-compilation when splitting fails: in both launcher mode (passthrough to original compiler command) and CLI mode (compile source directly without splitting). Fallback triggers on server connection failure, split parse failure, split compilation failure, header dep compilation failure, or relocatable link failure.
 
 ## External Dependencies
 - **C++ compiler:** g++
