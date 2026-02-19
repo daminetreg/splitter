@@ -561,6 +561,7 @@ static std::string shell_quote(const std::string& s) {
 }
 
 static bool build_pch(const std::string& preamble_file,
+                      const std::string& compiler_driver,
                       const std::string& compiler,
                       const std::vector<std::string>& flags,
                       const std::string& include_dir,
@@ -574,7 +575,7 @@ static bool build_pch(const std::string& preamble_file,
         return true;
     }
 
-    std::string cmd = shell_quote(compiler) + " -x c++-header";
+    std::string cmd = shell_quote(compiler_driver) + " " + shell_quote(compiler) + " -x c++-header";
     for (const auto& f : flags)
         cmd += " " + shell_quote(f);
     if (!include_dir.empty())
@@ -1464,7 +1465,16 @@ static int run_as_launcher(int argc, char* argv[]) {
         return run_command_quiet(cmd);
     }
 
-    build_pch(sr.preamble_filename, compiler, other_flags, split_dir, verbose, std::cerr);
+    if (compiler == "tipi-compiler-driver") {
+      std::cout << "BEGIN compiler_with_driver is: " << std::endl;
+      auto pch_flags = other_flags;
+      auto actual_compiler = *pch_flags.begin();
+      pch_flags = std::vector<std::string>(pch_flags.begin()+1, pch_flags.end());
+      std::cout << "compiler_with_driver is: " << compiler << " " << actual_compiler<< std::endl;
+      build_pch(sr.preamble_filename, actual_compiler, "", pch_flags, split_dir, verbose, std::cerr);
+    } else {
+      build_pch(sr.preamble_filename, compiler, "", other_flags, split_dir, verbose, std::cerr);
+    }
 
     std::vector<std::string> obj_files;
     std::vector<CompileJob> parallel_jobs;
@@ -1686,7 +1696,7 @@ int main(int argc, char* argv[]) {
 
         std::vector<std::string> pch_flags = {"-std=c++17"};
         for (const auto& f : extra_flags) pch_flags.push_back(f);
-        bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, pch_flags, output_dir, true);
+        bool pch_ok = build_pch(sr.preamble_filename, "", cxx_compiler, pch_flags, output_dir, true);
         if (pch_ok) std::cout << "\n";
 
         std::vector<CompileJob> jobs;
