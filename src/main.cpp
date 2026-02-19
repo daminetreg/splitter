@@ -530,6 +530,17 @@ static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>
     return results;
 }
 
+static std::string file_content_hash(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "";
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    size_t h = std::hash<std::string>{}(ss.str());
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016zx", h);
+    return std::string(buf);
+}
+
 static bool needs_recompile(const std::string& cpp_file, const std::string& obj_file,
                             const std::string& preamble_file = "") {
     if (!fs::exists(obj_file)) return true;
@@ -589,10 +600,16 @@ static bool build_pch(const std::string& preamble_file,
                       const std::string& include_dir,
                       bool verbose,
                       std::ostream& out = std::cout) {
-    std::string gch_file = preamble_file + ".gch";
+    std::string hash = file_content_hash(preamble_file);
+    if (hash.empty()) {
+        if (verbose) out << "  PCH: cannot read preamble, skipping\n";
+        return false;
+    }
 
-    if (fs::exists(gch_file) &&
-        fs::last_write_time(preamble_file) <= fs::last_write_time(gch_file)) {
+    std::string gch_file = preamble_file + ".gch";
+    std::string hash_marker = gch_file + "." + hash;
+
+    if (fs::exists(gch_file) && fs::exists(hash_marker)) {
         if (verbose) out << "  PCH up-to-date: " << gch_file << "\n";
         return true;
     }
@@ -610,6 +627,20 @@ static bool build_pch(const std::string& preamble_file,
         if (verbose) out << "  PCH build failed (exit " << ret << "), continuing without PCH\n";
         return false;
     }
+
+    std::string dir = fs::path(gch_file).parent_path().string();
+    std::string gch_name = fs::path(gch_file).filename().string();
+    if (dir.empty()) dir = ".";
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        std::string name = entry.path().filename().string();
+        if (name.size() > gch_name.size() + 1 &&
+            name.substr(0, gch_name.size() + 1) == gch_name + "." &&
+            entry.path().string() != hash_marker) {
+            fs::remove(entry.path());
+        }
+    }
+    { std::ofstream m(hash_marker); }
+
     if (verbose) out << "  PCH built: " << gch_file << "\n";
     return true;
 }
@@ -817,6 +848,15 @@ static SplitResult do_split(const std::string& input_path,
                             bool verbose,
                             std::ostream& out = std::cout);
 
+static bool auto_include_split_enabled() {
+    const char* val = std::getenv("CPP_SPLITTER_AUTO_INCLUDE_SPLIT");
+    if (val) {
+        std::string s(val);
+        if (s == "off" || s == "0") return false;
+    }
+    return true;
+}
+
 static void resolve_header_deps(CXTranslationUnit tu,
                                  SplitResult& result,
                                  const std::string& output_dir,
@@ -826,8 +866,11 @@ static void resolve_header_deps(CXTranslationUnit tu,
     std::vector<std::string> includes;
     clang_getInclusions(tu, inclusion_visitor, &includes);
 
+    bool do_auto_split = auto_include_split_enabled();
+
     std::set<std::string> seen_includes;
     for (const auto& inc_path : includes) {
+        if (!do_auto_split) break;
         if (!seen_includes.insert(inc_path).second) continue;
         if (!is_header_file(inc_path)) continue;
         if (is_stdlib_header(inc_path)) continue;
@@ -2003,7 +2046,7 @@ int main(int argc, char* argv[]) {
 
         std::vector<std::string> pch_flags = {"-std=c++17"};
         for (const auto& f : extra_flags) pch_flags.push_back(f);
-        bool pch_ok = build_pch(sr.preamble_filename, "", cxx_compiler, pch_flags, output_dir, true);
+        bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, pch_flags, output_dir, true, std::cout);
         if (pch_ok) std::cout << "\n";
 
         std::vector<CompileJob> jobs;
