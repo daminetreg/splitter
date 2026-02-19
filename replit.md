@@ -29,6 +29,16 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 - Comments are added to output files with function signatures, source file, and line range for traceability.
 - The tool auto-detects C++ compiler system include paths by executing `g++ -E -x c++ /dev/null -v` to ensure correct resolution of standard library types.
 
+**Verbose/Debug Logging:**
+- Set `CPP_SPLITTER_VERBOSE=1` (or `=on`) to enable verbose logging in launcher mode, server mode, and the `do_split_with_cache` function.
+- Launcher logs: shows input file, flags passed to server, compile commands, and `ld -r` invocations.
+- Server logs: shows received flags, libclang flags (including system includes), and cached TU status.
+
+**Recent Changes:**
+- Fixed `launcher_verbose()` to check `CPP_SPLITTER_VERBOSE` env var (was incorrectly checking `TIPI_CPP_SPLITTER_VERBOSE` and `VERBOSE`).
+- Added verbose logging in launcher, server handler, and `do_split_with_cache` to trace flag flow from launcher → server → libclang.
+- Added `cached_system_includes()` to avoid re-spawning `g++ -E -v` on every server request.
+
 ## External Dependencies
 - **C++ compiler:** g++
 - **libclang:** Specifically `clang-19.1.7` (from Nix in the original context).

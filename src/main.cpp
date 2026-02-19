@@ -798,13 +798,10 @@ static void inclusion_visitor(CXFile included_file, CXSourceLocation* /*stack*/,
     }
 }
 
+static const std::vector<std::string>& cached_system_includes();
+
 static bool is_stdlib_header(const std::string& abs_path) {
-    static std::vector<std::string> stdlib_paths;
-    static bool init = false;
-    if (!init) {
-        stdlib_paths = detect_system_includes();
-        init = true;
-    }
+    const auto& stdlib_paths = cached_system_includes();
     for (const auto& sp : stdlib_paths) {
         if (abs_path.size() >= sp.size() &&
             abs_path.compare(0, sp.size(), sp) == 0)
@@ -1014,6 +1011,11 @@ static int run_server(const std::string& sock_path) {
         }
 
         auto req = decode_request(req_msg);
+        if (req.verbose) {
+            std::cerr << "[cpp-splitter server] received " << req.flags.size() << " flag(s):";
+            for (const auto& f : req.flags) std::cerr << " " << f;
+            std::cerr << "\n";
+        }
         std::ostringstream capture;
         SplitResult sr = do_split_with_cache(req.input, req.output_dir, req.flags, req.verbose, capture);
         std::string resp = encode_response(sr, capture.str());
@@ -1026,12 +1028,17 @@ static int run_server(const std::string& sock_path) {
     }
 }
 
+static const std::vector<std::string>& cached_system_includes() {
+    static std::vector<std::string> includes = detect_system_includes();
+    return includes;
+}
+
 static std::vector<std::string> build_clang_flags(const std::vector<std::string>& extra_flags,
                                                    bool force_cxx = false) {
     std::vector<std::string> all_flags = {"-std=c++17", "-fsyntax-only", "-Wno-everything"};
     if (force_cxx)
         all_flags.insert(all_flags.begin(), {"-x", "c++-header"});
-    auto sys_includes = detect_system_includes();
+    const auto& sys_includes = cached_system_includes();
     for (const auto& inc : sys_includes) {
         all_flags.push_back("-isystem");
         all_flags.push_back(inc);
@@ -1080,6 +1087,11 @@ static SplitResult do_split_with_cache(const std::string& input_path,
 
     std::string stem = fs::path(input_path).stem().string();
     auto all_flags = build_clang_flags(extra_flags, is_header_file(abs_path));
+    if (verbose) {
+        out << "[server] libclang flags (" << all_flags.size() << "):";
+        for (const auto& f : all_flags) out << " " << f;
+        out << "\n";
+    }
 
     auto it = g_tu_cache.find(abs_path);
     bool cache_hit = false;
@@ -1594,10 +1606,8 @@ static SplitResult do_split(const std::string& input_path,
 }
 
 static bool launcher_verbose() {
-    const char* val = std::getenv("TIPI_CPP_SPLITTER_VERBOSE");
-    if (val && std::string(val) == "on") return true;
-    const char* verbose_val = std::getenv("VERBOSE");
-    if (verbose_val && std::string(verbose_val) == "1") return true;
+    const char* val = std::getenv("CPP_SPLITTER_VERBOSE");
+    if (val && (std::string(val) == "1" || std::string(val) == "on")) return true;
     return false;
 }
 
@@ -1654,7 +1664,12 @@ static int run_as_launcher(int argc, char* argv[]) {
         return 1;
     }
 
-    if (verbose) std::cerr << "[cpp-splitter] splitting: " << input_file << "\n";
+    if (verbose) {
+        std::cerr << "[cpp-splitter] splitting: " << input_file << "\n";
+        std::cerr << "[cpp-splitter] flags (" << other_flags.size() << "):";
+        for (const auto& f : other_flags) std::cerr << " " << f;
+        std::cerr << "\n";
+    }
 
     std::string split_dir;
     if (!output_file.empty()) {
