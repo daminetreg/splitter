@@ -19,7 +19,7 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 - **Line Directives:** `#line` preprocessor directives are used in both the preamble and split files to map compiler errors and debug information back to original source locations.
 - **Static Function Handling:** Static functions are split and renamed with a unique mangled name (e.g., `__static_<filestem>__<funcname>`) to prevent linker collisions.
 - **Namespace Handling:** Namespace-scoped functions are properly wrapped within their respective namespace blocks in the split files.
-- **Precompiled Headers (PCH):** Automatically builds PCH for the preamble header before compiling split files, significantly speeding up compilation for heavy headers.
+- **Precompiled Headers (PCH):** Automatically builds PCH for the preamble header before compiling split files, significantly speeding up compilation for heavy headers. Uses content-hash-based marker files (`<preamble>.gch.<hash>`) to detect staleness: if the marker for the current preamble content exists alongside the `.gch`, the PCH is up-to-date; otherwise it rebuilds and cleans up old markers.
 - **Incremental Recompilation:** Compares timestamps of source files, preamble, and PCH against object files to recompile only changed components.
 - **Parallel Compilation:** Utilizes Boost.Process and `std::thread` for concurrent compilation of split files using a work-stealing pattern.
 - **Compiler Launcher Mode:** Operates as a compiler wrapper, splitting the source via a server, compiling each piece, and combining them into a single `.o`. It handles dependency tracking flags (`-MD`/`-MMD`/`-MF`/`-MT`).
@@ -40,6 +40,7 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 - Added `cached_system_includes()` to avoid re-spawning `g++ -E -v` on every server request.
 - Implemented fallback-to-normal-compilation when splitting fails: in both launcher mode (passthrough to original compiler command) and CLI mode (compile source directly without splitting). Fallback triggers on server connection failure, split parse failure, split compilation failure, header dep compilation failure, or relocatable link failure.
 - Added `CPP_SPLITTER_AUTO_INCLUDE_SPLIT` feature flag: automatic header splitting is enabled by default; set to `off` or `0` to disable it.
+- Replaced timestamp-based PCH staleness detection with content-hash marker files: the PCH file stays at the standard `<preamble>.gch` path (for GCC auto-discovery), and a zero-byte marker file `<preamble>.gch.<hash>` records which preamble content the PCH was built from. This eliminates same-second timestamp race conditions and removes the need for a `preamble_changed` flag in the server protocol.
 
 ## External Dependencies
 - **C++ compiler:** g++
