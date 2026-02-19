@@ -816,6 +816,15 @@ static SplitResult do_split(const std::string& input_path,
                             bool verbose,
                             std::ostream& out = std::cout);
 
+static bool auto_include_split_enabled() {
+    const char* val = std::getenv("CPP_SPLITTER_AUTO_INCLUDE_SPLIT");
+    if (val) {
+        std::string s(val);
+        if (s == "off" || s == "0") return false;
+    }
+    return true;
+}
+
 static void resolve_header_deps(CXTranslationUnit tu,
                                  SplitResult& result,
                                  const std::string& output_dir,
@@ -825,8 +834,11 @@ static void resolve_header_deps(CXTranslationUnit tu,
     std::vector<std::string> includes;
     clang_getInclusions(tu, inclusion_visitor, &includes);
 
+    bool do_auto_split = auto_include_split_enabled();
+
     std::set<std::string> seen_includes;
     for (const auto& inc_path : includes) {
+        if (!do_auto_split) break;
         if (!seen_includes.insert(inc_path).second) continue;
         if (!is_header_file(inc_path)) continue;
         if (is_stdlib_header(inc_path)) continue;
