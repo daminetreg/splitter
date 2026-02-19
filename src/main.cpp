@@ -798,12 +798,59 @@ static void inclusion_visitor(CXFile included_file, CXSourceLocation* /*stack*/,
     }
 }
 
+static bool is_stdlib_header(const std::string& abs_path) {
+    static std::vector<std::string> stdlib_paths;
+    static bool init = false;
+    if (!init) {
+        stdlib_paths = detect_system_includes();
+        init = true;
+    }
+    for (const auto& sp : stdlib_paths) {
+        if (abs_path.size() >= sp.size() &&
+            abs_path.compare(0, sp.size(), sp) == 0)
+            return true;
+    }
+    return false;
+}
+
+static SplitResult do_split(const std::string& input_path,
+                            const std::string& output_dir,
+                            const std::vector<std::string>& extra_flags,
+                            bool verbose,
+                            std::ostream& out = std::cout);
+
 static void resolve_header_deps(CXTranslationUnit tu,
                                  SplitResult& result,
+                                 const std::string& output_dir,
+                                 const std::vector<std::string>& extra_flags,
                                  bool verbose,
                                  std::ostream& out) {
     std::vector<std::string> includes;
     clang_getInclusions(tu, inclusion_visitor, &includes);
+
+    std::set<std::string> seen_includes;
+    for (const auto& inc_path : includes) {
+        if (!seen_includes.insert(inc_path).second) continue;
+        if (!is_header_file(inc_path)) continue;
+        if (is_stdlib_header(inc_path)) continue;
+        if (g_split_headers.find(inc_path) != g_split_headers.end()) continue;
+
+        std::string manifest = (fs::path(output_dir) /
+            (fs::path(inc_path).stem().string() + ".h.split")).string();
+        bool stale = false;
+        if (fs::exists(manifest)) {
+            auto hdr_time = fs::last_write_time(inc_path);
+            auto man_time = fs::last_write_time(manifest);
+            stale = (hdr_time > man_time);
+        }
+
+        if (!fs::exists(manifest) || stale) {
+            if (verbose) out << "\n[auto-split] " << inc_path << "\n";
+            SplitResult hdr_sr = do_split(inc_path, output_dir, extra_flags, verbose, out);
+            if (!hdr_sr.success && verbose)
+                out << "[auto-split] warning: failed to split " << inc_path << "\n";
+        }
+    }
 
     std::set<std::string> seen_dirs;
     for (const auto& inc_path : includes) {
@@ -1109,7 +1156,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         if (verbose) out << "No function definitions found in " << input_path << "\n";
         result.success = true;
         if (!input_is_header) {
-            resolve_header_deps(tu, result, verbose, out);
+            resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
         }
         return result;
     }
@@ -1290,7 +1337,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
         if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
     } else {
-        resolve_header_deps(tu, result, verbose, out);
+        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
     }
 
     result.success = true;
@@ -1301,7 +1348,7 @@ static SplitResult do_split(const std::string& input_path,
                             const std::string& output_dir,
                             const std::vector<std::string>& extra_flags,
                             bool verbose,
-                            std::ostream& out = std::cout) {
+                            std::ostream& out) {
     SplitResult result;
     result.success = false;
 
@@ -1350,7 +1397,7 @@ static SplitResult do_split(const std::string& input_path,
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
         if (!input_is_header) {
-            resolve_header_deps(tu, result, verbose, out);
+            resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
         }
         clang_disposeTranslationUnit(tu);
         clang_disposeIndex(index);
@@ -1536,7 +1583,7 @@ static SplitResult do_split(const std::string& input_path,
         write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
         if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
     } else {
-        resolve_header_deps(tu, result, verbose, out);
+        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
     }
 
     clang_disposeTranslationUnit(tu);

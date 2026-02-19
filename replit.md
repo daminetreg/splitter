@@ -11,7 +11,8 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 
 **Core Features:**
 - **Function Splitting:** Parses C++ source to extract and split free functions, class methods, constructors, destructors, and function templates. It recurses into namespaces, classes, structs, and class templates.
-- **Header Splitting:** Extracts inline functions from header files (.h/.hpp/.hxx) into separate .cpp files, stripping the `inline` keyword to ensure external linkage. Template functions remain in headers (header-only). It uses manifest files (`.split`) to track and resolve dependencies for split headers.
+- **Header Splitting:** Extracts inline functions from header files (.h/.hpp/.hxx) into separate .cpp files, keeping the `inline` keyword on bodies and stripping it from forward declarations. Uses `-fkeep-inline-functions` to force symbol emission. Template functions remain in headers (header-only). It uses manifest files (`.split`) to track and resolve dependencies for split headers.
+- **Automatic Header Detection:** When processing a source file, uses `clang_getInclusions()` to detect all `#include`d headers. Project and `-isystem` headers are automatically split; C++ standard library headers (detected via `g++ -E -v`) are skipped. Staleness is tracked via manifest timestamps.
 - **Source-Text Signature Extraction:** Function signatures are extracted directly from source text (before the opening `{` of the function body) for reliability, handling `static` and `inline` keyword stripping and namespace prefix removal.
 - **Relocatable Linking:** In compiler launcher mode, split files are compiled separately and then combined into a single `.o` file using relocatable linking (`ld -r`).
 - **Preamble Generation:** A preamble header with declarations for compilable split files is generated.
