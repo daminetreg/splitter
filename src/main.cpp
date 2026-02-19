@@ -1196,15 +1196,6 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         content << "#include \"" << preamble_filename << "\"\n\n";
 
         std::string body = fn.body;
-        if (input_is_header) {
-            size_t ipos = body.find("inline");
-            if (ipos != std::string::npos) {
-                size_t after = ipos + 6;
-                while (after < body.size() && body[after] == ' ')
-                    ++after;
-                body.erase(ipos, after - ipos);
-            }
-        }
         if (fn.is_static) {
             size_t spos = body.find("static");
             if (spos != std::string::npos) {
@@ -1218,6 +1209,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
 
         std::string line_directive = "#line " + std::to_string(fn.start_line) +
                                      " \"" + abs_path + "\"\n";
+
         body = line_directive + body;
 
         if (!fn.scope_chain.empty()) {
@@ -1450,15 +1442,6 @@ static SplitResult do_split(const std::string& input_path,
         content << "#include \"" << preamble_filename << "\"\n\n";
 
         std::string body = fn.body;
-        if (input_is_header) {
-            size_t ipos = body.find("inline");
-            if (ipos != std::string::npos) {
-                size_t after = ipos + 6;
-                while (after < body.size() && body[after] == ' ')
-                    ++after;
-                body.erase(ipos, after - ipos);
-            }
-        }
         if (fn.is_static) {
             size_t spos = body.find("static");
             if (spos != std::string::npos) {
@@ -1472,6 +1455,7 @@ static SplitResult do_split(const std::string& input_path,
 
         std::string line_directive = "#line " + std::to_string(fn.start_line) +
                                      " \"" + abs_path + "\"\n";
+
         body = line_directive + body;
 
         if (!fn.scope_chain.empty()) {
@@ -1715,10 +1699,33 @@ static int run_as_launcher(int argc, char* argv[]) {
     if (output_file.empty())
         output_file = fs::path(input_file).stem().string() + ".o";
 
-    for (const auto& hobj : sr.header_obj_files) {
-        if (fs::exists(hobj)) {
+    {
+        std::vector<CompileJob> hdr_compile_jobs;
+        for (const auto& hobj : sr.header_obj_files) {
+            std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
+            if (!fs::exists(hcpp)) continue;
+            if (!fs::exists(hobj) || needs_recompile(hcpp, hobj, "")) {
+                std::string cmd = shell_quote(compiler) + " -fkeep-inline-functions";
+                for (const auto& f : other_flags)
+                    cmd += " " + shell_quote(f);
+                for (const auto& hdr_dir : sr.header_obj_dirs)
+                    cmd += " -I" + shell_quote(hdr_dir);
+                cmd += " -c -o " + shell_quote(hobj) + " " + shell_quote(hcpp);
+                hdr_compile_jobs.push_back({cmd, hcpp, hobj});
+            }
             obj_files.push_back(hobj);
             if (verbose) std::cerr << "[cpp-splitter] header dep .o: " << hobj << "\n";
+        }
+        if (!hdr_compile_jobs.empty()) {
+            if (verbose) std::cerr << "[cpp-splitter] compiling " << hdr_compile_jobs.size() << " header dep file(s)\n";
+            auto hdr_results = compile_parallel(hdr_compile_jobs, verbose, std::cerr);
+            for (const auto& r : hdr_results) {
+                if (r.exit_code != 0) {
+                    std::cerr << "cpp-splitter: compilation failed for header dep: " << r.source_file << "\n";
+                    if (!r.stderr_output.empty()) std::cerr << r.stderr_output;
+                    return 1;
+                }
+            }
         }
     }
 
@@ -1956,7 +1963,7 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                std::string cmd = cxx_compiler + " -std=c++17 -c";
+                std::string cmd = cxx_compiler + " -std=c++17 -fkeep-inline-functions -c";
                 for (const auto& hdr_dir : sr.header_obj_dirs)
                     cmd += " -I" + hdr_dir;
                 cmd += " -o " + hobj + " " + hcpp;
