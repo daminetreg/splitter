@@ -548,9 +548,13 @@ static bool needs_recompile(const std::string& cpp_file, const std::string& obj_
     if (fs::last_write_time(cpp_file) > obj_time) return true;
     if (!preamble_file.empty() && fs::exists(preamble_file)) {
         if (fs::last_write_time(preamble_file) > obj_time) return true;
-        std::string gch_file = preamble_file + ".gch";
-        if (fs::exists(gch_file) && fs::last_write_time(gch_file) > obj_time)
-            return true;
+        std::string gch_dir = preamble_file + ".gch";
+        if (fs::is_directory(gch_dir)) {
+            for (const auto& entry : fs::directory_iterator(gch_dir)) {
+                if (fs::last_write_time(entry.path()) > obj_time)
+                    return true;
+            }
+        }
     }
     return false;
 }
@@ -606,12 +610,19 @@ static bool build_pch(const std::string& preamble_file,
         return false;
     }
 
-    std::string gch_file = preamble_file + ".gch";
-    std::string hash_marker = gch_file + "." + hash;
+    std::string gch_dir = preamble_file + ".gch";
+    std::string gch_file = gch_dir + "/" + hash + ".gch";
 
-    if (fs::exists(gch_file) && fs::exists(hash_marker)) {
+    if (fs::exists(gch_file)) {
         if (verbose) out << "  PCH up-to-date: " << gch_file << "\n";
         return true;
+    }
+
+    if (fs::exists(gch_dir)) {
+        for (const auto& entry : fs::directory_iterator(gch_dir))
+            fs::remove(entry.path());
+    } else {
+        fs::create_directories(gch_dir);
     }
 
     std::string cmd = shell_quote(compiler_driver) + " " + shell_quote(compiler) + " -x c++-header";
@@ -625,24 +636,80 @@ static bool build_pch(const std::string& preamble_file,
     int ret = run_command_quiet(cmd);
     if (ret != 0) {
         if (verbose) out << "  PCH build failed (exit " << ret << "), continuing without PCH\n";
+        fs::remove_all(gch_dir);
         return false;
     }
 
-    std::string dir = fs::path(gch_file).parent_path().string();
-    std::string gch_name = fs::path(gch_file).filename().string();
-    if (dir.empty()) dir = ".";
-    for (const auto& entry : fs::directory_iterator(dir)) {
-        std::string name = entry.path().filename().string();
-        if (name.size() > gch_name.size() + 1 &&
-            name.substr(0, gch_name.size() + 1) == gch_name + "." &&
-            entry.path().string() != hash_marker) {
-            fs::remove(entry.path());
-        }
-    }
-    { std::ofstream m(hash_marker); }
-
     if (verbose) out << "  PCH built: " << gch_file << "\n";
     return true;
+}
+
+static std::string build_libclang_pch(const std::string& preamble_file,
+                                       const std::vector<std::string>& clang_flags,
+                                       bool verbose,
+                                       std::ostream& out = std::cout) {
+    if (!fs::exists(preamble_file)) return "";
+
+    std::string hash = file_content_hash(preamble_file);
+    if (hash.empty()) return "";
+
+    std::string pch_dir = preamble_file + ".pch";
+    std::string pch_file = pch_dir + "/" + hash + ".pch";
+
+    if (fs::exists(pch_file)) {
+        if (verbose) out << "  libclang PCH up-to-date: " << pch_file << "\n";
+        return pch_file;
+    }
+
+    if (fs::exists(pch_dir)) {
+        for (const auto& entry : fs::directory_iterator(pch_dir))
+            fs::remove(entry.path());
+    } else {
+        fs::create_directories(pch_dir);
+    }
+
+    CXIndex index = clang_createIndex(0, 0);
+    if (!index) {
+        if (verbose) out << "  libclang PCH: failed to create index\n";
+        return "";
+    }
+
+    std::vector<std::string> pch_flags;
+    for (const auto& f : clang_flags) {
+        if (f == "-fsyntax-only") continue;
+        pch_flags.push_back(f);
+    }
+    if (std::find(pch_flags.begin(), pch_flags.end(), "-x") == pch_flags.end()) {
+        pch_flags.insert(pch_flags.begin(), {"-x", "c++-header"});
+    }
+
+    std::vector<const char*> args;
+    for (const auto& f : pch_flags) args.push_back(f.c_str());
+
+    CXTranslationUnit tu = nullptr;
+    CXErrorCode err = clang_parseTranslationUnit2(
+        index, preamble_file.c_str(), args.data(),
+        static_cast<int>(args.size()), nullptr, 0, CXTranslationUnit_ForSerialization, &tu);
+
+    if (err != CXError_Success || !tu) {
+        if (verbose) out << "  libclang PCH: parse failed (code: " << err << ")\n";
+        clang_disposeIndex(index);
+        fs::remove_all(pch_dir);
+        return "";
+    }
+
+    int save_err = clang_saveTranslationUnit(tu, pch_file.c_str(), clang_defaultSaveOptions(tu));
+    clang_disposeTranslationUnit(tu);
+    clang_disposeIndex(index);
+
+    if (save_err != CXSaveError_None) {
+        if (verbose) out << "  libclang PCH: save failed (code: " << save_err << ")\n";
+        fs::remove_all(pch_dir);
+        return "";
+    }
+
+    if (verbose) out << "  libclang PCH built: " << pch_file << "\n";
+    return pch_file;
 }
 
 struct SplitResult {
@@ -1137,13 +1204,26 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         out << "\n";
     }
 
+    bool input_is_header = is_header_file(abs_path);
+    std::string preamble_filename = input_is_header
+        ? fs::path(input_path).filename().string()
+        : stem + "_preamble.h";
+    std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
+
+    std::vector<std::string> parse_flags_vec = all_flags;
+    std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
+    if (!libclang_pch.empty()) {
+        parse_flags_vec.push_back("-include-pch");
+        parse_flags_vec.push_back(libclang_pch);
+    }
+
     auto it = g_tu_cache.find(abs_path);
     bool cache_hit = false;
     CXTranslationUnit tu = nullptr;
 
     if (it != g_tu_cache.end()) {
         auto cur_mtime = fs::last_write_time(abs_path);
-        if (it->second.flags == all_flags) {
+        if (it->second.flags == parse_flags_vec) {
             if (cur_mtime == it->second.source_mtime) {
                 tu = it->second.tu;
                 cache_hit = true;
@@ -1175,10 +1255,12 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         }
 
         std::vector<const char*> args;
-        for (const auto& f : all_flags) args.push_back(f.c_str());
+        for (const auto& f : parse_flags_vec) args.push_back(f.c_str());
 
-        unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
-                             | CXTranslationUnit_CreatePreambleOnFirstParse;
+        unsigned parse_flags = 0;
+        if (libclang_pch.empty())
+            parse_flags = CXTranslationUnit_PrecompiledPreamble
+                        | CXTranslationUnit_CreatePreambleOnFirstParse;
         CXErrorCode err = clang_parseTranslationUnit2(
             index, abs_path.c_str(), args.data(),
             static_cast<int>(args.size()), nullptr, 0, parse_flags, &tu);
@@ -1192,7 +1274,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         CachedTU cached;
         cached.index = index;
         cached.tu = tu;
-        cached.flags = all_flags;
+        cached.flags = parse_flags_vec;
         cached.source_mtime = fs::last_write_time(abs_path);
         g_tu_cache[abs_path] = std::move(cached);
 
@@ -1206,8 +1288,6 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
 
-    bool input_is_header = is_header_file(abs_path);
-
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
         result.success = true;
@@ -1219,10 +1299,6 @@ static SplitResult do_split_with_cache(const std::string& input_path,
 
     fs::create_directories(output_dir);
 
-    std::string preamble_filename = input_is_header
-        ? fs::path(input_path).filename().string()
-        : stem + "_preamble.h";
-    std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
     result.preamble_filename = preamble_path;
     std::string preamble = generate_preamble(source, functions, stem, abs_path);
 
@@ -1243,6 +1319,8 @@ static SplitResult do_split_with_cache(const std::string& input_path,
             if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
         }
     }
+
+    build_libclang_pch(preamble_path, all_flags, verbose, out);
 
     if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
@@ -1416,10 +1494,23 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     std::string stem = fs::path(input_path).stem().string();
-    auto all_flags = build_clang_flags(extra_flags, is_header_file(abs_path));
+    bool input_is_header = is_header_file(abs_path);
+    auto all_flags = build_clang_flags(extra_flags, input_is_header);
+
+    std::string preamble_filename = input_is_header
+        ? fs::path(input_path).filename().string()
+        : stem + "_preamble.h";
+    std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
+
+    std::vector<std::string> parse_flags_vec = all_flags;
+    std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
+    if (!libclang_pch.empty()) {
+        parse_flags_vec.push_back("-include-pch");
+        parse_flags_vec.push_back(libclang_pch);
+    }
 
     std::vector<const char*> args;
-    for (const auto& f : all_flags)
+    for (const auto& f : parse_flags_vec)
         args.push_back(f.c_str());
 
     CXIndex index = clang_createIndex(0, 0);
@@ -1429,8 +1520,10 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     CXTranslationUnit tu = nullptr;
-    unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
-                         | CXTranslationUnit_CreatePreambleOnFirstParse;
+    unsigned parse_flags = 0;
+    if (libclang_pch.empty())
+        parse_flags = CXTranslationUnit_PrecompiledPreamble
+                     | CXTranslationUnit_CreatePreambleOnFirstParse;
     CXErrorCode err = clang_parseTranslationUnit2(
         index, abs_path.c_str(), args.data(),
         static_cast<int>(args.size()), nullptr, 0, parse_flags, &tu);
@@ -1448,8 +1541,6 @@ static SplitResult do_split(const std::string& input_path,
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
 
-    bool input_is_header = is_header_file(abs_path);
-
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
         if (!input_is_header) {
@@ -1463,10 +1554,6 @@ static SplitResult do_split(const std::string& input_path,
 
     fs::create_directories(output_dir);
 
-    std::string preamble_filename = input_is_header
-        ? fs::path(input_path).filename().string()
-        : stem + "_preamble.h";
-    std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
     result.preamble_filename = preamble_path;
     std::string preamble = generate_preamble(source, functions, stem, abs_path);
 
@@ -1489,6 +1576,8 @@ static SplitResult do_split(const std::string& input_path,
             if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
         }
     }
+
+    build_libclang_pch(preamble_path, all_flags, verbose, out);
 
     if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
