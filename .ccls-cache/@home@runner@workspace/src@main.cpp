@@ -548,9 +548,13 @@ static bool needs_recompile(const std::string& cpp_file, const std::string& obj_
     if (fs::last_write_time(cpp_file) > obj_time) return true;
     if (!preamble_file.empty() && fs::exists(preamble_file)) {
         if (fs::last_write_time(preamble_file) > obj_time) return true;
-        std::string gch_file = preamble_file + ".gch";
-        if (fs::exists(gch_file) && fs::last_write_time(gch_file) > obj_time)
-            return true;
+        std::string gch_dir = preamble_file + ".gch";
+        if (fs::is_directory(gch_dir)) {
+            for (const auto& entry : fs::directory_iterator(gch_dir)) {
+                if (fs::last_write_time(entry.path()) > obj_time)
+                    return true;
+            }
+        }
     }
     return false;
 }
@@ -605,12 +609,19 @@ static bool build_pch(const std::string& preamble_file,
         return false;
     }
 
-    std::string gch_file = preamble_file + ".gch";
-    std::string hash_marker = gch_file + "." + hash;
+    std::string gch_dir = preamble_file + ".gch";
+    std::string gch_file = gch_dir + "/" + hash + ".gch";
 
-    if (fs::exists(gch_file) && fs::exists(hash_marker)) {
+    if (fs::exists(gch_file)) {
         if (verbose) out << "  PCH up-to-date: " << gch_file << "\n";
         return true;
+    }
+
+    if (fs::exists(gch_dir)) {
+        for (const auto& entry : fs::directory_iterator(gch_dir))
+            fs::remove(entry.path());
+    } else {
+        fs::create_directories(gch_dir);
     }
 
     std::string cmd = shell_quote(compiler) + " -x c++-header";
@@ -624,21 +635,9 @@ static bool build_pch(const std::string& preamble_file,
     int ret = run_command_quiet(cmd);
     if (ret != 0) {
         if (verbose) out << "  PCH build failed (exit " << ret << "), continuing without PCH\n";
+        fs::remove_all(gch_dir);
         return false;
     }
-
-    std::string dir = fs::path(gch_file).parent_path().string();
-    std::string gch_name = fs::path(gch_file).filename().string();
-    if (dir.empty()) dir = ".";
-    for (const auto& entry : fs::directory_iterator(dir)) {
-        std::string name = entry.path().filename().string();
-        if (name.size() > gch_name.size() + 1 &&
-            name.substr(0, gch_name.size() + 1) == gch_name + "." &&
-            entry.path().string() != hash_marker) {
-            fs::remove(entry.path());
-        }
-    }
-    { std::ofstream m(hash_marker); }
 
     if (verbose) out << "  PCH built: " << gch_file << "\n";
     return true;
