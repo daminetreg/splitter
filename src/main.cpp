@@ -1816,7 +1816,18 @@ static int run_as_launcher(int argc, char* argv[]) {
       auto actual_compiler = *split_flags.begin();
       split_flags = std::vector<std::string>(split_flags.begin()+1, split_flags.end());
     }
-    SplitResult sr = try_server_split(input_file, split_dir, split_flags, verbose, std::cerr);
+    
+    SplitResult sr;
+    {
+        const char* no_server = std::getenv("CPP_SPLITTER_NO_SERVER");
+        if (!no_server || std::string(no_server) != "1") {
+            sr = try_server_split(input_file, split_dir, split_flags, verbose, std::cout);
+        } else {
+            sr = do_split(input_file, split_dir, split_flags, verbose);
+        }
+    }
+
+
     auto build_passthrough_cmd = [&]() {
         std::string cmd;
         for (int i = 1; i < argc; i++) {

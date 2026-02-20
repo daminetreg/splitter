@@ -70,6 +70,7 @@ FetchContent_MakeHermetic(
   [=[
     set(BOOST_BUILD_TEST OFF CACHE BOOL "" FORCE)
     set(BOOST_ENABLE_PYTHON OFF CACHE BOOL "" FORCE)
+    set(BOOST_INCLUDE_LIBRARIES "spirit" CACHE STRING "" FORCE)
   ]=]
 )
 

@@ -53,16 +53,18 @@ export RBE_use_unified_uploads=true
 
 # Generate a new UUID for the session
 export RBE_invocation_id=$(uuidgen)
+export RBE_exec_strategy="remote"
 
 mkdir -p $SCRIPT_DIR/logs
 export RBE_proxy_log_dir=$SCRIPT_DIR/logs
 
-echo "=== Starting cpp-splitter server ==="
 export CPP_SPLITTER_VERBOSE=on
-"$SPLITTER" --server &
-SERVER_PID=$!
-sleep 0.5
-trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
+#echo "=== Starting cpp-splitter server ===src/main.cpp"
+#"$SPLITTER" --server &
+#SERVER_PID=$!
+#sleep 0.5
+#trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
+export CPP_SPLITTER_NO_SERVER=1
 
 # Configure + Build remote ccache'd
 export CMAKE_C_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
@@ -71,7 +73,7 @@ export CMAKE_CXX_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-
 echo "=== Starting bootstrap ==="
 bootstrap -server_address $RBE_server_address -shutdown
 bootstrap -server_address $RBE_server_address -logtostderr -v 43
-trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null && bootstrap -server_address $RBE_server_address -shutdown" EXIT
+trap "bootstrap -server_address $RBE_server_address -shutdown" EXIT
 
 
 echo ""
@@ -88,10 +90,11 @@ export TIPI_INTERCALATED_COMPILER_LAUNCHER=rewrapper
 
 echo ""
 echo "=== Building ==="
+export CMAKE_BUILD_PARALLEL_LEVEL=300
 VERBOSE=1 cmake --build "$BUILD_DIR" -j300
 
 
 echo ""
 echo "=== Running the built binary ==="
-"$BUILD_DIR/spirit_example"
+#"$BUILD_DIR/spirit_example"
 

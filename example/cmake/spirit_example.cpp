@@ -616,8 +616,9 @@ int main() {
     run_expression_tests();
     run_markdown_tests();
     std::cout << "=== All tests complete ===\n";
-    generate_some_other_markdown_html();
-    generate_some_anoother_markdown_html();
+    auto spans = parse_markdown_inline("**cool**");
+    generate_some_other_markdown_html(spans);
+    generate_some_anoother_markdown_html(spans);
     return 0;
 }
 
