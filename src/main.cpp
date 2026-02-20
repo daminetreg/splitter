@@ -2046,7 +2046,7 @@ int main(int argc, char* argv[]) {
 
         std::vector<std::string> pch_flags = {"-std=c++17"};
         for (const auto& f : extra_flags) pch_flags.push_back(f);
-        bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, pch_flags, output_dir, true, std::cout);
+        bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, "", pch_flags, output_dir, true, std::cout);
         if (pch_ok) std::cout << "\n";
 
         std::vector<CompileJob> jobs;

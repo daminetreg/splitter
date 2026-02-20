@@ -22,6 +22,7 @@ docker exec -it `whoami`-tipi tipi run /bin/bash
 
 ## Compile splitter
 ```sh
+sudo apt install libclang-dev
 g++ -std=c++17 -Wall -Wextra -O2 src/main.cpp -o cpp-splitter -I /usr/local/share/.tipi/clang/4f846ee/include/ -lclang -L /usr/local/share/.tipi/clang/4f846ee/lib -Wl,-rpath,/usr/local/share/.tipi/clang/4f846ee/lib
 ```
 

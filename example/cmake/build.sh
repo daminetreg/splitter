@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SPLITTER="$REPO_ROOT/cpp-splitter"
 
 pushd $REPO_ROOT
-  g++ -std=c++17 -Wall -Wextra -O2 src/main.cpp -o $SPLITTER -I /usr/local/share/.tipi/clang/4f846ee/include/ -lclang -L /usr/local/share/.tipi/clang/4f846ee/lib -Wl,-rpath,/usr/local/share/.tipi/clang/4f846ee/lib
+  g++ -std=c++17 -Wall -Wextra -O2 src/main.cpp -o $SPLITTER  -I/usr/lib/llvm-18/include/ -lclang -L/usr/lib/llvm-18/lib/ -Wl,-rpath,/usr/lib/llvm-18/lib/
 popd
 
 BUILD_DIR="$SCRIPT_DIR/build"
@@ -20,8 +20,8 @@ fi
 
 
 
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR"
+#rm -rf "$BUILD_DIR"
+#mkdir -p "$BUILD_DIR"
 
 # RBE
 export RBE_service=opal.cluster.engflow.com:443
@@ -54,9 +54,11 @@ export RBE_use_unified_uploads=true
 # Generate a new UUID for the session
 export RBE_invocation_id=$(uuidgen)
 
-export RBE_proxy_log_dir=$PWD
+mkdir -p $SCRIPT_DIR/logs
+export RBE_proxy_log_dir=$SCRIPT_DIR/logs
 
 echo "=== Starting cpp-splitter server ==="
+export CPP_SPLITTER_VERBOSE=on
 "$SPLITTER" --server &
 SERVER_PID=$!
 sleep 0.5
@@ -69,12 +71,15 @@ export CMAKE_CXX_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-
 echo "=== Starting bootstrap ==="
 bootstrap -server_address $RBE_server_address -shutdown
 bootstrap -server_address $RBE_server_address -logtostderr -v 43
-trap "bootstrap -server_address $RBE_server_address -shutdown" EXIT
+trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null && bootstrap -server_address $RBE_server_address -shutdown" EXIT
 
 
 echo ""
 echo "=== Configuring with CMake (cpp-splitter as launcher) ==="
-TIPI_CPP_SPLITTER_VERBOSE=on cmake \
+cmake \
+    -DCMAKE_C_COMPILER=/usr/local/share/.tipi/clang/4f846ee/bin/clang \
+    -DCMAKE_CXX_COMPILER=/usr/local/share/.tipi/clang/4f846ee/bin/clang++ \
+    --debug-trycompile \
     -G Ninja \
     -S "$SCRIPT_DIR" \
     -B "$BUILD_DIR"
@@ -83,10 +88,10 @@ export TIPI_INTERCALATED_COMPILER_LAUNCHER=rewrapper
 
 echo ""
 echo "=== Building ==="
-TIPI_CPP_SPLITTER_VERBOSE=on VERBOSE=1 cmake --build "$BUILD_DIR"
+VERBOSE=1 cmake --build "$BUILD_DIR" -j300
 
 
 echo ""
 echo "=== Running the built binary ==="
-"$BUILD_DIR/sample_app"
+"$BUILD_DIR/spirit_example"
 
