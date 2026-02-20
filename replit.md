@@ -19,7 +19,10 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 - **Line Directives:** `#line` preprocessor directives are used in both the preamble and split files to map compiler errors and debug information back to original source locations.
 - **Static Function Handling:** Static functions are split and renamed with a unique mangled name (e.g., `__static_<filestem>__<funcname>`) to prevent linker collisions.
 - **Namespace Handling:** Namespace-scoped functions are properly wrapped within their respective namespace blocks in the split files.
-- **Precompiled Headers (PCH):** Automatically builds PCH for the preamble header before compiling split files, significantly speeding up compilation for heavy headers. Uses a `<preamble>.gch/` directory containing a single `<hash>.gch` file named after the preamble content hash. GCC auto-discovers PCH via the directory; if the hash-named file exists, the PCH is up-to-date; otherwise old entries are cleaned and it rebuilds.
+- **Precompiled Headers (PCH):** Two-level PCH system:
+  - *libclang PCH* (`<preamble>.pch/<hash>.pch`): Built via `clang_saveTranslationUnit()` from the preamble header. On subsequent runs, passed as `-include-pch` to `clang_parseTranslationUnit2()` to dramatically speed up AST parsing (replacing `CXTranslationUnit_PrecompiledPreamble`). This makes the cached preamble a distributable file artifact, removing the need for a centralized in-memory server.
+  - *GCC PCH* (`<preamble>.gch/<hash>.gch`): Built for compilation of split files. GCC auto-discovers PCH via the `.gch/` directory.
+  - Both use content-hash naming: if the hash-named file exists, the PCH is current; otherwise old entries are cleaned and it rebuilds.
 - **Incremental Recompilation:** Compares timestamps of source files, preamble, and PCH against object files to recompile only changed components.
 - **Parallel Compilation:** Utilizes Boost.Process and `std::thread` for concurrent compilation of split files using a work-stealing pattern.
 - **Compiler Launcher Mode:** Operates as a compiler wrapper, splitting the source via a server, compiling each piece, and combining them into a single `.o`. It handles dependency tracking flags (`-MD`/`-MMD`/`-MF`/`-MT`).
@@ -40,7 +43,8 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 - Added `cached_system_includes()` to avoid re-spawning `g++ -E -v` on every server request.
 - Implemented fallback-to-normal-compilation when splitting fails: in both launcher mode (passthrough to original compiler command) and CLI mode (compile source directly without splitting). Fallback triggers on server connection failure, split parse failure, split compilation failure, header dep compilation failure, or relocatable link failure.
 - Added `CPP_SPLITTER_AUTO_INCLUDE_SPLIT` feature flag: automatic header splitting is enabled by default; set to `off` or `0` to disable it.
-- Replaced timestamp-based PCH staleness detection with content-hash-named PCH files inside a `<preamble>.gch/` directory (e.g., `preamble.h.gch/<hash>.gch`). GCC auto-discovers PCH via the directory. If the hash-named file exists, PCH is current; otherwise old entries are cleaned and it rebuilds. This eliminates same-second timestamp race conditions and removes the need for a `preamble_changed` flag in the server protocol.
+- Replaced timestamp-based PCH staleness detection with content-hash-named PCH files inside `<preamble>.gch/` and `<preamble>.pch/` directories.
+- Added libclang PCH support: `build_libclang_pch()` parses the preamble header with libclang, saves via `clang_saveTranslationUnit()` to `<preamble>.pch/<hash>.pch`. On subsequent splits, this PCH is loaded via `-include-pch`, replacing `CXTranslationUnit_PrecompiledPreamble` and enabling distributed builds without a centralized server.
 
 ## External Dependencies
 - **C++ compiler:** g++
