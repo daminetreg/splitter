@@ -29,13 +29,13 @@ lines=$(wc -l < "$SOURCE")
 funcs=$("$SPLITTER" "$SOURCE" /tmp/bench_count 2>/dev/null | grep -c "^  \[" || true)
 rm -rf /tmp/bench_count
 echo "Source stats: $lines lines, $funcs functions"
-echo "Hardware threads: 12"
+echo "Hardware threads: $(nproc)"
 echo ""
 
 time_ms() {
-    local start=$(gdate +%s%N)
+    local start=$(date +%s%N)
     eval "$@" 1>&2
-    local end=$(gdate +%s%N)
+    local end=$(date +%s%N)
     echo $(( (end - start) / 1000000 ))
 }
 
@@ -46,7 +46,7 @@ echo "  Time: ${t_mono}ms"
 echo ""
 
 echo "--- Step 2: Split + parallel compile (cold) ---"
-#rm -rf /tmp/bench_split_out /tmp/bench_split_bin
+rm -rf /tmp/bench_split_out /tmp/bench_split_bin
 t_split=$(time_ms "'$SPLITTER' '$SOURCE' /tmp/bench_split_out --compile -o /tmp/bench_split_bin --cxx '$CXX' -- $CXXFLAGS")
 echo "  Time: ${t_split}ms"
 echo ""
@@ -57,7 +57,7 @@ echo "  Time: ${t_noop}ms"
 echo ""
 
 echo "--- Step 4: Incremental rebuild (1 function modified) ---"
-sed -i bak 's/Boost.Spirit Qi\/Karma Demo/Modified/' ${SOURCE}
+sed -i 's/Boost.Spirit Qi\/Karma Demo/Modified/' ${SOURCE}
 t_one=$(time_ms "'$SPLITTER' '$SOURCE' /tmp/bench_split_out --compile -o /tmp/bench_split_bin --cxx '$CXX' -- $CXXFLAGS")
 echo "  Time: ${t_one}ms"
 #rm -rf /tmp/bench_split_out /tmp/bench_split_bin

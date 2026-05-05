@@ -6,9 +6,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 SPLITTER="$REPO_ROOT/cpp-splitter"
 
-pushd $REPO_ROOT
-  g++ -std=c++17 -Wall -Wextra -O2 src/main.cpp -o $SPLITTER  -I/usr/lib/llvm-18/include/ -lclang -L/usr/lib/llvm-18/lib/ -Wl,-rpath,/usr/lib/llvm-18/lib/
-popd
+if [ ! -f "$SPLITTER" ]; then
+  pushd $REPO_ROOT
+    g++ -std=c++17 -Wall -Wextra -O2 src/main.cpp -o cpp-splitter -I /usr/local/share/.tipi/clang/4f846ee/include/ -lclang -L /usr/local/share/.tipi/clang/4f846ee/lib -Wl,-rpath,/usr/local/share/.tipi/clang/4f846ee/lib
+  popd
+fi
 
 BUILD_DIR="$SCRIPT_DIR/build"
 
@@ -66,7 +68,7 @@ export CPP_SPLITTER_VERBOSE=on
 #trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
 export CPP_SPLITTER_NO_SERVER=1
 
-# Configure + Build remote ccache'd
+# Configure + Build remote 
 export CMAKE_C_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
 export CMAKE_CXX_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
 
@@ -89,12 +91,17 @@ cmake \
 export TIPI_INTERCALATED_COMPILER_LAUNCHER=rewrapper
 
 echo ""
+echo "=== Cleaning ==="
+export CMAKE_BUILD_PARALLEL_LEVEL=300
+VERBOSE=1 cmake --build "$BUILD_DIR" -j300 --target clean
+
+echo ""
 echo "=== Building ==="
 export CMAKE_BUILD_PARALLEL_LEVEL=300
-VERBOSE=1 cmake --build "$BUILD_DIR" -j300
+time VERBOSE=1 cmake --build "$BUILD_DIR" -j300
 
 
 echo ""
 echo "=== Running the built binary ==="
-#"$BUILD_DIR/spirit_example"
+"$BUILD_DIR/spirit_example"
 
