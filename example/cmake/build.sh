@@ -6,6 +6,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 SPLITTER="$REPO_ROOT/cpp-splitter"
 
+time_ms() {
+    local start=$(date +%s%N)
+    eval "$@" 1>&2
+    local end=$(date +%s%N)
+    echo $(( (end - start) / 1000000 ))
+}
+
 if [ ! -f "$SPLITTER" ]; then
   pushd $REPO_ROOT
     g++ -std=c++17 -Wall -Wextra -O2 src/main.cpp -o cpp-splitter -I /usr/local/share/.tipi/clang/4f846ee/include/ -lclang -L /usr/local/share/.tipi/clang/4f846ee/lib -Wl,-rpath,/usr/local/share/.tipi/clang/4f846ee/lib
@@ -29,6 +36,11 @@ fi
 export RBE_service=opal.cluster.engflow.com:443
 export RBE_tls_client_auth_key=$HOME/engflow-mTLS/engflow.key
 export RBE_tls_client_auth_cert=$HOME/engflow-mTLS/engflow.crt
+
+
+#export RBE_service=kernite.cluster.engflow.com:443
+#export RBE_tls_client_auth_key=${HOME}/engflow-mTLS-kernite/engflow.key
+#export RBE_tls_client_auth_cert=${HOME}/engflow-mTLS-kernite/engflow.crt
 
 # Configure scandeps cache
 mkdir -p $PWD/.scandeps_cache
@@ -69,21 +81,20 @@ export CPP_SPLITTER_VERBOSE=on
 export CPP_SPLITTER_NO_SERVER=1
 
 # Configure + Build remote 
-export CMAKE_C_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
-export CMAKE_CXX_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
+#export CMAKE_C_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
+#export CMAKE_CXX_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
 
 echo "=== Starting bootstrap ==="
 bootstrap -server_address $RBE_server_address -shutdown
 bootstrap -server_address $RBE_server_address -logtostderr -v 43
 trap "bootstrap -server_address $RBE_server_address -shutdown" EXIT
 
+export DISTRIBUTED=distributed-
 
 echo ""
 echo "=== Configuring with CMake (cpp-splitter as launcher) ==="
 cmake \
-    -DCMAKE_C_COMPILER=/usr/local/share/.tipi/clang/4f846ee/bin/clang \
-    -DCMAKE_CXX_COMPILER=/usr/local/share/.tipi/clang/4f846ee/bin/clang++ \
-    --debug-trycompile \
+    -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/environments/${DISTRIBUTED}splitted.cmake \
     -G Ninja \
     -S "$SCRIPT_DIR" \
     -B "$BUILD_DIR"
@@ -93,15 +104,44 @@ export TIPI_INTERCALATED_COMPILER_LAUNCHER=rewrapper
 echo ""
 echo "=== Cleaning ==="
 export CMAKE_BUILD_PARALLEL_LEVEL=300
-VERBOSE=1 cmake --build "$BUILD_DIR" -j300 --target clean
+cmake --build "$BUILD_DIR" -j300 --target clean
 
 echo ""
 echo "=== Building ==="
+export VERBOSE=1
 export CMAKE_BUILD_PARALLEL_LEVEL=300
-time VERBOSE=1 cmake --build "$BUILD_DIR" -j300
+t_split=$(time_ms "cmake --build \"$BUILD_DIR\" -j300")
+unset VERBOSE
 
+#
+# PLAIN
+#
+
+BUILD_DIR=$BUILD_DIR-plain
 
 echo ""
-echo "=== Running the built binary ==="
-"$BUILD_DIR/spirit_example"
+echo "=== Configuring with CMake (plain) ==="
+cmake \
+    -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/environments/${DISTRIBUTED}monolithic.cmake \
+    -G Ninja \
+    -S "$SCRIPT_DIR" \
+    -B "$BUILD_DIR"
 
+echo ""
+echo "=== Cleaning ==="
+export CMAKE_BUILD_PARALLEL_LEVEL=300
+cmake --build "$BUILD_DIR" -j300 --target clean
+
+echo ""
+echo "=== Building ==="
+export VERBOSE=1
+export CMAKE_BUILD_PARALLEL_LEVEL=300
+t_mono=$(time_ms "cmake --build \"$BUILD_DIR\" -j300")
+unset VERBOSE
+
+echo "============================================"
+echo "  Results Summary"
+echo "============================================"
+echo ""
+echo "  Full build (monolithic):       ${t_mono}ms"
+echo "  Full build (split+parallel):   ${t_split}ms"

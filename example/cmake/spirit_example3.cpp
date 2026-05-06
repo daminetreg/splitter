@@ -371,7 +371,6 @@ std::string generate_expression_table(const std::vector<std::pair<std::string, d
         std::string("+-----------------------+------------------+\n"));
 
     return output;
-
 }
 
 void run_expression_tests() {
