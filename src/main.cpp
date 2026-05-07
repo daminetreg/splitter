@@ -374,7 +374,7 @@ static std::string generate_preamble(const std::string& source,
 
     std::string preamble;
     preamble += "#pragma once\n";
-    preamble += "#line 1 \"" + source_path + "\"\n";
+    //preamble += "#line 1 \"" + source_path + "\"\n";
 
     auto ensure_newline = [&preamble]() {
         if (!preamble.empty() && preamble.back() != '\n')
@@ -389,12 +389,12 @@ static std::string generate_preamble(const std::string& source,
         if (r.keep) {
             ensure_newline();
             unsigned keep_line = offset_to_line(line_offsets, r.start);
-            preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
+            //preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
             preamble += source.substr(r.start, r.end - r.start);
         }
         ensure_newline();
         unsigned resume_line = offset_to_line(line_offsets, r.end);
-        preamble += "#line " + std::to_string(resume_line) + " \"" + source_path + "\"\n";
+        //preamble += "#line " + std::to_string(resume_line) + " \"" + source_path + "\"\n";
         pos = r.end;
     }
     if (pos < source.size()) {

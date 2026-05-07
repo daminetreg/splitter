@@ -21,6 +21,8 @@ namespace ascii = boost::spirit::ascii;
 
 
 
+
+
 struct XmlAttribute {
     std::string name;
     std::string value;
@@ -155,7 +157,7 @@ void run_roman_tests() {
     check("MCMXCIX", 1999);
     check("MMMCMXCIX", 3999);
     check("MMXXVI", 2026);
-    std::cout << "  " << pass << " passed, " << fail << " failed\n\n";
+    std::cout << "  " << pass << " passed, " << fail << " failed.\n\n";
 }
 
 std::vector<XmlElement> parse_xml_elements(const std::string& input) {
@@ -371,7 +373,9 @@ std::string generate_expression_table(const std::vector<std::pair<std::string, d
         std::string("+-----------------------+------------------+\n"));
 
     return output;
+ 
 
+    
 }
 
 void run_expression_tests() {
@@ -577,126 +581,16 @@ std::string generate_some_other_markdown_html(const std::vector<MarkdownSpan>& s
     return output;
 }
 
-
-std::string generate_some_anoother_markdown_html(const std::vector<MarkdownSpan>& spans) {
-    std::string output;
-    std::back_insert_iterator<std::string> sink(output);
-
-
-
-    for (const auto& span : spans) {
-        if (span.type == "bold") {
-            karma::generate(sink,
-                karma::lit("<bold>") << karma::string << karma::lit("</bold>"),
-                span.content
-            );
-        } else if (span.type == "italic") {
-            karma::generate(sink,
-                karma::lit("<me>") << karma::string << karma::lit("</me>"),
-                span.content
-            );
-        } else if (span.type == "code") {
-            karma::generate(sink,
-                karma::lit("<code>") << karma::string << karma::lit("</code>"),
-                span.content
-            );
-        } else if (span.type == "link") {
-            karma::generate(sink,
-                karma::lit("<a>") << karma::string << karma::lit("</a>"),
-                span.content
-            );
-        } else {
-            karma::generate(sink, karma::string, span.content);
-        }
-    }
-
-    return output;
-}
-
-std::string generate_some_anooother_markdown_html(const std::vector<MarkdownSpan>& spans) {
-    std::string output;
-    std::back_insert_iterator<std::string> sink(output);
-
-
-
-    for (const auto& span : spans) {
-        if (span.type == "bold") {
-            karma::generate(sink,
-                karma::lit("<bold>") << karma::string << karma::lit("</bold>"),
-                span.content
-            );
-        } else if (span.type == "italic") {
-            karma::generate(sink,
-                karma::lit("<me>") << karma::string << karma::lit("</me>"),
-                span.content
-            );
-        } else if (span.type == "code") {
-            karma::generate(sink,
-                karma::lit("<code>") << karma::string << karma::lit("</code>"),
-                span.content
-            );
-        } else if (span.type == "link") {
-            karma::generate(sink,
-                karma::lit("<a>") << karma::string << karma::lit("</a>"),
-                span.content
-            );
-        } else {
-            karma::generate(sink, karma::string, span.content);
-        }
-    }
-
-    return output;
-}
-
-std::string generate_some_anoooother_markdown_html(const std::vector<MarkdownSpan>& spans) {
-    std::string output;
-    std::back_insert_iterator<std::string> sink(output);
-
-
-
-
-    for (const auto& span : spans) {
-        if (span.type == "bold") {
-            karma::generate(sink,
-                karma::lit("<bold>") << karma::string << karma::lit("</bold>"),
-                span.content
-            );
-        } else if (span.type == "italic") {
-            karma::generate(sink,
-                karma::lit("<me>") << karma::string << karma::lit("</me>"),
-                span.content
-            );
-        } else if (span.type == "code") {
-            karma::generate(sink,
-                karma::lit("<code>") << karma::string << karma::lit("</code>"),
-                span.content
-            );
-        } else if (span.type == "link") {
-            karma::generate(sink,
-                karma::lit("<a>") << karma::string << karma::lit("</a>"),
-                span.content
-            );
-        } else {
-            karma::generate(sink, karma::string, span.content);
-        }
-    }
-
-    return output;
-}
-
 int main() {
     std::cout << "=== Boost.Spirit Qi/Karma Demo ===\n\n";
 
-    run_roman_tests();
     run_roman_tests();
     run_xml_tests();
     run_expression_tests();
     run_markdown_tests();
     std::cout << "=== All tests complete ===\n";
-    auto spans = parse_markdown_inline("**cool**");
+    auto spans = parse_markdown_inline("**bold** and _italic_");
     generate_some_other_markdown_html(spans);
-    generate_some_anoother_markdown_html(spans);
-    generate_some_anoooother_markdown_html(spans);
     return 0;
 }
 

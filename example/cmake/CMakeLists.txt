@@ -79,18 +79,3 @@ HermeticFetchContent_MakeAvailableAtBuildTime(Boost)
 
 add_executable(spirit_example spirit_example.cpp)
 target_link_libraries(spirit_example Boost::headers)
-
-add_executable(spirit_example1 spirit_example1.cpp)
-target_link_libraries(spirit_example Boost::headers)
-
-add_executable(spirit_example2 spirit_example2.cpp)
-target_link_libraries(spirit_example Boost::headers)
-
-add_executable(spirit_example3 spirit_example3.cpp)
-target_link_libraries(spirit_example Boost::headers)
-
-add_executable(spirit_example4 spirit_example4.cpp)
-target_link_libraries(spirit_example Boost::headers)
-
-add_executable(spirit_example5 spirit_example5.cpp)
-target_link_libraries(spirit_example Boost::headers)
