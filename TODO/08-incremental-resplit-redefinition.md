@@ -5,6 +5,8 @@ broken result, and deletes the split files the first run wrote.
 
 **Found while testing TODO 05**, and confirmed present before that change.
 
+**Status: implemented and verified.** See "Outcome" at the end of this file.
+
 ## Motivation
 
 `build_libclang_pch()` builds a precompiled header from the generated preamble and passes
@@ -77,3 +79,44 @@ own text already provides those declarations.
   produces the same set of split files as the initial build.
 - A parse failure never removes previously written split files.
 - Regression test: split a file twice and diff the two output directories.
+
+## Outcome
+
+Implemented in `src/main.cpp`: the preamble's PCH is no longer passed as `-include-pch`
+when parsing the original source, in either `do_split()` or `do_split_with_cache()`. Both
+now always use `CXTranslationUnit_PrecompiledPreamble` /
+`CXTranslationUnit_CreatePreambleOnFirstParse`, which is a different mechanism and is safe:
+libclang caches the prefix of *this* file, so it cannot redefine anything the file declares.
+
+Steps 3 and 4 of the plan -- never prune stale output after a failed parse -- were already
+implemented as part of TODO 06, and the two fixes turn out to be complementary: TODO 06
+stops the damage, this one stops the cause.
+
+Verified:
+
+| check | before | after |
+|---|---|---|
+| second run of the same file: `redefinition` errors | 3 | **0** |
+| second run: split files produced | 13 (from 12) | **12, byte-identical** |
+| `diff -rq` of first vs second output directory | differs | **no differences** |
+| Boost incremental rebuild (touch one source): split file set | -- | **5067 files, identical to initial** |
+| Boost incremental rebuild: `redefinition` errors | -- | **0** |
+
+All three fixtures split, compile, link and run on consecutive runs, not just the first.
+
+### Follow-up: the libclang PCH now has no consumer
+
+`-include-pch` was the only thing that read the artifact `build_libclang_pch()` produces.
+Split pieces are compiled by the real compiler, which auto-discovers the separate GCC-style
+`<preamble>.gch/` PCH instead. So the libclang `.pch` is now built on every split and never
+read.
+
+Measured on the Boost `filesystem` build: **46.6s with it, 37.2s without** -- about 20% of
+total build time spent producing an artifact nothing consumes.
+
+The call is deliberately left in place rather than removed here, because `DOCS.md` presents
+this PCH as a distributable artifact that enables distributed builds without a centralised
+server, and dropping it is a design decision rather than part of this fix. Either it should
+gain a consumer -- passing it to the split-piece compile commands, where it would be read
+by the compiler rather than by libclang -- or it should be removed. This deserves its own
+item.

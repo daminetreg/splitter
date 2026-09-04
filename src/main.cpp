@@ -2146,12 +2146,17 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         return result;
     }
 
+    // The preamble is this very file with the function bodies carved out, so it declares
+    // every class, enum and typedef the file declares. Feeding its PCH back in while
+    // parsing the file redefines all of them. The first run got away with it because no
+    // preamble existed yet; from the second run on the parse was wrecked, the visitor
+    // found almost nothing, and the stale-output pruning then deleted the previous run's
+    // split files. The PCH is for compiling the split pieces, which include the preamble
+    // and not the original source -- it must not be applied here.
+    //
+    // libclang's own preamble caching is a different mechanism and is safe: it caches the
+    // prefix of *this* file, so it cannot redefine anything.
     std::vector<std::string> parse_flags_vec = all_flags;
-    std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
-    if (!libclang_pch.empty()) {
-        parse_flags_vec.push_back("-include-pch");
-        parse_flags_vec.push_back(libclang_pch);
-    }
 
     auto it = g_tu_cache.find(abs_path);
     bool cache_hit = false;
@@ -2193,10 +2198,8 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         std::vector<const char*> args;
         for (const auto& f : parse_flags_vec) args.push_back(f.c_str());
 
-        unsigned parse_flags = 0;
-        if (libclang_pch.empty())
-            parse_flags = CXTranslationUnit_PrecompiledPreamble
-                        | CXTranslationUnit_CreatePreambleOnFirstParse;
+        unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
+                             | CXTranslationUnit_CreatePreambleOnFirstParse;
         CXErrorCode err = clang_parseTranslationUnit2(
             index, abs_path.c_str(), args.data(),
             static_cast<int>(args.size()), nullptr, 0, parse_flags, &tu);
@@ -2340,12 +2343,17 @@ static SplitResult do_split(const std::string& input_path,
         return result;
     }
 
+    // The preamble is this very file with the function bodies carved out, so it declares
+    // every class, enum and typedef the file declares. Feeding its PCH back in while
+    // parsing the file redefines all of them. The first run got away with it because no
+    // preamble existed yet; from the second run on the parse was wrecked, the visitor
+    // found almost nothing, and the stale-output pruning then deleted the previous run's
+    // split files. The PCH is for compiling the split pieces, which include the preamble
+    // and not the original source -- it must not be applied here.
+    //
+    // libclang's own preamble caching is a different mechanism and is safe: it caches the
+    // prefix of *this* file, so it cannot redefine anything.
     std::vector<std::string> parse_flags_vec = all_flags;
-    std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
-    if (!libclang_pch.empty()) {
-        parse_flags_vec.push_back("-include-pch");
-        parse_flags_vec.push_back(libclang_pch);
-    }
 
     std::vector<const char*> args;
     for (const auto& f : parse_flags_vec)
@@ -2358,10 +2366,8 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     CXTranslationUnit tu = nullptr;
-    unsigned parse_flags = 0;
-    if (libclang_pch.empty())
-        parse_flags = CXTranslationUnit_PrecompiledPreamble
-                     | CXTranslationUnit_CreatePreambleOnFirstParse;
+    unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
+                         | CXTranslationUnit_CreatePreambleOnFirstParse;
     CXErrorCode err = clang_parseTranslationUnit2(
         index, abs_path.c_str(), args.data(),
         static_cast<int>(args.size()), nullptr, 0, parse_flags, &tu);
