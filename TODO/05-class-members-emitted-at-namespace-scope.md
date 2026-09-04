@@ -3,6 +3,8 @@
 **Severity:** High. This is the bulk of the work needed to make header splitting useful,
 and header splitting is where most of the split volume comes from.
 
+**Status: implemented and verified.** See "Outcome" at the end of this file.
+
 ## Motivation
 
 Member functions defined inside a class body are extracted verbatim and written into a
@@ -104,3 +106,67 @@ the function name and in-class-only specifiers removed.
   member of a nested class; a member of a class template (must be kept in header).
 - Symbols emitted from split member definitions match those from an unsplit build:
   compare `nm --defined-only` output for a fixture object built both ways.
+
+## Outcome
+
+Implemented in `src/main.cpp`:
+
+- `FunctionInfo` gained `defined_in_class`, `in_class_template`, `in_anonymous_class`,
+  `keep_in_header`, `member_decl` and `outlined_body`, filled by a new
+  `prepare_functions()` pass that runs right after the AST visit. `should_keep_in_header()`
+  now just reads the precomputed decision.
+- Supporting helpers: `definition_decl_end()` (finds the ':' of a member-initialiser list
+  or the '{' of the body at top level), `find_declarator()`, `strip_virt_specifiers()`,
+  `strip_default_args()`, `skip_leading_attributes()`, `has_trailing_return()`.
+- A member defined inside its class body is rewritten to the out-of-line form: `virtual`,
+  `static`, `explicit`, `friend`, `override` and `final` removed, default arguments
+  removed, and the declarator qualified with the full class chain (`Widget::Inner::`).
+  Member-initialiser lists are carried through unchanged.
+- `generate_preamble()` leaves a declaration inside the class where the definition was.
+  Without it the out-of-line definition matches nothing and the member vanishes from the
+  type.
+- **Return types are moved to a trailing return type** (`auto C::f() const -> R`). A
+  leading return type is looked up in the enclosing namespace once out-of-line, so
+  class-scoped names such as `result_type` or `iterator` stop resolving; a trailing return
+  type is looked up in class scope, which fixes all of them at once. The type text comes
+  from libclang rather than the source span, because the span also contains function
+  specifiers that are routinely macros (`BOOST_FORCEINLINE`) and cannot be told apart from
+  a type name textually.
+- Kept in the header: templates, members of class templates, members of unnamed classes,
+  definitions with no body (`= default`, `= delete`), `constexpr`/`consteval`, deduced
+  return types, and anything whose declarator could not be located.
+
+One trap worth recording: a definition already written out-of-line (`void path::foo() {}`)
+also has a class as its *semantic* parent, so the first version of this change emitted a
+stray `void path::foo();` at namespace scope for every one of them -- 2900 instances of
+`out-of-line declaration of a member must be a definition`. The test is the *lexical*
+parent (`clang_getCursorLexicalParent`), which is the class only when the body really is
+inside the class body.
+
+Verified on the Boost `filesystem` build:
+
+| check | before | after |
+|---|---|---|
+| `non-member function cannot have '...' qualifier` | 101 | **0** |
+| `only constructors take base initializers` | 69 | **0** |
+| `invalid use of 'this' outside...` | 46 | **0** |
+| `variable type '...' is an abstract class` | 78 | **0** |
+| total `error:` lines | 10869 | **2050** |
+| compilable `boost/filesystem/path.hpp` pieces that compile | 0 / 104 | **100 / 104** |
+
+`test/member_functions.cpp` covers a const member, a constructor with base and member
+initialisers plus a default argument, a destructor, a `virtual` override, a static member
+function, a member of a nested class, and members of a class template (correctly kept
+header-only). It splits, compiles, links and runs. Symbols match an unsplit build exactly:
+27 defined symbols each, no differences, once compiler-internal exception-table labels are
+excluded.
+
+Still 2 of 12 translation units link from split objects. The remaining blockers are no
+longer member extraction:
+
+- The 4 remaining `path.hpp` pieces and both header-dependency failures fail on missing
+  declaration context in split headers -- `no template named 'basic_string_view' in
+  namespace 'std'`, and an incomplete `error_condition` return type in
+  `std_category_impl.hpp`. These belong with **TODO 06**.
+- **TODO 03** still blocks `unique_path.cpp`, unchanged.
+- **TODO 08** (new) makes every incremental rebuild worse than the first.

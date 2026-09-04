@@ -80,6 +80,14 @@ struct FunctionInfo {
     std::vector<ScopeEntry> scope_chain;
     bool is_template;
     bool is_static;
+
+    // Set by prepare_functions() once the whole file has been visited.
+    bool defined_in_class = false;    // body written inside the class, not already out-of-line
+    bool in_class_template = false;   // member of a class template: cannot go out-of-line
+    bool in_anonymous_class = false;  // no class name to qualify a definition with
+    bool keep_in_header = false;      // definition has to stay in the preamble
+    std::string member_decl;          // in-class declaration left behind (members only)
+    std::string outlined_body;        // `T Class::name(args) { ... }` (members only)
 };
 
 static std::string read_file(const std::string& path) {
@@ -193,6 +201,16 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     info.is_template = (kind == CXCursor_FunctionTemplate);
     info.is_static = (clang_getCursorLinkage(cursor) == CXLinkage_Internal);
 
+    // A definition already written out-of-line (`void C::f() { ... }`) needs no rewriting
+    // and no declaration left behind: the class already declares it. Only definitions
+    // lexically inside the class body do.
+    CXCursorKind lex_kind = clang_getCursorKind(clang_getCursorLexicalParent(cursor));
+    info.defined_in_class = (lex_kind == CXCursor_ClassDecl ||
+                             lex_kind == CXCursor_StructDecl ||
+                             lex_kind == CXCursor_UnionDecl ||
+                             lex_kind == CXCursor_ClassTemplate ||
+                             lex_kind == CXCursor_ClassTemplatePartialSpecialization);
+
     CXString qualified = clang_getCursorDisplayName(cursor);
     info.qualified_name = cx_to_string(qualified);
 
@@ -205,9 +223,21 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     while (true) {
         CXCursorKind pk = clang_getCursorKind(parent_cursor);
         if (pk == CXCursor_ClassDecl || pk == CXCursor_StructDecl ||
-            pk == CXCursor_ClassTemplate || pk == CXCursor_Namespace) {
+            pk == CXCursor_UnionDecl || pk == CXCursor_ClassTemplate ||
+            pk == CXCursor_ClassTemplatePartialSpecialization ||
+            pk == CXCursor_Namespace) {
             std::string pname = cx_to_string(clang_getCursorSpelling(parent_cursor));
             ScopeKind sk = (pk == CXCursor_Namespace) ? ScopeKind::Namespace : ScopeKind::Class;
+            if (sk == ScopeKind::Class) {
+                // An out-of-line definition of a member of a class template would have to
+                // repeat the template header, which a split .cpp cannot do; an unnamed
+                // class offers no name to qualify the definition with.
+                if (pk == CXCursor_ClassTemplate ||
+                    pk == CXCursor_ClassTemplatePartialSpecialization)
+                    info.in_class_template = true;
+                if (pname.empty())
+                    info.in_anonymous_class = true;
+            }
             if (!pname.empty())
                 scope_parts.push_back({pname, sk});
             parent_cursor = clang_getCursorSemanticParent(parent_cursor);
@@ -250,8 +280,9 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     return CXChildVisit_Continue;
 }
 
+// Decided by prepare_functions(), which needs the source text and so cannot run here.
 static bool should_keep_in_header(const FunctionInfo& fn) {
-    return fn.is_template;
+    return fn.keep_in_header;
 }
 
 static std::string make_static_mangled_name(const std::string& stem, const std::string& name) {
@@ -430,6 +461,8 @@ static std::string generate_forward_decl(const FunctionInfo& fn,
             break;
         }
     }
+    // Members need no trailing declaration: prepare_functions() leaves one inside the
+    // class body, which is the only place a member can be declared.
     if (is_class_method)
         return "";
 
@@ -476,6 +509,293 @@ static std::string generate_forward_decl(const FunctionInfo& fn,
     return decl;
 }
 
+// --- Out-of-line rendering of class member functions ---------------------------------
+//
+// A member function defined inside its class body cannot simply be moved into a .cpp:
+// `T name(args) const { ... }` is not a valid non-member definition -- `const` is
+// illegal, `this` is unavailable, and a constructor's member-initialiser list parses as a
+// base-initialiser on a free function. It has to be rewritten into the out-of-line form
+// `T Class::name(args) const { ... }` with the specifiers that are legal only in-class
+// removed, and the class has to keep a declaration where the definition used to be.
+// Anything that cannot be expressed out-of-line stays in the header instead.
+
+// Offset where the declarator ends: the ':' introducing a constructor's member
+// initialiser list, or the '{' opening the body, whichever comes first at top level.
+static size_t definition_decl_end(const std::string& blanked) {
+    int paren = 0, brack = 0;
+    for (size_t i = 0; i < blanked.size(); ++i) {
+        char c = blanked[i];
+        if (c == '(') ++paren;
+        else if (c == ')') --paren;
+        else if (c == '[') ++brack;
+        else if (c == ']') --brack;
+        else if (paren == 0 && brack == 0) {
+            if (c == '{') return i;
+            if (c == ':') {
+                if (i + 1 < blanked.size() && blanked[i + 1] == ':') { ++i; continue; }
+                return i;
+            }
+        }
+    }
+    return std::string::npos;
+}
+
+static bool token_at(const std::string& blanked, size_t pos, size_t len) {
+    bool left = pos == 0 || !is_ident_char(static_cast<unsigned char>(blanked[pos - 1]));
+    bool right = pos + len >= blanked.size() ||
+                 !is_ident_char(static_cast<unsigned char>(blanked[pos + len]));
+    return left && right;
+}
+
+static bool contains_decl_token(const std::string& blanked, const std::string& kw) {
+    size_t pos = 0;
+    while ((pos = blanked.find(kw, pos)) != std::string::npos) {
+        if (token_at(blanked, pos, kw.size())) return true;
+        pos += kw.size();
+    }
+    return false;
+}
+
+// Offset of the declarator name: the first whole-token occurrence of `name` followed by
+// an opening parenthesis. Taking the first match rather than the last keeps a parameter
+// whose type happens to share the name from winning.
+static size_t find_declarator(const std::string& blanked, const std::string& name) {
+    if (name.empty()) return std::string::npos;
+    size_t pos = 0;
+    while ((pos = blanked.find(name, pos)) != std::string::npos) {
+        if (token_at(blanked, pos, name.size())) {
+            size_t j = pos + name.size();
+            while (j < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[j])))
+                ++j;
+            if (j < blanked.size() && blanked[j] == '(') return pos;
+        }
+        pos += name.size();
+    }
+    return std::string::npos;
+}
+
+// `override` and `final` are legal only on the in-class declaration. They can appear only
+// after the parameter list, so the search starts past the last top-level ')'.
+static void strip_virt_specifiers(std::string& decl) {
+    std::string b = blank_code_noise(decl);
+    int depth = 0;
+    size_t after_params = std::string::npos;
+    for (size_t i = 0; i < b.size(); ++i) {
+        if (b[i] == '(') ++depth;
+        else if (b[i] == ')') { if (--depth == 0) after_params = i + 1; }
+    }
+    if (after_params == std::string::npos) return;
+
+    for (const std::string& kw : {std::string("override"), std::string("final")}) {
+        size_t pos = b.find(kw, after_params);
+        while (pos != std::string::npos) {
+            if (token_at(b, pos, kw.size())) {
+                decl.erase(pos, kw.size());
+                b = blank_code_noise(decl);
+                pos = b.find(kw, after_params);
+            } else {
+                pos = b.find(kw, pos + kw.size());
+            }
+        }
+    }
+}
+
+// Remove default arguments from the parameter list opening at `open`. An out-of-line
+// definition may not repeat them. Returns false if the list looks malformed, in which case
+// the caller keeps the function in the header rather than guessing.
+static bool strip_default_args(std::string& decl, size_t open) {
+    std::string b = blank_code_noise(decl);
+    if (open >= b.size() || b[open] != '(') return false;
+
+    std::vector<std::pair<size_t, size_t>> cuts;
+    int depth = 0, angle = 0;
+    size_t eq = std::string::npos;
+    bool closed = false;
+
+    for (size_t i = open; i < b.size(); ++i) {
+        char c = b[i];
+        if (c == '(' || c == '[' || c == '{') { ++depth; continue; }
+        if (c == ')' || c == ']' || c == '}') {
+            if (--depth == 0) {
+                if (eq != std::string::npos) cuts.emplace_back(eq, i);
+                closed = true;
+                break;
+            }
+            continue;
+        }
+        if (depth != 1) continue;
+        if (c == '<') { ++angle; continue; }
+        if (c == '>') { if (angle > 0) --angle; continue; }
+        if (angle != 0) continue;
+        if (c == ',') {
+            if (eq != std::string::npos) { cuts.emplace_back(eq, i); eq = std::string::npos; }
+            continue;
+        }
+        if (c == '=' && eq == std::string::npos) {
+            if (i + 1 < b.size() && b[i + 1] == '=') { ++i; continue; }
+            char prev = i > 0 ? b[i - 1] : ' ';
+            if (prev == '=' || prev == '!' || prev == '<' || prev == '>' || prev == '+' ||
+                prev == '-' || prev == '*' || prev == '/' || prev == '%' || prev == '&' ||
+                prev == '|' || prev == '^')
+                continue;
+            eq = i;
+        }
+    }
+    if (!closed) return false;
+
+    for (auto it = cuts.rbegin(); it != cuts.rend(); ++it)
+        decl.erase(it->first, it->second - it->first);
+    return true;
+}
+
+// Skip a leading run of [[attribute]] groups and whitespace.
+static size_t skip_leading_attributes(const std::string& blanked) {
+    size_t i = 0;
+    while (i < blanked.size()) {
+        while (i < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[i]))) ++i;
+        if (i + 1 < blanked.size() && blanked[i] == '[' && blanked[i + 1] == '[') {
+            int depth = 0;
+            size_t j = i;
+            for (; j < blanked.size(); ++j) {
+                if (blanked[j] == '[') ++depth;
+                else if (blanked[j] == ']') { if (--depth == 0) { ++j; break; } }
+            }
+            i = j;
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+// True if the declarator already carries a trailing return type.
+static bool has_trailing_return(const std::string& blanked, size_t params_open) {
+    int depth = 0;
+    size_t after = std::string::npos;
+    for (size_t i = params_open; i < blanked.size(); ++i) {
+        if (blanked[i] == '(') ++depth;
+        else if (blanked[i] == ')') { if (--depth == 0) { after = i + 1; break; } }
+    }
+    if (after == std::string::npos) return false;
+    return blanked.find("->", after) != std::string::npos;
+}
+
+static std::string trim_ws(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+// Fills in the derived fields on every function: whether its definition has to stay in the
+// header, and for class members the declaration left behind in the class plus the
+// out-of-line definition written into the split file.
+static void prepare_functions(std::vector<FunctionInfo>& functions) {
+    for (auto& fn : functions) {
+        std::vector<std::string> class_names;
+        for (const auto& e : fn.scope_chain)
+            if (e.kind == ScopeKind::Class) class_names.push_back(e.name);
+        const bool is_member = !class_names.empty() && fn.defined_in_class;
+
+        if (fn.is_template || fn.in_class_template || fn.in_anonymous_class) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        const std::string blanked = blank_code_noise(fn.body);
+        const size_t decl_end = definition_decl_end(blanked);
+        if (decl_end == std::string::npos) {
+            // No body to move: `= default;`, `= delete;`, or something unrecognised.
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        // constexpr and consteval definitions have to stay visible to every caller.
+        const std::string decl_blanked = blanked.substr(0, decl_end);
+        if (contains_decl_token(decl_blanked, "constexpr") ||
+            contains_decl_token(decl_blanked, "consteval")) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        if (!is_member) {
+            fn.keep_in_header = false;
+            continue;
+        }
+
+        std::string decl = fn.body.substr(0, decl_end);
+        const std::string tail = fn.body.substr(decl_end);
+
+        fn.member_decl = decl;   // what the class keeps, unchanged
+
+        for (const char* kw : {"virtual", "static", "explicit", "friend"})
+            decl = strip_decl_specifier(decl, kw);
+        strip_virt_specifiers(decl);
+
+        const std::string db = blank_code_noise(decl);
+        const size_t name_pos = find_declarator(db, fn.name);
+        if (name_pos == std::string::npos) {
+            fn.keep_in_header = true;
+            continue;
+        }
+        const size_t open = db.find('(', name_pos + fn.name.size());
+        if (open == std::string::npos || !strip_default_args(decl, open)) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        // Default arguments sit after the name, so name_pos is still valid here.
+        std::string qualification;
+        for (const auto& c : class_names) qualification += c + "::";
+
+        // A leading return type is looked up in the enclosing namespace once the
+        // definition is out-of-line, so a class-scoped name such as `result_type` or
+        // `iterator` stops resolving. Moving it to a trailing return type puts the lookup
+        // back inside the class, which fixes every such name at once.
+        const std::string db2 = blank_code_noise(decl);
+        std::string ret_src;
+        size_t ret_begin = 0;
+        if (!has_trailing_return(db2, open)) {
+            ret_begin = skip_leading_attributes(db2);
+            if (ret_begin < name_pos)
+                ret_src = trim_ws(decl.substr(ret_begin, name_pos - ret_begin));
+        }
+        if (ret_src == "auto" || ret_src == "decltype(auto)") {
+            // A deduced return type has to stay visible to callers.
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        // The source text before the name is not just the return type: it also holds
+        // function specifiers, and those are routinely macros (BOOST_FORCEINLINE and
+        // friends) that cannot be told apart from a type name textually. libclang already
+        // knows the return type, so use that and drop the specifier run -- `inline` and
+        // inlining hints are meaningless on a definition that now lives alone in a .cpp.
+        std::string ret = ret_src.empty() ? std::string() : fn.return_type;
+        if (!ret_src.empty() &&
+            (ret.empty() || ret.find("(anonymous") != std::string::npos ||
+             ret.find("(lambda") != std::string::npos || ret.find("(unnamed") != std::string::npos)) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        if (ret.empty()) {
+            // Constructor, destructor or conversion operator: nothing to move.
+            decl.insert(name_pos, qualification);
+            fn.outlined_body = decl + tail;
+        } else {
+            // Keep the line count of the declarator stable so the #line directive that
+            // precedes the body still points at the right source line.
+            std::string newlines(std::count(decl.begin() + ret_begin,
+                                            decl.begin() + name_pos, '\n'), '\n');
+            fn.outlined_body = decl.substr(0, ret_begin) + "auto " + newlines +
+                               qualification + decl.substr(name_pos) +
+                               " -> " + ret + " " + tail;
+        }
+        fn.keep_in_header = false;
+    }
+}
+
 static std::string generate_preamble(const std::string& source,
                                      const std::vector<FunctionInfo>& functions,
                                      const std::string& stem,
@@ -483,10 +803,11 @@ static std::string generate_preamble(const std::string& source,
     struct Range {
         unsigned start, end;
         bool keep;
+        const FunctionInfo* fn;
     };
     std::vector<Range> ranges;
     for (const auto& fn : functions) {
-        ranges.push_back({fn.start_offset, fn.end_offset, should_keep_in_header(fn)});
+        ranges.push_back({fn.start_offset, fn.end_offset, should_keep_in_header(fn), &fn});
     }
     std::sort(ranges.begin(), ranges.end(),
               [](const Range& a, const Range& b) { return a.start < b.start; });
@@ -512,6 +833,12 @@ static std::string generate_preamble(const std::string& source,
             unsigned keep_line = offset_to_line(line_offsets, r.start);
             //preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
             preamble += source.substr(r.start, r.end - r.start);
+        } else if (r.fn && !r.fn->member_decl.empty()) {
+            // The definition moved to a split file, so the class has to keep a
+            // declaration in its place -- otherwise the out-of-line definition matches
+            // nothing and the member disappears from the type.
+            ensure_newline();
+            preamble += r.fn->member_decl + ";";
         }
         ensure_newline();
         unsigned resume_line = offset_to_line(line_offsets, r.end);
@@ -1464,7 +1791,8 @@ static void emit_split_files(CXTranslationUnit tu,
         content << "// ---\n\n";
         content << "#include \"" << preamble_filename << "\"\n\n";
 
-        std::string body = fn.body;
+        // Members are emitted in their out-of-line form; everything else as written.
+        std::string body = fn.outlined_body.empty() ? fn.body : fn.outlined_body;
         if (fn.is_static) {
             // Best effort by design: `is_static` reflects linkage, not syntax. A
             // function in an anonymous namespace, or an `inline` one at namespace
@@ -1682,6 +2010,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     VisitorData vd{tu, &source, &functions, &abs_path};
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
+    prepare_functions(functions);
 
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
@@ -1803,6 +2132,7 @@ static SplitResult do_split(const std::string& input_path,
     VisitorData vd{tu, &source, &functions, &abs_path};
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
+    prepare_functions(functions);
 
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
