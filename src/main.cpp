@@ -262,6 +262,137 @@ static std::string make_static_mangled_name(const std::string& stem, const std::
     return "__static_" + safe_stem + "__" + name;
 }
 
+// --- Lightweight C++ lexical helpers -------------------------------------------------
+//
+// Text-level edits on extracted source (stripping declaration specifiers, renaming
+// identifiers) must only ever match whole identifier tokens, and must never fire inside
+// a string literal, a character literal or a comment. blank_code_noise() returns a copy
+// of its input in which all of those have been overwritten with spaces of the same
+// length, so offsets in the copy map 1:1 onto the original: searches run on the copy,
+// edits apply to the original. Newlines are preserved so line numbering survives.
+
+static bool is_ident_char(unsigned char c) {
+    return std::isalnum(c) != 0 || c == '_';
+}
+
+static std::string blank_code_noise(const std::string& text) {
+    std::string out = text;
+    const size_t n = text.size();
+
+    auto blank = [&](size_t from, size_t to) {
+        for (size_t k = from; k < to && k < n; ++k)
+            if (out[k] != '\n') out[k] = ' ';
+    };
+
+    size_t i = 0;
+    while (i < n) {
+        if (text[i] == '/' && i + 1 < n && text[i + 1] == '/') {
+            size_t j = i;
+            while (j < n && text[j] != '\n') ++j;
+            blank(i, j);
+            i = j;
+            continue;
+        }
+        if (text[i] == '/' && i + 1 < n && text[i + 1] == '*') {
+            size_t j = i + 2;
+            while (j + 1 < n && !(text[j] == '*' && text[j + 1] == '/')) ++j;
+            j = (j + 1 < n) ? j + 2 : n;
+            blank(i, j);
+            i = j;
+            continue;
+        }
+
+        // Raw string literal: R"delim( ... )delim" (any encoding prefix precedes the R).
+        if (text[i] == 'R' && i + 1 < n && text[i + 1] == '"') {
+            size_t delim_begin = i + 2;
+            size_t delim_end = text.find('(', delim_begin);
+            if (delim_end != std::string::npos) {
+                std::string closer = ")" + text.substr(delim_begin, delim_end - delim_begin) + "\"";
+                size_t close = text.find(closer, delim_end + 1);
+                size_t j = (close == std::string::npos) ? n : close + closer.size();
+                blank(i, j);
+                i = j;
+                continue;
+            }
+        }
+
+        if (text[i] == '\'') {
+            // A quote directly following an identifier token is a digit separator
+            // (1'000'000), not the start of a character literal -- unless that token is
+            // one of the character-literal encoding prefixes.
+            size_t tok_end = i, tok_begin = i;
+            while (tok_begin > 0 && is_ident_char(static_cast<unsigned char>(text[tok_begin - 1])))
+                --tok_begin;
+            std::string prev = text.substr(tok_begin, tok_end - tok_begin);
+            if (!prev.empty() && prev != "L" && prev != "u" && prev != "U" && prev != "u8") {
+                ++i;
+                continue;
+            }
+        }
+
+        if (text[i] == '"' || text[i] == '\'') {
+            char quote = text[i];
+            size_t j = i + 1;
+            while (j < n) {
+                if (text[j] == '\\') { j += 2; continue; }
+                if (text[j] == quote) { ++j; break; }
+                if (text[j] == '\n') break;   // unterminated: give up at end of line
+                ++j;
+            }
+            blank(i, j);
+            i = j;
+            continue;
+        }
+
+        ++i;
+    }
+    return out;
+}
+
+// End of the declaration prefix of a function definition: everything before the
+// parameter list, or failing that before the body. Declaration specifiers can only
+// appear in this region, so bounding a search to it is what keeps a search for `static`
+// away from a `static_cast` in the body.
+static size_t decl_prefix_end(const std::string& blanked) {
+    size_t paren = blanked.find('(');
+    size_t brace = blanked.find('{');
+    if (paren != std::string::npos && (brace == std::string::npos || paren < brace))
+        return paren;
+    if (brace != std::string::npos)
+        return brace;
+    return blanked.size();
+}
+
+// Remove a leading declaration specifier (`static`, `inline`, ...) from `text` if it is
+// present as a whole token in the declaration prefix, otherwise return `text` unchanged.
+// Trailing spaces and tabs go with it, but never a newline: split files carry a #line
+// directive and the body's line numbering has to survive.
+static std::string strip_decl_specifier(const std::string& text,
+                                        const std::string& keyword) {
+    const std::string blanked = blank_code_noise(text);
+    const size_t limit = decl_prefix_end(blanked);
+
+    size_t pos = 0;
+    while ((pos = blanked.find(keyword, pos)) != std::string::npos && pos < limit) {
+        const size_t end = pos + keyword.size();
+        const bool left_ok = (pos == 0) ||
+            !is_ident_char(static_cast<unsigned char>(blanked[pos - 1]));
+        const bool right_ok = (end >= blanked.size()) ||
+            !is_ident_char(static_cast<unsigned char>(blanked[end]));
+        if (left_ok && right_ok) {
+            size_t after = end;
+            while (after < text.size() && (text[after] == ' ' || text[after] == '\t'))
+                ++after;
+            std::string result = text;
+            result.erase(pos, after - pos);
+            return result;
+        }
+        pos = end;
+    }
+    return text;
+}
+
+
 static std::string extract_source_signature(const std::string& source,
                                               const FunctionInfo& fn) {
     std::string body_text = source.substr(fn.start_offset,
@@ -306,20 +437,10 @@ static std::string generate_forward_decl(const FunctionInfo& fn,
     if (sig.empty())
         return "";
 
-    {
-        std::string inline_prefix = "inline ";
-        size_t ipos = sig.find(inline_prefix);
-        if (ipos != std::string::npos)
-            sig.erase(ipos, inline_prefix.size());
-    }
+    sig = strip_decl_specifier(sig, "inline");
 
     if (fn.is_static) {
-        {
-            std::string prefix = "static ";
-            size_t spos = sig.find(prefix);
-            if (spos != std::string::npos)
-                sig.erase(spos, prefix.size());
-        }
+        sig = strip_decl_specifier(sig, "static");
         size_t npos = sig.find(fn.name + "(");
         if (npos == std::string::npos)
             npos = sig.find(fn.name);
@@ -909,6 +1030,83 @@ static bool is_stdlib_header(const std::string& abs_path) {
     return false;
 }
 
+// --- Split output layout -------------------------------------------------------------
+//
+// Split headers were once written flat, one file per basename, into the translation
+// unit's .split directory. Two headers sharing a basename then overwrote each other, and
+// the survivor shadowed the original for every consumer, because that directory is placed
+// first on the include path. Headers are now mirrored under <split_dir>/include at the
+// path they were included as, so the rewritten tree is structurally interchangeable with
+// the real include directories and no two headers can claim the same output path.
+
+static std::vector<std::string> include_dirs_from_flags(const std::vector<std::string>& flags) {
+    std::set<std::string> unique_dirs;
+    for (size_t i = 0; i < flags.size(); ++i) {
+        const std::string& f = flags[i];
+        std::string dir;
+        if (f == "-I" || f == "-isystem" || f == "-iquote") {
+            if (i + 1 < flags.size()) dir = flags[++i];
+        } else if (f.rfind("-I", 0) == 0 && f.size() > 2) {
+            dir = f.substr(2);
+        } else if (f.rfind("-isystem", 0) == 0 && f.size() > 8) {
+            dir = f.substr(8);
+        }
+        if (dir.empty()) continue;
+        std::error_code ec;
+        std::string abs = fs::absolute(dir, ec).lexically_normal().string();
+        if (!ec) unique_dirs.insert(abs);
+    }
+    std::vector<std::string> dirs(unique_dirs.begin(), unique_dirs.end());
+    // Longest first: the most specific include directory must win the match.
+    std::sort(dirs.begin(), dirs.end(),
+              [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+    return dirs;
+}
+
+static std::string path_hash(const std::string& s) {
+    size_t h = std::hash<std::string>{}(s);
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016zx", h);
+    return std::string(buf);
+}
+
+// Where a header's rewritten copy lives, relative to <split_dir>/include: the path it was
+// included as. A header under no include directory falls back to a hash of its absolute
+// path, which keeps the mapping unique rather than colliding on the basename.
+static std::string header_mirror_relpath(const std::string& abs_header,
+                                         const std::vector<std::string>& include_dirs) {
+    fs::path h = fs::path(abs_header).lexically_normal();
+    for (const auto& d : include_dirs) {
+        fs::path rel = h.lexically_relative(fs::path(d));
+        if (rel.empty()) continue;
+        std::string r = rel.string();
+        if (r.rfind("..", 0) == 0) continue;   // not underneath this directory
+        return r;
+    }
+    return (fs::path("_abs") / path_hash(abs_header) / h.filename()).string();
+}
+
+static std::string split_include_root(const std::string& split_dir) {
+    return (fs::path(split_dir) / "include").string();
+}
+
+// Guards against two different sources being written to one output path. A collision
+// means the layout mapping has a gap, and silently overwriting would substitute one
+// header for another instead of reporting a problem.
+static std::unordered_map<std::string, std::string> g_claimed_outputs;
+
+static bool claim_output_path(const std::string& out_path, const std::string& src_abs) {
+    auto it = g_claimed_outputs.find(out_path);
+    if (it != g_claimed_outputs.end() && it->second != src_abs) {
+        std::cerr << "cpp-splitter: split output path collision: " << out_path
+                  << "\n  already claimed by: " << it->second
+                  << "\n  also claimed by:    " << src_abs << "\n";
+        return false;
+    }
+    g_claimed_outputs[out_path] = src_abs;
+    return true;
+}
+
 static SplitResult do_split(const std::string& input_path,
                             const std::string& output_dir,
                             const std::vector<std::string>& extra_flags,
@@ -935,6 +1133,9 @@ static void resolve_header_deps(CXTranslationUnit tu,
 
     bool do_auto_split = auto_include_split_enabled();
 
+    const auto inc_dirs = include_dirs_from_flags(extra_flags);
+    const std::string include_root = split_include_root(output_dir);
+
     std::set<std::string> seen_includes;
     for (const auto& inc_path : includes) {
         if (!do_auto_split) break;
@@ -943,8 +1144,12 @@ static void resolve_header_deps(CXTranslationUnit tu,
         if (is_stdlib_header(inc_path)) continue;
         if (g_split_headers.find(inc_path) != g_split_headers.end()) continue;
 
-        std::string manifest = (fs::path(output_dir) /
-            (fs::path(inc_path).stem().string() + ".h.split")).string();
+        // Must match the path write_header_manifest() produces for this header, which
+        // is the mirrored location plus ".split". The two used to disagree, so the
+        // staleness check never found a manifest and every header was re-split on every
+        // invocation.
+        std::string manifest = (fs::path(include_root) /
+            (header_mirror_relpath(inc_path, inc_dirs) + ".split")).string();
         bool stale = false;
         if (fs::exists(manifest)) {
             auto hdr_time = fs::last_write_time(inc_path);
@@ -990,7 +1195,9 @@ static void write_header_manifest(const std::string& output_dir,
 
 static void load_header_manifests(const std::string& output_dir) {
     if (!fs::exists(output_dir)) return;
-    for (const auto& entry : fs::directory_iterator(output_dir)) {
+    const std::string include_root = split_include_root(output_dir);
+    // Manifests are nested under the mirrored include tree, so this has to recurse.
+    for (const auto& entry : fs::recursive_directory_iterator(output_dir)) {
         if (!entry.is_regular_file()) continue;
         std::string fname = entry.path().filename().string();
         if (fname.size() < 6 || fname.substr(fname.size() - 6) != ".split") continue;
@@ -1006,8 +1213,9 @@ static void load_header_manifests(const std::string& output_dir) {
         try { nfiles = std::stoi(n); } catch (...) {}
 
         SplitHeaderInfo info;
-        info.split_dir = output_dir;
-        info.preamble_path = (fs::path(output_dir) / fname.substr(0, fname.size() - 6)).string();
+        info.split_dir = include_root;
+        info.preamble_path =
+            (entry.path().parent_path() / fname.substr(0, fname.size() - 6)).string();
         for (int i = 0; i < nfiles; ++i) {
             std::string f;
             std::getline(ifs, f);
@@ -1181,6 +1389,179 @@ static unsigned check_diagnostics(CXTranslationUnit tu, bool verbose) {
     return error_count;
 }
 
+// Shared tail of do_split() and do_split_with_cache(): builds the PCH, writes one split
+// .cpp per function, prunes outputs left over from a previous run, and registers header
+// dependencies. Both callers reach this point with identical state; keeping it in one
+// place is what stops the two paths from drifting apart.
+static void emit_split_files(CXTranslationUnit tu,
+                             const std::vector<FunctionInfo>& functions,
+                             const std::string& input_path,
+                             const std::string& abs_path,
+                             const std::string& output_dir,
+                             const std::string& include_root,
+                             const std::string& unit_tag,
+                             const std::string& preamble_filename,
+                             const std::string& preamble_path,
+                             const std::vector<std::string>& all_flags,
+                             const std::vector<std::string>& extra_flags,
+                             bool input_is_header,
+                             bool verbose,
+                             std::ostream& out,
+                             SplitResult& result) {
+    build_libclang_pch(preamble_path, all_flags, verbose, out);
+
+    if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
+
+    std::vector<std::pair<std::string, std::string>> static_renames;
+    for (const auto& fn : functions) {
+        if (fn.is_static) {
+            static_renames.emplace_back(fn.name,
+                                        make_static_mangled_name(unit_tag, fn.name));
+        }
+    }
+
+    auto apply_static_renames = [&](std::string text) -> std::string {
+        for (const auto& [orig, mangled] : static_renames) {
+            size_t pos = 0;
+            while ((pos = text.find(orig, pos)) != std::string::npos) {
+                if (pos > 0 && (std::isalnum(static_cast<unsigned char>(text[pos - 1])) || text[pos - 1] == '_')) {
+                    pos += orig.size();
+                    continue;
+                }
+                size_t end = pos + orig.size();
+                if (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_')) {
+                    pos += orig.size();
+                    continue;
+                }
+                text.replace(pos, orig.size(), mangled);
+                pos += mangled.size();
+            }
+        }
+        return text;
+    };
+
+    std::vector<std::string> current_files;
+    int file_counter = 0;
+    int written_count = 0;
+    int skipped_count = 0;
+    for (const auto& fn : functions) {
+        ++file_counter;
+
+        std::string safe_name = sanitize_filename(fn.name);
+        if (safe_name.empty()) safe_name = "anonymous";
+
+        std::string out_filename = unit_tag + "_" +
+                                   std::to_string(file_counter) + "_" +
+                                   safe_name + ".cpp";
+        std::string out_path = (fs::path(output_dir) / out_filename).string();
+        current_files.push_back(out_path);
+
+        std::ostringstream content;
+        content << "// Function: " << fn.signature << "\n";
+        content << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
+        if (should_keep_in_header(fn))
+            content << "// Note: template - kept in preamble header for compilation\n";
+        content << "// ---\n\n";
+        content << "#include \"" << preamble_filename << "\"\n\n";
+
+        std::string body = fn.body;
+        if (fn.is_static) {
+            // Best effort by design: `is_static` reflects linkage, not syntax. A
+            // function in an anonymous namespace, or an `inline` one at namespace
+            // scope, has internal linkage and no `static` keyword to remove -- the
+            // text must then be left exactly as it is.
+            body = strip_decl_specifier(body, "static");
+        }
+        body = apply_static_renames(body);
+
+        std::string line_directive = "#line " + std::to_string(fn.start_line) +
+                                     " \"" + abs_path + "\"\n";
+
+        body = line_directive + body;
+
+        if (!fn.scope_chain.empty()) {
+            content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
+        } else {
+            content << body << "\n";
+        }
+
+        std::string new_content = content.str();
+        bool needs_write = true;
+        if (fs::exists(out_path)) {
+            std::string existing = read_file(out_path);
+            if (existing == new_content)
+                needs_write = false;
+        }
+
+        if (needs_write) {
+            std::ofstream ofs(out_path);
+            if (!ofs.is_open()) {
+                std::cerr << "Error: cannot write to " << out_path << "\n";
+                continue;
+            }
+            ofs << new_content;
+            ofs.close();
+            ++written_count;
+        } else {
+            ++skipped_count;
+        }
+
+        bool kept = should_keep_in_header(fn);
+        if (!kept)
+            result.compilable_files.push_back(out_path);
+
+        if (verbose) {
+            out << "  [" << file_counter << "] " << fn.signature;
+            if (kept) out << "  (header-only)";
+            if (!needs_write) out << "  (unchanged)";
+            out << "\n";
+            out << "      Lines " << fn.start_line << "-" << fn.end_line
+                << " -> " << out_path << "\n";
+        }
+    }
+
+    int removed_count = 0;
+    for (const auto& entry : fs::directory_iterator(output_dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string path = entry.path().string();
+        std::string fname = entry.path().filename().string();
+        if (fname == preamble_filename) continue;
+        if (fname.size() < 4 || fname.substr(fname.size() - 4) != ".cpp") continue;
+        if (fname.rfind(unit_tag + "_", 0) != 0) continue;
+        if (std::find(current_files.begin(), current_files.end(), path) == current_files.end()) {
+            fs::remove(entry.path());
+            fs::path obj_path = entry.path();
+            obj_path.replace_extension(".o");
+            if (fs::exists(obj_path))
+                fs::remove(obj_path);
+            if (verbose) out << "  Removed stale: " << fname << "\n";
+            ++removed_count;
+        }
+    }
+
+    if (verbose) {
+        out << "\n" << file_counter << " function(s): "
+            << written_count << " written, "
+            << skipped_count << " unchanged";
+        if (removed_count > 0)
+            out << ", " << removed_count << " stale removed";
+        out << "\n";
+    }
+
+    if (input_is_header) {
+        SplitHeaderInfo hdr_info;
+        hdr_info.split_dir = fs::absolute(include_root).string();
+        hdr_info.preamble_path = preamble_path;
+        hdr_info.compilable_files = result.compilable_files;
+        g_split_headers[abs_path] = std::move(hdr_info);
+        write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
+        if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
+    } else {
+        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
+    }
+}
+
+
 static SplitResult do_split_with_cache(const std::string& input_path,
                                         const std::string& output_dir,
                                         const std::vector<std::string>& extra_flags,
@@ -1208,7 +1589,21 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     std::string preamble_filename = input_is_header
         ? fs::path(input_path).filename().string()
         : stem + "_preamble.h";
-    std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
+
+    // A header is mirrored under <split_dir>/include at the path it was included as; the
+    // translation unit itself keeps the root of the split directory.
+    std::string unit_dir = output_dir;
+    if (input_is_header) {
+        std::string rel = header_mirror_relpath(abs_path, include_dirs_from_flags(extra_flags));
+        unit_dir = (fs::path(split_include_root(output_dir)) /
+                    fs::path(rel).parent_path()).string();
+    }
+
+    // Split pieces are named after the whole file name rather than its stem, so a source
+    // and a header that share a stem (path.cpp / path.hpp) can never match each other's
+    // outputs -- the stale-output pruning keys off this prefix.
+    std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
+    std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
     std::vector<std::string> parse_flags_vec = all_flags;
     std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
@@ -1297,10 +1692,13 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         return result;
     }
 
-    fs::create_directories(output_dir);
+    if (!claim_output_path(preamble_path, abs_path))
+        return result;
+
+    fs::create_directories(unit_dir);
 
     result.preamble_filename = preamble_path;
-    std::string preamble = generate_preamble(source, functions, stem, abs_path);
+    std::string preamble = generate_preamble(source, functions, unit_tag, abs_path);
 
     {
         std::string existing_preamble;
@@ -1320,159 +1718,10 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         }
     }
 
-    build_libclang_pch(preamble_path, all_flags, verbose, out);
-
-    if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
-
-    std::vector<std::pair<std::string, std::string>> static_renames;
-    for (const auto& fn : functions) {
-        if (fn.is_static) {
-            static_renames.emplace_back(fn.name,
-                                        make_static_mangled_name(stem, fn.name));
-        }
-    }
-
-    auto apply_static_renames = [&](std::string text) -> std::string {
-        for (const auto& [orig, mangled] : static_renames) {
-            size_t pos = 0;
-            while ((pos = text.find(orig, pos)) != std::string::npos) {
-                if (pos > 0 && (std::isalnum(static_cast<unsigned char>(text[pos - 1])) || text[pos - 1] == '_')) {
-                    pos += orig.size();
-                    continue;
-                }
-                size_t end = pos + orig.size();
-                if (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_')) {
-                    pos += orig.size();
-                    continue;
-                }
-                text.replace(pos, orig.size(), mangled);
-                pos += mangled.size();
-            }
-        }
-        return text;
-    };
-
-    std::vector<std::string> current_files;
-    int file_counter = 0;
-    int written_count = 0;
-    int skipped_count = 0;
-    for (const auto& fn : functions) {
-        ++file_counter;
-
-        std::string safe_name = sanitize_filename(fn.name);
-        if (safe_name.empty()) safe_name = "anonymous";
-
-        std::string out_filename = stem + "_" +
-                                   std::to_string(file_counter) + "_" +
-                                   safe_name + ".cpp";
-        std::string out_path = (fs::path(output_dir) / out_filename).string();
-        current_files.push_back(out_path);
-
-        std::ostringstream content;
-        content << "// Function: " << fn.signature << "\n";
-        content << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
-        if (should_keep_in_header(fn))
-            content << "// Note: template - kept in preamble header for compilation\n";
-        content << "// ---\n\n";
-        content << "#include \"" << preamble_filename << "\"\n\n";
-
-        std::string body = fn.body;
-        if (fn.is_static) {
-            size_t spos = body.find("static");
-            if (spos != std::string::npos) {
-                size_t after = spos + 6;
-                while (after < body.size() && body[after] == ' ')
-                    ++after;
-                body.erase(spos, after - spos);
-            }
-        }
-        body = apply_static_renames(body);
-
-        std::string line_directive = "#line " + std::to_string(fn.start_line) +
-                                     " \"" + abs_path + "\"\n";
-
-        body = line_directive + body;
-
-        if (!fn.scope_chain.empty()) {
-            content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
-        } else {
-            content << body << "\n";
-        }
-
-        std::string new_content = content.str();
-        bool needs_write = true;
-        if (fs::exists(out_path)) {
-            std::string existing = read_file(out_path);
-            if (existing == new_content)
-                needs_write = false;
-        }
-
-        if (needs_write) {
-            std::ofstream ofs(out_path);
-            if (!ofs.is_open()) {
-                std::cerr << "Error: cannot write to " << out_path << "\n";
-                continue;
-            }
-            ofs << new_content;
-            ofs.close();
-            ++written_count;
-        } else {
-            ++skipped_count;
-        }
-
-        bool kept = should_keep_in_header(fn);
-        if (!kept)
-            result.compilable_files.push_back(out_path);
-
-        if (verbose) {
-            out << "  [" << file_counter << "] " << fn.signature;
-            if (kept) out << "  (header-only)";
-            if (!needs_write) out << "  (unchanged)";
-            out << "\n";
-            out << "      Lines " << fn.start_line << "-" << fn.end_line
-                << " -> " << out_path << "\n";
-        }
-    }
-
-    int removed_count = 0;
-    for (const auto& entry : fs::directory_iterator(output_dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string path = entry.path().string();
-        std::string fname = entry.path().filename().string();
-        if (fname == preamble_filename) continue;
-        if (fname.size() < 4 || fname.substr(fname.size() - 4) != ".cpp") continue;
-        if (fname.rfind(stem + "_", 0) != 0) continue;
-        if (std::find(current_files.begin(), current_files.end(), path) == current_files.end()) {
-            fs::remove(entry.path());
-            fs::path obj_path = entry.path();
-            obj_path.replace_extension(".o");
-            if (fs::exists(obj_path))
-                fs::remove(obj_path);
-            if (verbose) out << "  Removed stale: " << fname << "\n";
-            ++removed_count;
-        }
-    }
-
-    if (verbose) {
-        out << "\n" << file_counter << " function(s): "
-            << written_count << " written, "
-            << skipped_count << " unchanged";
-        if (removed_count > 0)
-            out << ", " << removed_count << " stale removed";
-        out << "\n";
-    }
-
-    if (input_is_header) {
-        SplitHeaderInfo hdr_info;
-        hdr_info.split_dir = fs::absolute(output_dir).string();
-        hdr_info.preamble_path = preamble_path;
-        hdr_info.compilable_files = result.compilable_files;
-        g_split_headers[abs_path] = std::move(hdr_info);
-        write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
-        if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
-    } else {
-        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
-    }
+    emit_split_files(tu, functions, input_path, abs_path, unit_dir,
+                     split_include_root(output_dir), unit_tag,
+                     preamble_filename, preamble_path, all_flags, extra_flags,
+                     input_is_header, verbose, out, result);
 
     result.success = true;
     return result;
@@ -1500,7 +1749,21 @@ static SplitResult do_split(const std::string& input_path,
     std::string preamble_filename = input_is_header
         ? fs::path(input_path).filename().string()
         : stem + "_preamble.h";
-    std::string preamble_path = (fs::path(output_dir) / preamble_filename).string();
+
+    // A header is mirrored under <split_dir>/include at the path it was included as; the
+    // translation unit itself keeps the root of the split directory.
+    std::string unit_dir = output_dir;
+    if (input_is_header) {
+        std::string rel = header_mirror_relpath(abs_path, include_dirs_from_flags(extra_flags));
+        unit_dir = (fs::path(split_include_root(output_dir)) /
+                    fs::path(rel).parent_path()).string();
+    }
+
+    // Split pieces are named after the whole file name rather than its stem, so a source
+    // and a header that share a stem (path.cpp / path.hpp) can never match each other's
+    // outputs -- the stale-output pruning keys off this prefix.
+    std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
+    std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
     std::vector<std::string> parse_flags_vec = all_flags;
     std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
@@ -1552,10 +1815,13 @@ static SplitResult do_split(const std::string& input_path,
         return result;
     }
 
-    fs::create_directories(output_dir);
+    if (!claim_output_path(preamble_path, abs_path))
+        return result;
+
+    fs::create_directories(unit_dir);
 
     result.preamble_filename = preamble_path;
-    std::string preamble = generate_preamble(source, functions, stem, abs_path);
+    std::string preamble = generate_preamble(source, functions, unit_tag, abs_path);
 
     {
         std::string existing_preamble;
@@ -1577,159 +1843,10 @@ static SplitResult do_split(const std::string& input_path,
         }
     }
 
-    build_libclang_pch(preamble_path, all_flags, verbose, out);
-
-    if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
-
-    std::vector<std::pair<std::string, std::string>> static_renames;
-    for (const auto& fn : functions) {
-        if (fn.is_static) {
-            static_renames.emplace_back(fn.name,
-                                        make_static_mangled_name(stem, fn.name));
-        }
-    }
-
-    auto apply_static_renames_fn = [&](std::string text) -> std::string {
-        for (const auto& [orig, mangled] : static_renames) {
-            size_t pos = 0;
-            while ((pos = text.find(orig, pos)) != std::string::npos) {
-                if (pos > 0 && (std::isalnum(static_cast<unsigned char>(text[pos - 1])) || text[pos - 1] == '_')) {
-                    pos += orig.size();
-                    continue;
-                }
-                size_t end = pos + orig.size();
-                if (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_')) {
-                    pos += orig.size();
-                    continue;
-                }
-                text.replace(pos, orig.size(), mangled);
-                pos += mangled.size();
-            }
-        }
-        return text;
-    };
-
-    std::vector<std::string> current_files;
-    int file_counter = 0;
-    int written_count = 0;
-    int skipped_count = 0;
-    for (const auto& fn : functions) {
-        ++file_counter;
-
-        std::string safe_name = sanitize_filename(fn.name);
-        if (safe_name.empty()) safe_name = "anonymous";
-
-        std::string out_filename = stem + "_" +
-                                   std::to_string(file_counter) + "_" +
-                                   safe_name + ".cpp";
-        std::string out_path = (fs::path(output_dir) / out_filename).string();
-        current_files.push_back(out_path);
-
-        std::ostringstream content;
-        content << "// Function: " << fn.signature << "\n";
-        content << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
-        if (should_keep_in_header(fn))
-            content << "// Note: template - kept in preamble header for compilation\n";
-        content << "// ---\n\n";
-        content << "#include \"" << preamble_filename << "\"\n\n";
-
-        std::string body = fn.body;
-        if (fn.is_static) {
-            size_t spos = body.find("static");
-            if (spos != std::string::npos) {
-                size_t after = spos + 6;
-                while (after < body.size() && body[after] == ' ')
-                    ++after;
-                body.erase(spos, after - spos);
-            }
-        }
-        body = apply_static_renames_fn(body);
-
-        std::string line_directive = "#line " + std::to_string(fn.start_line) +
-                                     " \"" + abs_path + "\"\n";
-
-        body = line_directive + body;
-
-        if (!fn.scope_chain.empty()) {
-            content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
-        } else {
-            content << body << "\n";
-        }
-
-        std::string new_content = content.str();
-        bool needs_write = true;
-        if (fs::exists(out_path)) {
-            std::string existing = read_file(out_path);
-            if (existing == new_content)
-                needs_write = false;
-        }
-
-        if (needs_write) {
-            std::ofstream ofs(out_path);
-            if (!ofs.is_open()) {
-                std::cerr << "Error: cannot write to " << out_path << "\n";
-                continue;
-            }
-            ofs << new_content;
-            ofs.close();
-            ++written_count;
-        } else {
-            ++skipped_count;
-        }
-
-        bool kept = should_keep_in_header(fn);
-        if (!kept)
-            result.compilable_files.push_back(out_path);
-
-        if (verbose) {
-            out << "  [" << file_counter << "] " << fn.signature;
-            if (kept) out << "  (header-only)";
-            if (!needs_write) out << "  (unchanged)";
-            out << "\n";
-            out << "      Lines " << fn.start_line << "-" << fn.end_line
-                << " -> " << out_path << "\n";
-        }
-    }
-
-    int removed_count = 0;
-    for (const auto& entry : fs::directory_iterator(output_dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string path = entry.path().string();
-        std::string fname = entry.path().filename().string();
-        if (fname == preamble_filename) continue;
-        if (fname.size() < 4 || fname.substr(fname.size() - 4) != ".cpp") continue;
-        if (fname.rfind(stem + "_", 0) != 0) continue;
-        if (std::find(current_files.begin(), current_files.end(), path) == current_files.end()) {
-            fs::remove(entry.path());
-            fs::path obj_path = entry.path();
-            obj_path.replace_extension(".o");
-            if (fs::exists(obj_path))
-                fs::remove(obj_path);
-            if (verbose) out << "  Removed stale: " << fname << "\n";
-            ++removed_count;
-        }
-    }
-
-    if (verbose) {
-        out << "\n" << file_counter << " function(s): "
-            << written_count << " written, "
-            << skipped_count << " unchanged";
-        if (removed_count > 0)
-            out << ", " << removed_count << " stale removed";
-        out << "\n";
-    }
-
-    if (input_is_header) {
-        SplitHeaderInfo hdr_info;
-        hdr_info.split_dir = fs::absolute(output_dir).string();
-        hdr_info.preamble_path = preamble_path;
-        hdr_info.compilable_files = result.compilable_files;
-        g_split_headers[abs_path] = std::move(hdr_info);
-        write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
-        if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
-    } else {
-        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
-    }
+    emit_split_files(tu, functions, input_path, abs_path, unit_dir,
+                     split_include_root(output_dir), unit_tag,
+                     preamble_filename, preamble_path, all_flags, extra_flags,
+                     input_is_header, verbose, out, result);
 
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);
@@ -1884,6 +2001,7 @@ static int run_as_launcher(int argc, char* argv[]) {
             cmd += " " + shell_quote(f);
 
         cmd += " -I" + shell_quote(split_dir);
+        cmd += " -I" + shell_quote(split_include_root(split_dir));
         for (const auto& hdr_dir : sr.header_obj_dirs)
             cmd += " -I" + shell_quote(hdr_dir);
 
@@ -2165,7 +2283,8 @@ int main(int argc, char* argv[]) {
             }
 
             std::string cmd = cxx_compiler + " -std=c++17 -c"
-                              " -I" + output_dir;
+                              " -I" + output_dir +
+                              " -I" + split_include_root(output_dir);
             for (const auto& hdr_dir : sr.header_obj_dirs)
                 cmd += " -I" + hdr_dir;
             cmd += " -o " + obj_file +

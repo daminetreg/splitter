@@ -1,3 +1,5 @@
+Be super succinct and synthetic in your explanations.
+
 # If you are not in a tipi container or a devcontainer, on linux to compile the cpp-splitter
 
 1. Create docker container if it doesn't exists
