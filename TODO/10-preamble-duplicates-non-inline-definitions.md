@@ -83,23 +83,67 @@ many translation units belong in it.
 
 ### Implementation plan
 
-1. Add the missing condition to the keep decision: a definition may stay in the preamble
-   only if it has vague linkage, i.e. it is `inline`, a template, `constexpr`, or has
-   internal linkage. Otherwise it must be split out even when another rule wanted to keep
-   it. libclang answers this directly with `clang_Cursor_isFunctionInlined()` and
-   `clang_getCursorLinkage()`.
-2. That collides with TODO 05's reason for keeping virtuals, so those two rules have to be
-   reconciled rather than stacked. A virtual member defined non-inline in a `.cpp` has to be
-   moved out-of-line, which means solving the macro-spelled `override` / `final` problem for
-   that case -- most likely by taking the declarator from libclang rather than from the
-   source text, as the trailing-return-type rewrite already does.
-3. Consider the narrower alternative: emit such definitions into exactly one designated
-   piece rather than into the preamble, and leave a declaration in the preamble. That keeps
-   the text unmodified, sidestepping the `override` problem entirely, and is closer to what
-   the rest of the splitter already does.
-4. Whichever route, handle the key-function consequence: the vtable and typeinfo follow the
-   first non-inline virtual, so wherever that definition lands is where they will be
-   emitted, and it must be exactly one object.
+The preamble currently conflates two kinds of content. Most of it is *declarations* --
+classes, enums, typedefs, forward declarations -- which every piece needs and which are
+inherently safe to include any number of times. Mixed in with it are *definitions* that
+happened to be left behind, and those are only safe to include repeatedly when they have
+vague linkage. The fix is to stop mixing them, so that "safe to include N times" becomes a
+property of how the preamble is built rather than something each keep rule has to get right
+on its own.
+
+Split the preamble into two tiers:
+
+- **Tier one, `<stem>_preamble.h`** -- declarations, plus definitions with vague linkage:
+  `inline` functions, templates, `constexpr`, anything with internal linkage. Every piece
+  includes it, exactly as today.
+- **Tier two, one or more definition headers** -- everything that must appear exactly once.
+  Each is included by exactly one piece; tier one keeps a declaration in its place.
+
+This was tried by hand on the reproduction before being written down. Carving
+`Base::~Base()` and `Base::kind()` out of the preamble into a second header included by a
+single piece takes the build from 21 `multiple definition` diagnostics to none, and the
+program links and returns the right answer.
+
+Why this is better than moving the definition out of line, which is what this file
+originally proposed:
+
+1. **It covers more than functions.** The same collision happens to namespace-scope
+   variables with external linkage, which no amount of out-of-lining addresses -- a variable
+   cannot be turned into a split function piece. A three-variable test file produces
+   `multiple definition of 'demo::counter'` and `of 'demo::label'` today, and the same
+   layering fixes it: 6 diagnostics to none, program runs correctly. Anonymous-namespace
+   variables have the same shape and are currently duplicated silently, since internal
+   linkage lets them link while giving each object its own copy.
+2. **It leaves the source text alone.** TODO 05 keeps virtual members in the preamble
+   precisely because `override` and `final` are usually macros that cannot be stripped
+   textually. Layering never rewrites the declarator, so that problem never arises and the
+   two rules stop conflicting -- no reconciliation needed.
+3. **The key-function consequence falls out for free.** The vtable and typeinfo follow the
+   first non-inline virtual, so whichever piece includes that definition tier is where they
+   are emitted, and it is exactly one object by construction rather than by a rule someone
+   has to remember.
+
+### Steps
+
+1. Classify each definition the preamble would carry as vague-linkage or not.
+   `clang_Cursor_isFunctionInlined()` and `clang_getCursorLinkage()` answer it for
+   functions; `CXCursor_VarDecl` at namespace scope with `CXLinkage_External` and no
+   `inline`/`constexpr` is the variable case.
+2. Emit non-vague definitions into tier-two headers instead of tier one, leaving a
+   declaration behind. For a variable that means an `extern` declaration; for an out-of-line
+   member function the class declaration already stands, so nothing need be emitted.
+3. Assign each tier-two header to exactly one piece and include it there. With no compilable
+   piece to attach to -- a translation unit whose functions are all header-only -- one piece
+   has to be synthesised, or the unit left unsplit.
+4. Group by dependency rather than one definition per file. Two tier-two definitions that
+   reference each other must land in the same header, so partition by strongly-connected
+   component of the reference graph; `collect_emitted()` already builds the edges needed.
+5. Extend staleness tracking and the content-hash PCH naming, both of which currently assume
+   a single preamble path. Tier one stays shareable across pieces and keeps its PCH; tier two
+   is included once each and probably should not have one.
+6. Keep the original approach -- forcing non-vague definitions out of the preamble and
+   solving the macro-spelled `override` problem -- as the fallback if layering hits a
+   wrinkle. It is strictly narrower, since it cannot address the variable case.
 
 ## Acceptance Criteria
 
@@ -111,5 +155,10 @@ many translation units belong in it.
   matching an unsplit build.
 - A program linked against the resulting library still passes the nine filesystem
   assertions used to check the split library end to end.
-- Regression fixture in `test/`, registered with `add_test`, covering a class with a virtual
-  destructor defined non-inline in a `.cpp` alongside several free functions.
+- A namespace-scope variable with external linkage, defined in a `.cpp` alongside several
+  functions, no longer produces `multiple definition` either. This is the case the
+  out-of-lining approach cannot reach, so it is what distinguishes a real fix from a partial
+  one.
+- Regression fixtures in `test/`, registered with `add_test`: one covering a class with a
+  virtual destructor defined non-inline in a `.cpp` alongside several free functions, and one
+  covering namespace-scope variables in the same position.
