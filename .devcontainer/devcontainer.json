@@ -1,0 +1,51 @@
+{
+  "name": "cpp-splitter (tipi)",
+  "image": "tipibuild/tipi-ubuntu-2404:v0.0.87",
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+
+  // Mount the workspace at the same absolute path as on the host, matching
+  // the manual `docker run -v $PWD:$PWD:rw -w $PWD` recipe in CLAUDE.md, so
+  // an already-configured build/ directory stays valid.
+  "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind,consistency=cached",
+  "workspaceFolder": "${localWorkspaceFolder}",
+
+  "runArgs": ["--init", "--group-add", "tipi", "-u", "1000:1000" ],
+
+  "containerEnv": {
+    "TIPI_CACHE_CONSUME_ONLY": "ON",
+    "TIPI_CACHE_FORCE_ENABLE": "OFF",
+    "HOME": "${localEnv:HOME}",
+    "CLAUDE_CONFIG_DIR": "/home/daminetreg/.claude"
+  },
+
+  // Mirrors the two --mount flags in CLAUDE.md for the tipi build cache and
+  // the shared toolchain cache, plus $HOME so tipi's own ~/.tipi cache and
+  // credentials are reused from the host.
+  "mounts": [
+    "source=${localEnv:HOME},target=${localEnv:HOME},type=bind,consistency=cached",
+    "source=${localWorkspaceFolder}/../${localEnv:USER}-tipi-workdir-vT.w,target=/usr/local/share/.tipi/vT.w,type=bind",
+    "source=${localWorkspaceFolder}/../generalized-toolchains,target=/usr/local/share/.tipi/environments/generalized/v1,type=bind",
+    "source=/home/daminetreg/.claude,target=/home/daminetreg/.claude,type=bind"
+  ],
+
+  // Runs on the host before the container starts, so the bind-mount sources exist.
+  "initializeCommand": "mkdir -p \"${localWorkspaceFolder}/../${localEnv:USER}-tipi-workdir-vT.w\" \"${localWorkspaceFolder}/../generalized-toolchains\"",
+
+  "postCreateCommand": "cmake -GNinja -S . -B build/ -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-vscode.cpptools", "ms-vscode.cmake-tools"],
+      "settings": {
+        "cmake.buildDirectory": "${workspaceFolder}/build",
+        "cmake.generator": "Ninja",
+        "cmake.configureArgs": [
+          "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/environments/monolithic.cmake"
+        ]
+      }
+    }
+  }
+}
+
