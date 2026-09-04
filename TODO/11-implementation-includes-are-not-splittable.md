@@ -83,28 +83,60 @@ the wanted set and their text is copied verbatim into the preamble.
 
 ### Implementation plan
 
-1. Add the conventional implementation-include extensions to `is_header_file()`: `.ipp`,
-   `.inc`, `.inl`, `.tcc`. Check each against the rest of the splitter first -- the same
-   predicate decides the mirrored output layout and the preamble file name, so a `.ipp`
-   would start being written to `<split_dir>/include/...` like any other header.
-2. Extension lists are a poor way to make this decision. A better rule is available: any
-   file that the translation unit `#include`s is a header for these purposes, whatever it is
-   called, and `clang_getInclusions()` already provides exactly that set. Prefer deciding
-   from the inclusion graph and keep the extension list only for the case where a file is
-   passed to the splitter directly on the command line.
-3. Where a file is included more than once in a build -- `.ipp` files are sometimes included
-   under different macro settings, as the Boost case does with `BOOST_UTF8_DECL` -- confirm
-   the per-translation-unit split directories keep those copies apart, and that TODO 04's
-   collision guard fires if they ever collide.
-4. Note the interaction with TODO 06: an implementation include is by construction not
-   parseable on its own, so it must be harvested from its parent translation unit and never
-   parsed standalone. That is already how header harvesting works, and it must stay that way
-   for these.
+The extension list is the wrong instrument, and adding `.ipp` to it would be treating a
+symptom. `clang_getInclusions()` already reports exactly which files the translation unit
+includes, which is what "header" means here; the extension test is a guess at the same
+question, made without the information. So the direction is to remove it from the internal
+decisions rather than extend it.
+
+Measured, not assumed: deleting the `is_header_file(inc_path)` filter from
+`header_split_candidates()` is **not** on its own enough. The `.ipp` does become a
+candidate, and is then rejected by the include-guard rule from TODO 06:
+
+```
+Skipping impl.ipp: no include guard, so it is one half of a pair and is not meant to be
+included on its own
+```
+
+which is the crux of this item. An implementation include legitimately has no include
+guard, for the same reason a header/footer pair member has none, and TODO 06 cannot tell
+them apart. That heuristic has to be sharpened before the extension check can go.
+
+1. Sharpen the include-guard rule so it distinguishes the two cases it currently conflates.
+   A file with no guard that is included **once** in the translation unit is an
+   implementation include and is safe to split; one included **repeatedly** is half of a
+   pair and is not. `clang_getInclusions()` reports every inclusion, including repeats, so
+   the count is available without any new parsing.
+2. Then remove the `is_header_file(inc_path)` filter from `header_split_candidates()`. The
+   list it filters comes from `clang_getInclusions()` already, so the test is pure
+   redundancy on top of better information.
+3. Exclude the main source file from the candidate list explicitly. `clang_getInclusions()`
+   reports it as an inclusion of itself, so once the extension filter is gone the
+   translation unit starts nominating its own `.cpp` as a header to split -- visible in the
+   same experiment above, which reported `Skipping b.cpp: no include guard`.
+4. Replace the remaining internal uses of `is_header_file()` with the information their
+   callers already have, rather than re-deriving it from the file name:
+   - `header_split_candidates()` and `resolve_header_deps()` know a path came from the
+     inclusion set, so anything they pass on is a header by construction;
+   - `split_unit()` takes `input_is_header` as a parameter instead of recomputing it, since
+     both call sites know which case they are in;
+   - the `is_ctor_or_dtor && is_header_file(fn.file)` rule in `prepare_functions()` becomes
+     "the defining file is not the main file", which the harvest already records;
+   - the scan at the end of CLI mode that looks for a header preamble by file name should
+     read the path out of the `.split` manifest, which records it exactly.
+5. Keep a syntactic test for one place only: `is_splittable_file()`, which decides from
+   `argv[1]` whether the tool was invoked on a source file or as a compiler launcher. That
+   runs before anything is parsed, so no inclusion information exists yet. Rename it to make
+   the narrow purpose obvious, and let `build_clang_flags()`'s `-x c++-header` decision for a
+   directly-named file follow from the same test.
 
 ## Acceptance Criteria
 
 - The reproduction above produces split pieces for `one`, `two` and `three`, and the
   resulting object still links and runs correctly.
+- A header/footer pair, included repeatedly and carrying no include guard, is still skipped:
+  the sharpened rule must not readmit what TODO 06 was written to exclude.
+- The translation unit's own source file never appears in its list of headers to split.
 - `libs/filesystem/src/utf8_codecvt_facet.cpp` produces split objects on the Boost example,
   so no translation unit is left unsplit for want of a recognised extension.
 - The variant where `b.cpp` defines its own function as well splits both that function and
