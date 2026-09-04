@@ -83,8 +83,13 @@ struct FunctionInfo {
     bool is_static;
 
     // Set by prepare_functions() once the whole file has been visited.
+    bool is_constexpr = false;        // constexpr/consteval, however it was spelled
+    bool is_specialization = false;   // explicit specialization: `template< > void f<T>()`
+    bool is_virtual = false;          // virtual member function
+    std::vector<std::string> conditionals;   // #if directives active at the definition
     bool defined_in_class = false;    // body written inside the class, not already out-of-line
     unsigned unnamed_ns_depth = 0;    // innermost consecutive unnamed namespaces around it
+    bool in_unnamed_ns = false;       // an unnamed namespace encloses it at any depth
     bool in_class_template = false;   // member of a class template: cannot go out-of-line
     bool in_anonymous_class = false;  // no class name to qualify a definition with
     bool keep_in_header = false;      // definition has to stay in the preamble
@@ -169,6 +174,9 @@ struct VisitorData {
     HarvestMap* harvest;
 };
 
+static std::string blank_code_noise(const std::string& text);
+static bool contains_decl_token(const std::string& blanked, const std::string& kw);
+
 static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClientData data) {
     auto* vd = static_cast<VisitorData*>(data);
 
@@ -225,6 +233,33 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
                              lex_kind == CXCursor_ClassTemplate ||
                              lex_kind == CXCursor_ClassTemplatePartialSpecialization);
 
+    // `override` and `final` are legal only on the in-class declaration and have to come
+    // off an out-of-line definition -- but they are routinely spelled as macros
+    // (BOOST_OVERRIDE), which no amount of text matching will find. Rather than mangle the
+    // declarator, leave virtual members in the header: they are a small set, and they are
+    // the ones where moving a definition is most delicate.
+    info.is_virtual = clang_CXXMethod_isVirtual(cursor) != 0;
+
+    // An explicit specialization is introduced by a `template< >` prefix that sits outside
+    // the cursor's extent. Moving the definition out would strand that prefix in the
+    // header, so these stay put.
+    info.is_specialization =
+        !clang_Cursor_isNull(clang_getSpecializedCursorTemplate(cursor));
+
+    // Whether the definition is constexpr cannot be read off the source text: the keyword
+    // is routinely hidden behind a macro (BOOST_SYSTEM_CONSTEXPR and friends). The
+    // pretty-printed declaration has the specifiers resolved, so ask for that instead.
+    // Moving a constexpr body out of the header is not allowed -- callers need it to
+    // constant-initialise, and `static constexpr T instance{};` stops compiling without it.
+    {
+        std::string pretty = cx_to_string(clang_getCursorPrettyPrinted(cursor, nullptr));
+        const std::string blanked = blank_code_noise(pretty);
+        const size_t body = blanked.find('{');
+        const std::string head = blanked.substr(0, body == std::string::npos ? blanked.size() : body);
+        info.is_constexpr = contains_decl_token(head, "constexpr") ||
+                            contains_decl_token(head, "consteval");
+    }
+
     CXString qualified = clang_getCursorDisplayName(cursor);
     info.qualified_name = cx_to_string(qualified);
 
@@ -256,9 +291,14 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
             if (pname.empty()) {
                 // An unnamed namespace contributes no name to qualify with, but the split
                 // definition is hoisted out of it, so the count is needed to place the
-                // declaration in the same scope as the definition.
-                if (sk == ScopeKind::Namespace && innermost)
-                    ++info.unnamed_ns_depth;
+                // declaration in the same scope as the definition. Anything enclosed by one
+                // anywhere up the chain has internal linkage -- a member of a named class
+                // inside an unnamed namespace just as much as a free function in it -- so
+                // count it wherever it appears, not only closest in.
+                if (sk == ScopeKind::Namespace) {
+                    info.in_unnamed_ns = true;
+                    if (innermost) ++info.unnamed_ns_depth;
+                }
             } else {
                 innermost = false;
                 scope_parts.push_back({pname, sk});
@@ -591,6 +631,16 @@ static StaticRenameMap build_static_rename_map(const std::vector<FunctionInfo>& 
     StaticRenameMap renames;
     std::set<std::string> seen;
     for (const auto& fn : functions) {
+        // Only free functions are renamed. A member's name is part of its class, and
+        // renaming one breaks every use of it -- an override stops overriding, and callers
+        // stop finding it. Members of a class with internal linkage report internal linkage
+        // themselves, so `is_static` alone is not the right test.
+        bool is_member = false;
+        for (const auto& e : fn.scope_chain)
+            if (e.kind == ScopeKind::Class) { is_member = true; break; }
+        if (is_member) continue;
+        if (fn.keep_in_header) continue;   // never moved, so never renamed
+
         // Overloads share one name and so one mangled name; entering it twice would make
         // the rewriter replace the same position twice and corrupt the identifier.
         if (fn.is_static && seen.insert(fn.name).second)
@@ -812,17 +862,126 @@ static std::string trim_ws(const std::string& s) {
     return s.substr(b, e - b);
 }
 
+// The preprocessor conditionals active at `offset`, outermost first, with the file's own
+// include guard left out. A definition written inside `#if X` must be emitted inside the
+// same `#if X` in its split file: otherwise it is compiled unconditionally, and a
+// definition that the real build never sees -- one referring to a type only available under
+// that condition -- breaks the piece.
+static std::vector<std::string> active_conditionals(const std::string& source,
+                                                    unsigned offset) {
+    std::vector<std::string> stack;
+    std::istringstream iss(source);
+    std::string line;
+    unsigned pos = 0;
+    bool guard_skipped = false;
+    std::string pending_guard;
+
+    while (std::getline(iss, line)) {
+        const unsigned line_start = pos;
+        pos += static_cast<unsigned>(line.size()) + 1;
+        if (line_start >= offset) break;
+
+        std::string t = trim_ws(line);
+        if (t.empty() || t[0] != '#') {
+            pending_guard.clear();
+            continue;
+        }
+        std::string rest = trim_ws(t.substr(1));
+        std::istringstream ls(rest);
+        std::string directive, ident;
+        ls >> directive >> ident;
+
+        if (directive == "if" || directive == "ifdef" || directive == "ifndef") {
+            // The include guard wraps the whole file and its macro is already defined by
+            // the time a split piece is compiled, so replaying it would delete the body.
+            if (!guard_skipped && stack.empty() && directive == "ifndef" && !ident.empty()) {
+                pending_guard = ident;
+                guard_skipped = true;
+                stack.push_back(std::string());   // placeholder, emitted as nothing
+                continue;
+            }
+            stack.push_back(t);
+        } else if (directive == "elif" || directive == "else") {
+            if (!stack.empty() && !stack.back().empty()) {
+                // The piece replays one branch on its own, so the branch it sits in has to
+                // become an `#if` of its own: `#elif C` alone is not a valid opening
+                // directive. The harvest already told us this branch is the live one, so
+                // `#else` becomes `#if 1`.
+                if (directive == "else") {
+                    stack.back() = "#if 1";
+                } else {
+                    const size_t kw = rest.find("elif");
+                    stack.back() = "#if " + trim_ws(rest.substr(kw + 4));
+                }
+            }
+        } else if (directive == "endif") {
+            if (!stack.empty()) stack.pop_back();
+        } else if (directive == "define" && !pending_guard.empty() && ident == pending_guard) {
+            pending_guard.clear();
+        }
+    }
+
+    std::vector<std::string> out;
+    for (const auto& c : stack)
+        if (!c.empty()) out.push_back(c);
+    return out;
+}
+
+// Macros the file undefines somewhere. A body that uses one of these cannot be moved into
+// a split file: the piece includes the whole header first, so the #undef has already run by
+// the time the body is compiled and the macro is gone. Boost.Assert defines
+// BOOST_ASSERT_SNPRINTF, uses it in source_location::to_string, and undefines it a few
+// lines later.
+static std::set<std::string> undefined_macros(const std::string& source) {
+    std::set<std::string> names;
+    std::istringstream iss(source);
+    std::string line;
+    while (std::getline(iss, line)) {
+        std::string t = trim_ws(line);
+        if (t.empty() || t[0] != '#') continue;
+        std::istringstream ls(trim_ws(t.substr(1)));
+        std::string directive, ident;
+        ls >> directive >> ident;
+        if (directive == "undef" && !ident.empty()) names.insert(ident);
+    }
+    return names;
+}
+
 // Fills in the derived fields on every function: whether its definition has to stay in the
 // header, and for class members the declaration left behind in the class plus the
 // out-of-line definition written into the split file.
-static void prepare_functions(std::vector<FunctionInfo>& functions) {
+static void prepare_functions(std::vector<FunctionInfo>& functions,
+                              const std::string& source) {
+    const std::set<std::string> undeffed = undefined_macros(source);
+
     for (auto& fn : functions) {
+        fn.conditionals = active_conditionals(source, fn.start_offset);
+
+        if (!undeffed.empty()) {
+            const std::string body_blanked = blank_code_noise(fn.body);
+            bool uses_undeffed = false;
+            for (const auto& m : undeffed) {
+                if (contains_decl_token(body_blanked, m)) { uses_undeffed = true; break; }
+            }
+            if (uses_undeffed) {
+                fn.keep_in_header = true;
+                continue;
+            }
+        }
         std::vector<std::string> class_names;
         for (const auto& e : fn.scope_chain)
             if (e.kind == ScopeKind::Class) class_names.push_back(e.name);
         const bool is_member = !class_names.empty() && fn.defined_in_class;
 
-        if (fn.is_template || fn.in_class_template || fn.in_anonymous_class) {
+        // A function in an unnamed namespace cannot be split cleanly. Its definition would
+        // have to leave the unnamed namespace to be reachable from another object, which is
+        // what the rename is for -- but any forward declaration the source already wrote
+        // inside that namespace gets renamed in place and stays there, leaving two
+        // functions with one name in two scopes and making every call ambiguous. Keeping
+        // the definition in the preamble costs a copy per object, which internal linkage
+        // makes harmless, and keeps the meaning of the code intact.
+        if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
+            fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns) {
             fn.keep_in_header = true;
             continue;
         }
@@ -837,7 +996,8 @@ static void prepare_functions(std::vector<FunctionInfo>& functions) {
 
         // constexpr and consteval definitions have to stay visible to every caller.
         const std::string decl_blanked = blanked.substr(0, decl_end);
-        if (contains_decl_token(decl_blanked, "constexpr") ||
+        if (fn.is_constexpr ||
+            contains_decl_token(decl_blanked, "constexpr") ||
             contains_decl_token(decl_blanked, "consteval")) {
             fn.keep_in_header = true;
             continue;
@@ -991,7 +1151,7 @@ static std::string generate_preamble(const std::string& source,
             ensure_newline();
             if (!r.fn->member_decl.empty())
                 preamble += apply_static_renames(r.fn->member_decl, renames) + ";";
-            else if (r.fn->is_static) {
+            else {
                 // Only a renamed function needs its declaration here. Its name changed, so
                 // a use in a namespace-scope initialiser retained in the preamble -- the
                 // `fn_ptr = &impl;` idiom -- refers to a name nothing has declared yet, and
@@ -1019,13 +1179,6 @@ static std::string generate_preamble(const std::string& source,
     }
 
     preamble += "\n";
-    for (const auto& fn : functions) {
-        if (should_keep_in_header(fn) || fn.is_static)
-            continue;   // renamed functions were already declared in place, above
-        std::string decl = generate_forward_decl_wrapped(fn, stem, source);
-        if (!decl.empty())
-            preamble += decl + "\n";
-    }
 
     return preamble;
 }
@@ -1805,7 +1958,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
-    prepare_functions(functions);
+    prepare_functions(functions, source);
 
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
@@ -2193,8 +2346,18 @@ static void emit_split_files(CXTranslationUnit tu,
         // linkage lets the linker merge the copies -- so it stays, and instead the symbol
         // is forced into existence. `-fkeep-inline-functions` used to be relied on for
         // that; it is a GCC option that clang parses and ignores, so it never worked here.
-        if (!input_is_header)
+        if (!input_is_header) {
             body = strip_decl_specifier(body, "inline");
+        } else {
+            // A member function defined inside its class body is implicitly inline. Writing
+            // it out-of-line loses that, so every translation unit including the header
+            // emits a strong definition and the final link fails with multiple definition.
+            // Say `inline` explicitly whenever the text does not already. This has to run
+            // before the #line directive is prepended, or it lands in front of it.
+            const std::string blanked = blank_code_noise(body);
+            if (!contains_decl_token(blanked.substr(0, decl_prefix_end(blanked)), "inline"))
+                body = "inline " + body;
+        }
 
         body = apply_static_renames(body, static_renames);
 
@@ -2205,11 +2368,17 @@ static void emit_split_files(CXTranslationUnit tu,
         if (input_is_header)
             body = "__attribute__((used))\n" + body;
 
+        for (const auto& c : fn.conditionals)
+            content << c << "\n";
+
         if (!fn.scope_chain.empty()) {
             content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
         } else {
             content << body << "\n";
         }
+
+        for (size_t ci = 0; ci < fn.conditionals.size(); ++ci)
+            content << "#endif\n";
 
         std::string new_content = content.str();
         bool needs_write = true;
