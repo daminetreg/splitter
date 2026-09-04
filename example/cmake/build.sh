@@ -69,6 +69,7 @@ export RBE_use_unified_uploads=true
 export RBE_invocation_id=$(uuidgen)
 export RBE_exec_strategy="remote"
 
+rm -rf $SCRIPT_DIR/logs
 mkdir -p $SCRIPT_DIR/logs
 export RBE_proxy_log_dir=$SCRIPT_DIR/logs
 
@@ -89,7 +90,9 @@ bootstrap -server_address $RBE_server_address -shutdown
 bootstrap -server_address $RBE_server_address -logtostderr -v 43
 trap "bootstrap -server_address $RBE_server_address -shutdown" EXIT
 
-export DISTRIBUTED=distributed-
+#export DISTRIBUTED=distributed-
+export DISTRIBUTED=""
+export BUILD_DIR=${BUILD_DIR}-${DISTRIBUTED}
 
 echo ""
 echo "=== Configuring with CMake (cpp-splitter as launcher) ==="
@@ -103,45 +106,46 @@ export TIPI_INTERCALATED_COMPILER_LAUNCHER=rewrapper
 
 echo ""
 echo "=== Cleaning ==="
-export CMAKE_BUILD_PARALLEL_LEVEL=300
-cmake --build "$BUILD_DIR" -j300 --target clean
+export CMAKE_BUILD_PARALLEL_LEVEL=32
+cmake --build "$BUILD_DIR" -j32 --target clean
 
 echo ""
 echo "=== Building ==="
 export VERBOSE=1
-export CMAKE_BUILD_PARALLEL_LEVEL=300
-t_split=$(time_ms "cmake --build \"$BUILD_DIR\" -j300")
+export CMAKE_BUILD_PARALLEL_LEVEL=32
+#t_split=$(time_ms "cmake --build \"$BUILD_DIR\" -j32")
+cmake --build "$BUILD_DIR" -j32
 unset VERBOSE
 
+##
+## PLAIN
+##
 #
-# PLAIN
+#BUILD_DIR=${BUILD_DIR}plain
 #
-
-BUILD_DIR=$BUILD_DIR-plain
-
-echo ""
-echo "=== Configuring with CMake (plain) ==="
-cmake \
-    -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/environments/${DISTRIBUTED}monolithic.cmake \
-    -G Ninja \
-    -S "$SCRIPT_DIR" \
-    -B "$BUILD_DIR"
-
-echo ""
-echo "=== Cleaning ==="
-export CMAKE_BUILD_PARALLEL_LEVEL=300
-cmake --build "$BUILD_DIR" -j300 --target clean
-
-echo ""
-echo "=== Building ==="
-export VERBOSE=1
-export CMAKE_BUILD_PARALLEL_LEVEL=300
-t_mono=$(time_ms "cmake --build \"$BUILD_DIR\" -j300")
-unset VERBOSE
-
-echo "============================================"
-echo "  Results Summary"
-echo "============================================"
-echo ""
-echo "  Full build (monolithic):       ${t_mono}ms"
-echo "  Full build (split+parallel):   ${t_split}ms"
+#echo ""
+#echo "=== Configuring with CMake (plain) ==="
+#cmake \
+#    -DCMAKE_TOOLCHAIN_FILE=$SCRIPT_DIR/environments/${DISTRIBUTED}monolithic.cmake \
+#    -G Ninja \
+#    -S "$SCRIPT_DIR" \
+#    -B "$BUILD_DIR"
+#
+#echo ""
+#echo "=== Cleaning ==="
+#export CMAKE_BUILD_PARALLEL_LEVEL=300
+#cmake --build "$BUILD_DIR" -j300 --target clean
+#
+#echo ""
+#echo "=== Building ==="
+#export VERBOSE=1
+#export CMAKE_BUILD_PARALLEL_LEVEL=300
+#t_mono=$(time_ms "cmake --build \"$BUILD_DIR\" -j300")
+#unset VERBOSE
+#
+#echo "============================================"
+#echo "  Results Summary"
+#echo "============================================"
+#echo ""
+#echo "  Full build (monolithic):       ${t_mono}ms"
+#echo "  Full build (split+parallel):   ${t_split}ms"
