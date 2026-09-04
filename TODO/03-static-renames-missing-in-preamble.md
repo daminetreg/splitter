@@ -3,6 +3,8 @@
 **Severity:** High. Breaks every translation unit that takes the address of, or calls,
 a split-out internal-linkage function from non-function code.
 
+**Status: implemented and verified.** See "Outcome" at the end of this file.
+
 ## Motivation
 
 Functions with internal linkage are renamed to `__static_<stem>__<name>` so that the
@@ -117,3 +119,63 @@ just has to be applied uniformly everywhere the identifier can appear.
     `read_write`) — only the exact identifier may be rewritten;
   - the function's name appearing inside a string literal and inside a comment — both
     must be left alone.
+
+## Outcome
+
+Implemented in `src/main.cpp`:
+
+- `build_static_rename_map()` and a free `apply_static_renames()` replace the per-driver
+  lambda. Matching runs over `blank_code_noise()` output, so a renamed name occurring in a
+  string literal or a comment is left alone, and replacements are applied back-to-front so
+  offsets stay valid.
+- `generate_preamble()` takes the rename map and applies it to everything it copies
+  verbatim: the gaps between removed definitions, the trailing remainder of the file, the
+  in-class declarations left behind for members, and retained template bodies (a template
+  kept in the header can call a split-out static function).
+- **Declarations for renamed functions are now emitted in place**, where the definition
+  was, instead of being appended to the end of the preamble. The appended form arrives far
+  too late for the case this item is about: `fn_ptr = &impl;` at namespace scope, a few
+  lines below the definition, referred to a name nothing had declared yet.
+- Renamed functions inside an unnamed namespace need their declaration in the scope the
+  definition is hoisted to, so the unnamed namespace is closed before the declaration and
+  reopened after it. Without this the declaration and the definition get different linkage
+  and the reference goes unresolved. `FunctionInfo::unnamed_ns_depth` records the nesting.
+- Declarations for functions whose name did *not* change stay appended at the end. Their
+  uses all live inside other function bodies, which move into split files that include the
+  whole preamble, so position does not matter -- and emitting them in place would mean
+  rewriting macro-expanded and preprocessed headers, where a function's source extent is
+  the macro invocation rather than a declarator. That attempt produced 2500 ambiguous
+  operator errors and 2250 redefinitions before being narrowed.
+
+Two bugs found and fixed along the way:
+
+- **Duplicate source extents (pre-existing, from TODO 05).** Several functions can share
+  one extent -- `BOOST_BITMASK(copy_options)` expands to nine operators, each reporting the
+  macro invocation as its extent. The retained text was emitted once per function, so the
+  macro was repeated nine times and redefined everything it declares. `generate_preamble()`
+  now collapses identical extents.
+- **Overloaded statics corrupted the rename.** Two overloads share one name, so the map
+  held the entry twice and the rewriter replaced the same position twice, producing
+  `__static_path_traits_cpp__convert_auxth_traits_cpp__convert_aux`. The map is now unique
+  by name and hit positions are de-duplicated.
+
+Verified on the Boost `filesystem` build:
+
+| check | before | after |
+|---|---|---|
+| `use of undeclared identifier 'fill_random_dev_random'` | present | **0** |
+| original static names left in any `*_preamble.h` | present | **0** |
+| corrupted double-renamed identifiers | n/a | **0** |
+| translation units failing on their own split pieces | 6 | **4** |
+
+`unique_path.cpp`, `lock_pool.cpp` and `path_traits.cpp` no longer fail on their own split
+pieces. `test/static_renames.cpp` covers a function pointer initialised at namespace scope
+with the address of a split-out static, a call from a retained template body, a name that
+is a prefix of another identifier, and the name appearing in a string literal and a
+comment; it splits, compiles, links and runs.
+
+The total error count is higher than before this change (2050 -> 2772) because translation
+units that used to stop early now get further and reach unrelated failures. The remaining
+blockers are all missing declaration context in split headers -- `no member named`,
+`constexpr variable`, `non-constexpr declaration of` -- which belong with **TODO 06**,
+plus **TODO 07** and **TODO 08**.

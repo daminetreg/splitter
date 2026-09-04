@@ -83,6 +83,7 @@ struct FunctionInfo {
 
     // Set by prepare_functions() once the whole file has been visited.
     bool defined_in_class = false;    // body written inside the class, not already out-of-line
+    unsigned unnamed_ns_depth = 0;    // innermost consecutive unnamed namespaces around it
     bool in_class_template = false;   // member of a class template: cannot go out-of-line
     bool in_anonymous_class = false;  // no class name to qualify a definition with
     bool keep_in_header = false;      // definition has to stay in the preamble
@@ -220,6 +221,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     std::string class_prefix;
     CXCursor parent_cursor = clang_getCursorSemanticParent(cursor);
     std::vector<ScopeEntry> scope_parts;
+    bool innermost = true;   // still counting unnamed namespaces closest to the function
     while (true) {
         CXCursorKind pk = clang_getCursorKind(parent_cursor);
         if (pk == CXCursor_ClassDecl || pk == CXCursor_StructDecl ||
@@ -238,8 +240,16 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
                 if (pname.empty())
                     info.in_anonymous_class = true;
             }
-            if (!pname.empty())
+            if (pname.empty()) {
+                // An unnamed namespace contributes no name to qualify with, but the split
+                // definition is hoisted out of it, so the count is needed to place the
+                // declaration in the same scope as the definition.
+                if (sk == ScopeKind::Namespace && innermost)
+                    ++info.unnamed_ns_depth;
+            } else {
+                innermost = false;
                 scope_parts.push_back({pname, sk});
+            }
             parent_cursor = clang_getCursorSemanticParent(parent_cursor);
         } else {
             break;
@@ -451,7 +461,50 @@ static std::string extract_source_signature(const std::string& source,
     return sig;
 }
 
-static std::string generate_forward_decl(const FunctionInfo& fn,
+static size_t definition_decl_end(const std::string& blanked);
+static size_t find_declarator(const std::string& blanked, const std::string& name);
+static std::string trim_ws(const std::string& s);
+static bool token_at(const std::string& blanked, size_t pos, size_t len);
+
+// Declaration left in place of a removed free-function definition. It is emitted at the
+// position the definition occupied, so it inherits the surrounding namespaces and any #if
+// context and needs no wrapping of its own. Emitting it here rather than appending it to
+// the end of the preamble also means it precedes every use the original file had: a
+// function pointer initialised at namespace scope just below the definition would
+// otherwise refer to a name that has not been declared yet.
+static std::string generate_forward_decl_inplace(const FunctionInfo& fn,
+                                                 const std::string& stem) {
+    // Members keep their declaration inside the class body instead.
+    for (const auto& entry : fn.scope_chain)
+        if (entry.kind == ScopeKind::Class)
+            return "";
+
+    const size_t decl_end = definition_decl_end(blank_code_noise(fn.body));
+    if (decl_end == std::string::npos)
+        return "";
+
+    std::string sig = trim_ws(fn.body.substr(0, decl_end));
+    if (sig.empty())
+        return "";
+
+    sig = strip_decl_specifier(sig, "inline");
+    if (fn.is_static) {
+        sig = strip_decl_specifier(sig, "static");
+        const size_t name_pos = find_declarator(blank_code_noise(sig), fn.name);
+        if (name_pos == std::string::npos)
+            return "";
+        sig.replace(name_pos, fn.name.size(), make_static_mangled_name(stem, fn.name));
+    }
+    return sig + ";";
+}
+
+// Declaration appended at the end of the preamble, wrapped in its namespaces. Used for
+// every function whose name did not change: their uses all live inside other function
+// bodies, which are themselves moved into split files that include the whole preamble, so
+// the position of the declaration does not matter. Emitting these in place instead would
+// mean rewriting macro-expanded and preprocessed headers, where a function's source extent
+// is the macro invocation rather than a declarator.
+static std::string generate_forward_decl_wrapped(const FunctionInfo& fn,
                                           const std::string& stem,
                                           const std::string& source) {
     bool is_class_method = false;
@@ -507,6 +560,65 @@ static std::string generate_forward_decl(const FunctionInfo& fn,
         decl += " }";
 
     return decl;
+}
+
+// --- Renaming of internal-linkage functions ------------------------------------------
+//
+// Split-out functions with internal linkage are renamed so that separately compiled
+// objects can be combined with `ld -r` without symbol collisions. The rename has to reach
+// every place the identifier appears -- the split bodies, the declarations, and the text
+// carried verbatim into the preamble. Missing that last one breaks any file that installs
+// such a function behind a function pointer, which is a common idiom:
+//
+//     fill_random_t* fill_random = &fill_random_dev_random;   // undeclared after renaming
+using StaticRenameMap = std::vector<std::pair<std::string, std::string>>;
+
+static StaticRenameMap build_static_rename_map(const std::vector<FunctionInfo>& functions,
+                                               const std::string& unit_tag) {
+    StaticRenameMap renames;
+    std::set<std::string> seen;
+    for (const auto& fn : functions) {
+        // Overloads share one name and so one mangled name; entering it twice would make
+        // the rewriter replace the same position twice and corrupt the identifier.
+        if (fn.is_static && seen.insert(fn.name).second)
+            renames.emplace_back(fn.name, make_static_mangled_name(unit_tag, fn.name));
+    }
+    return renames;
+}
+
+// Rewrite whole-identifier occurrences of each renamed function. Matching runs over a copy
+// with string literals, character literals and comments blanked out, so the name appearing
+// in a diagnostic message or a comment is left alone.
+static std::string apply_static_renames(const std::string& text,
+                                        const StaticRenameMap& renames) {
+    if (renames.empty() || text.empty()) return text;
+
+    const std::string blanked = blank_code_noise(text);
+    struct Hit { size_t pos; size_t len; const std::string* to; };
+    std::vector<Hit> hits;
+
+    for (const auto& entry : renames) {
+        const std::string& orig = entry.first;
+        if (orig.empty()) continue;
+        size_t pos = 0;
+        while ((pos = blanked.find(orig, pos)) != std::string::npos) {
+            if (token_at(blanked, pos, orig.size()))
+                hits.push_back({pos, orig.size(), &entry.second});
+            pos += orig.size();
+        }
+    }
+    // Apply back to front so the earlier offsets stay valid as lengths change, and never
+    // rewrite the same position twice.
+    std::sort(hits.begin(), hits.end(),
+              [](const Hit& a, const Hit& b) { return a.pos > b.pos; });
+    hits.erase(std::unique(hits.begin(), hits.end(),
+                           [](const Hit& a, const Hit& b) { return a.pos == b.pos; }),
+               hits.end());
+
+    std::string out = text;
+    for (const auto& h : hits)
+        out.replace(h.pos, h.len, *h.to);
+    return out;
 }
 
 // --- Out-of-line rendering of class member functions ---------------------------------
@@ -799,7 +911,8 @@ static void prepare_functions(std::vector<FunctionInfo>& functions) {
 static std::string generate_preamble(const std::string& source,
                                      const std::vector<FunctionInfo>& functions,
                                      const std::string& stem,
-                                     const std::string& source_path) {
+                                     const std::string& source_path,
+                                     const StaticRenameMap& renames) {
     struct Range {
         unsigned start, end;
         bool keep;
@@ -810,7 +923,21 @@ static std::string generate_preamble(const std::string& source,
         ranges.push_back({fn.start_offset, fn.end_offset, should_keep_in_header(fn), &fn});
     }
     std::sort(ranges.begin(), ranges.end(),
-              [](const Range& a, const Range& b) { return a.start < b.start; });
+              [](const Range& a, const Range& b) {
+                  if (a.start != b.start) return a.start < b.start;
+                  if (a.end != b.end) return a.end < b.end;
+                  return a.keep && !b.keep;   // a kept entry represents the group
+              });
+
+    // Several functions can share one source extent: a macro such as BOOST_BITMASK
+    // expands to a whole set of operators, and every one of them reports the macro
+    // invocation as its extent. Emitting the retained text once per function would repeat
+    // the macro and redefine everything it declares, so collapse identical extents.
+    ranges.erase(std::unique(ranges.begin(), ranges.end(),
+                             [](const Range& a, const Range& b) {
+                                 return a.start == b.start && a.end == b.end;
+                             }),
+                 ranges.end());
 
     auto line_offsets = build_line_offsets(source);
 
@@ -826,19 +953,38 @@ static std::string generate_preamble(const std::string& source,
     unsigned pos = 0;
     for (const auto& r : ranges) {
         if (r.start > pos) {
-            preamble += source.substr(pos, r.start - pos);
+            preamble += apply_static_renames(source.substr(pos, r.start - pos), renames);
         }
         if (r.keep) {
             ensure_newline();
             unsigned keep_line = offset_to_line(line_offsets, r.start);
             //preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
-            preamble += source.substr(r.start, r.end - r.start);
-        } else if (r.fn && !r.fn->member_decl.empty()) {
-            // The definition moved to a split file, so the class has to keep a
-            // declaration in its place -- otherwise the out-of-line definition matches
-            // nothing and the member disappears from the type.
+            // A retained template body can call a split-out static function too.
+            preamble += apply_static_renames(source.substr(r.start, r.end - r.start), renames);
+        } else if (r.fn) {
+            // The definition moved to a split file, so a declaration has to take its
+            // place: inside the class for a member, otherwise right here, where the
+            // definition used to be.
             ensure_newline();
-            preamble += r.fn->member_decl + ";";
+            if (!r.fn->member_decl.empty())
+                preamble += apply_static_renames(r.fn->member_decl, renames) + ";";
+            else if (r.fn->is_static) {
+                // Only a renamed function needs its declaration here. Its name changed, so
+                // a use in a namespace-scope initialiser retained in the preamble -- the
+                // `fn_ptr = &impl;` idiom -- refers to a name nothing has declared yet, and
+                // a declaration appended at the end of the preamble comes far too late.
+                std::string decl = generate_forward_decl_inplace(*r.fn, stem);
+                if (!decl.empty()) {
+                    // The split definition is hoisted out of any unnamed namespace, so the
+                    // declaration has to leave it too, or the two get different linkage and
+                    // the reference goes unresolved. Closing and reopening the unnamed
+                    // namespace puts the declaration in the definition's scope while still
+                    // keeping it ahead of every use.
+                    for (unsigned i = 0; i < r.fn->unnamed_ns_depth; ++i) preamble += "}\n";
+                    preamble += decl + "\n";
+                    for (unsigned i = 0; i < r.fn->unnamed_ns_depth; ++i) preamble += "namespace {\n";
+                }
+            }
         }
         ensure_newline();
         unsigned resume_line = offset_to_line(line_offsets, r.end);
@@ -846,14 +992,14 @@ static std::string generate_preamble(const std::string& source,
         pos = r.end;
     }
     if (pos < source.size()) {
-        preamble += source.substr(pos);
+        preamble += apply_static_renames(source.substr(pos), renames);
     }
 
     preamble += "\n";
     for (const auto& fn : functions) {
-        if (should_keep_in_header(fn))
-            continue;
-        std::string decl = generate_forward_decl(fn, stem, source);
+        if (should_keep_in_header(fn) || fn.is_static)
+            continue;   // renamed functions were already declared in place, above
+        std::string decl = generate_forward_decl_wrapped(fn, stem, source);
         if (!decl.empty())
             preamble += decl + "\n";
     }
@@ -1739,33 +1885,7 @@ static void emit_split_files(CXTranslationUnit tu,
 
     if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
-    std::vector<std::pair<std::string, std::string>> static_renames;
-    for (const auto& fn : functions) {
-        if (fn.is_static) {
-            static_renames.emplace_back(fn.name,
-                                        make_static_mangled_name(unit_tag, fn.name));
-        }
-    }
-
-    auto apply_static_renames = [&](std::string text) -> std::string {
-        for (const auto& [orig, mangled] : static_renames) {
-            size_t pos = 0;
-            while ((pos = text.find(orig, pos)) != std::string::npos) {
-                if (pos > 0 && (std::isalnum(static_cast<unsigned char>(text[pos - 1])) || text[pos - 1] == '_')) {
-                    pos += orig.size();
-                    continue;
-                }
-                size_t end = pos + orig.size();
-                if (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_')) {
-                    pos += orig.size();
-                    continue;
-                }
-                text.replace(pos, orig.size(), mangled);
-                pos += mangled.size();
-            }
-        }
-        return text;
-    };
+    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
 
     std::vector<std::string> current_files;
     int file_counter = 0;
@@ -1800,7 +1920,7 @@ static void emit_split_files(CXTranslationUnit tu,
             // text must then be left exactly as it is.
             body = strip_decl_specifier(body, "static");
         }
-        body = apply_static_renames(body);
+        body = apply_static_renames(body, static_renames);
 
         std::string line_directive = "#line " + std::to_string(fn.start_line) +
                                      " \"" + abs_path + "\"\n";
@@ -2027,7 +2147,9 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     fs::create_directories(unit_dir);
 
     result.preamble_filename = preamble_path;
-    std::string preamble = generate_preamble(source, functions, unit_tag, abs_path);
+    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
+    std::string preamble =
+        generate_preamble(source, functions, unit_tag, abs_path, static_renames);
 
     {
         std::string existing_preamble;
@@ -2151,7 +2273,9 @@ static SplitResult do_split(const std::string& input_path,
     fs::create_directories(unit_dir);
 
     result.preamble_filename = preamble_path;
-    std::string preamble = generate_preamble(source, functions, unit_tag, abs_path);
+    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
+    std::string preamble =
+        generate_preamble(source, functions, unit_tag, abs_path, static_renames);
 
     {
         std::string existing_preamble;
