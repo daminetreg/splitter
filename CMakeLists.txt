@@ -104,7 +104,9 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   static_renames    a renamed internal-linkage function used from namespace scope
 #   member_functions  members written out of line, and class templates kept in the header
 #   ctx_main          a header that only compiles in the context of its includer
-foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main)
+#   always_inline_main  an always-inline function split out of a header, and a call to it
+foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
+                always_inline_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -129,5 +131,6 @@ add_test(
 
 set_tests_properties(
   split.sample split.use_mylib split.static_specifier split.static_renames
-  split.member_functions split.ctx_main launcher.shared_inline_header
+  split.member_functions split.ctx_main split.always_inline_main
+  launcher.shared_inline_header
   PROPERTIES TIMEOUT 300)
