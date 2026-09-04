@@ -78,6 +78,7 @@ struct FunctionInfo {
     unsigned start_offset;
     unsigned end_offset;
     std::string file;                 // absolute path of the file holding the definition
+    std::string usr;                  // unified symbol name, for the referenced-set lookup
     std::vector<ScopeEntry> scope_chain;
     bool is_template;
     bool is_static;
@@ -174,6 +175,37 @@ static std::string sanitize_filename(const std::string& name) {
 // inclusion context its includer establishes, rather than from a standalone re-parse.
 using HarvestMap = std::map<std::string, std::vector<FunctionInfo>>;
 
+// Unified symbol names of every function this translation unit actually refers to.
+//
+// A header declares far more than any one translation unit uses, and a definition nobody
+// uses is never emitted -- that is what `inline` is for. Splitting forces each definition
+// into an object of its own, which breaks that: a header function the build never wanted
+// becomes real code, and if its body calls something this translation unit does not define
+// the reference has nothing to bind to. Boost.Filesystem hides a block of inline forwarders
+// behind `#if !defined(BOOST_FILESYSTEM_SOURCE)` so the library never compiles them, and
+// from inside the library they are indistinguishable from ordinary functions defined
+// elsewhere -- there is no property of the declaration to test.
+//
+// So the rule is the compiler's own: split only what this translation unit refers to.
+// Everything else stays in the header, which costs nothing because it was never going to
+// be emitted here anyway.
+static void collect_referenced(CXTranslationUnit tu, std::set<std::string>& out) {
+    clang_visitChildren(clang_getTranslationUnitCursor(tu),
+        [](CXCursor node, CXCursor, CXClientData payload) -> CXChildVisitResult {
+            CXCursorKind k = clang_getCursorKind(node);
+            if (k == CXCursor_CallExpr || k == CXCursor_DeclRefExpr ||
+                k == CXCursor_MemberRefExpr) {
+                CXCursor ref = clang_getCursorReferenced(node);
+                if (!clang_Cursor_isNull(ref)) {
+                    std::string usr = cx_to_string(clang_getCursorUSR(ref));
+                    if (!usr.empty()) static_cast<std::set<std::string>*>(payload)->insert(usr);
+                }
+            }
+            return CXChildVisit_Recurse;
+        },
+        &out);
+}
+
 struct VisitorData {
     CXTranslationUnit tu;
     const std::set<std::string>* wanted;   // files whose functions to record
@@ -220,11 +252,23 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
         return CXChildVisit_Continue;
     }
 
+    if (const char* dump = std::getenv("CPP_SPLITTER_DUMP_HARVEST")) {
+        if (cursor_filename.find(dump) != std::string::npos) {
+            unsigned line = 0;
+            clang_getFileLocation(loc, nullptr, &line, nullptr, nullptr);
+            fprintf(stderr, "[harvest] line=%-5u wanted=%d kind=%-3d %s\n", line,
+                    (int)wanted_file, (int)kind,
+                    cx_to_string(clang_getCursorSpelling(cursor)).c_str());
+            fflush(stderr);
+        }
+    }
+
     if (!wanted_file)
         return CXChildVisit_Continue;
 
     FunctionInfo info;
     info.file = cursor_filename;
+    info.usr = cx_to_string(clang_getCursorUSR(cursor));
     info.name = cx_to_string(clang_getCursorSpelling(cursor));
     info.is_template = (kind == CXCursor_FunctionTemplate);
     info.is_ctor_or_dtor = (kind == CXCursor_Constructor || kind == CXCursor_Destructor);
@@ -1019,8 +1063,24 @@ static std::set<std::string> undefined_macros(const std::string& source) {
 // out-of-line definition written into the split file.
 static bool is_header_file(const std::string& path);
 
+static void dump_keep_decisions(const std::vector<FunctionInfo>& functions) {
+    const char* dump = std::getenv("CPP_SPLITTER_DUMP_HARVEST");
+    if (!dump) return;
+    for (const auto& fn : functions) {
+        if (fn.file.find(dump) == std::string::npos) continue;
+        fprintf(stderr, "[keep] line=%-5u keep=%d ai=%d ranges=%zu tmpl=%d virt=%d ctor=%d spec=%d anon=%d %s\n",
+                fn.start_line, (int)fn.keep_in_header, (int)!fn.always_inline_ranges.empty(),
+                fn.always_inline_ranges.size(), (int)fn.is_template, (int)fn.is_virtual,
+                (int)fn.is_ctor_or_dtor, (int)fn.is_specialization, (int)fn.in_unnamed_ns,
+                fn.name.c_str());
+    }
+    fflush(stderr);
+}
+
 static void prepare_functions(std::vector<FunctionInfo>& functions,
-                              const std::string& source) {
+                              const std::string& source,
+                              const std::set<std::string>& referenced,
+                              bool input_is_header) {
     const std::set<std::string> undeffed = undefined_macros(source);
 
     for (auto& fn : functions) {
@@ -1059,6 +1119,12 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         // definition strong, which collides as soon as two translation units include the
         // header. So they stay put; construction is bound up with the class's fields
         // anyway, and leaving it beside them costs little.
+        // Only split what this translation unit refers to; see collect_referenced().
+        if (input_is_header && !fn.usr.empty() && referenced.find(fn.usr) == referenced.end()) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
         if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
             fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns ||
             (fn.is_ctor_or_dtor && is_header_file(fn.file))) {
@@ -2020,6 +2086,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
                               const std::string& input_path,
                               const std::string& source,
                               std::vector<FunctionInfo>& functions,
+                              const std::set<std::string>& referenced,
                               const std::string& output_dir,
                               const std::vector<std::string>& all_flags,
                               const std::vector<std::string>& extra_flags,
@@ -2046,7 +2113,8 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
-    prepare_functions(functions, source);
+    prepare_functions(functions, source, referenced, is_header_file(abs_path));
+    dump_keep_decisions(functions);
 
     if (functions.empty()) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
@@ -2093,6 +2161,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
 // include directories the caller has to link and compile against.
 static void resolve_header_deps(CXTranslationUnit tu,
                                 const HarvestMap& harvest,
+                                const std::set<std::string>& referenced,
                                 const std::vector<std::string>& candidates,
                                 const std::string& context_preamble,
                                 SplitResult& result,
@@ -2125,7 +2194,7 @@ static void resolve_header_deps(CXTranslationUnit tu,
             continue;
         }
 
-        SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, output_dir,
+        SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, referenced, output_dir,
                                         all_flags, extra_flags, context_preamble,
                                         parse_clean, verbose, out);
         if (!hdr_sr.success && verbose)
@@ -2726,7 +2795,10 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         if (hit != harvest.end()) functions = hit->second;
     }
 
-    result = split_unit(tu, abs_path, input_path, source, functions, output_dir,
+    std::set<std::string> referenced;
+    collect_referenced(tu, referenced);
+
+    result = split_unit(tu, abs_path, input_path, source, functions, referenced, output_dir,
                         all_flags, extra_flags, std::string(), parse_errors == 0,
                         verbose, out);
 
@@ -2734,7 +2806,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         // Split pieces of this unit's headers include this preamble first, so they compile
         // in the context the header was harvested in.
         const std::string tu_preamble = fs::path(abs_path).stem().string() + "_preamble.h";
-        resolve_header_deps(tu, harvest, candidates, tu_preamble, result, output_dir,
+        resolve_header_deps(tu, harvest, referenced, candidates, tu_preamble, result, output_dir,
                             all_flags, extra_flags, parse_errors == 0, verbose, out);
     }
 
@@ -2872,7 +2944,10 @@ static SplitResult do_split(const std::string& input_path,
         if (hit != harvest.end()) functions = hit->second;
     }
 
-    result = split_unit(tu, abs_path, input_path, source, functions, output_dir,
+    std::set<std::string> referenced;
+    collect_referenced(tu, referenced);
+
+    result = split_unit(tu, abs_path, input_path, source, functions, referenced, output_dir,
                         all_flags, extra_flags, std::string(), parse_errors == 0,
                         verbose, out);
 
@@ -2880,7 +2955,7 @@ static SplitResult do_split(const std::string& input_path,
         // Split pieces of this unit's headers include this preamble first, so they compile
         // in the context the header was harvested in.
         const std::string tu_preamble = fs::path(abs_path).stem().string() + "_preamble.h";
-        resolve_header_deps(tu, harvest, candidates, tu_preamble, result, output_dir,
+        resolve_header_deps(tu, harvest, referenced, candidates, tu_preamble, result, output_dir,
                             all_flags, extra_flags, parse_errors == 0, verbose, out);
     }
     clang_disposeTranslationUnit(tu);
