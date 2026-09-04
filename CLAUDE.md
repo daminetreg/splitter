@@ -1,4 +1,4 @@
-# On linux to compile the cpp-splitter
+# If you are not in a tipi container or a devcontainer, on linux to compile the cpp-splitter
 
 1. Create docker container if it doesn't exists
 
@@ -21,5 +21,11 @@ docker exec -u 0 `whoami`-tipi useradd -d $HOME -u `id -u` `whoami`
 docker exec -it `whoami`-tipi tipi run /bin/bash
 ```
 
+Then run the compilation commands below.
+
+# If you are in a tipi container or a devcontainer 
+You can just use the compilation commands bellow.
+
+# Compilation Commands
 3. Configure the splitter with `cmake -GNinja -S . -B build/ -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake`
 4. Build the splitter with `cmake --build build/ -j32`

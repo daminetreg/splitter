@@ -33,8 +33,8 @@
   // Runs on the host before the container starts, so the bind-mount sources exist.
   "initializeCommand": "mkdir -p \"${localWorkspaceFolder}/../${localEnv:USER}-tipi-workdir-vT.w\" \"${localWorkspaceFolder}/../generalized-toolchains\"",
 
-  "postCreateCommand": "cmake -GNinja -S . -B build/ -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake",
-
+  // cmake is not on PATH directly in this image; it's only reachable through
+  // the tipi wrapper, which sets up the hermetic toolchain environment.
   "customizations": {
     "vscode": {
       "extensions": ["ms-vscode.cpptools", "ms-vscode.cmake-tools"],
@@ -43,7 +43,14 @@
         "cmake.generator": "Ninja",
         "cmake.configureArgs": [
           "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/environments/monolithic.cmake"
-        ]
+        ],
+        "terminal.integrated.defaultProfile.linux": "tipi run bash",
+        "terminal.integrated.profiles.linux": {
+          "tipi run bash": {
+            "path": "tipi",
+            "args": ["run", "/bin/bash"]
+          }
+        }
       }
     }
   }
