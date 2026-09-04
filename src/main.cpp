@@ -87,6 +87,11 @@ struct FunctionInfo {
     bool is_specialization = false;   // explicit specialization: `template< > void f<T>()`
     bool is_virtual = false;          // virtual member function
     bool is_ctor_or_dtor = false;     // constructor or destructor
+    // Source ranges of always_inline attributes on this definition, as file offsets. An
+    // always-inline function is given available_externally linkage and never emitted out
+    // of line, so nothing can ever link against it; wherever such a definition is
+    // re-emitted the attribute is dropped so that a real body exists.
+    std::vector<std::pair<unsigned, unsigned>> always_inline_ranges;
     std::vector<std::string> conditionals;   // #if directives active at the definition
     bool defined_in_class = false;    // body written inside the class, not already out-of-line
     unsigned unnamed_ns_depth = 0;    // innermost consecutive unnamed namespaces around it
@@ -260,6 +265,22 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
         const std::string head = blanked.substr(0, body == std::string::npos ? blanked.size() : body);
         info.is_constexpr = contains_decl_token(head, "constexpr") ||
                             contains_decl_token(head, "consteval");
+
+        if (pretty.find("always_inline") != std::string::npos) {
+            clang_visitChildren(cursor,
+                [](CXCursor attr, CXCursor, CXClientData payload) -> CXChildVisitResult {
+                    if (!clang_isAttribute(clang_getCursorKind(attr)))
+                        return CXChildVisit_Continue;
+                    CXSourceRange r = clang_getCursorExtent(attr);
+                    unsigned begin = 0, end = 0;
+                    clang_getFileLocation(clang_getRangeStart(r), nullptr, nullptr, nullptr, &begin);
+                    clang_getFileLocation(clang_getRangeEnd(r), nullptr, nullptr, nullptr, &end);
+                    if (end > begin)
+                        static_cast<FunctionInfo*>(payload)->always_inline_ranges.emplace_back(begin, end);
+                    return CXChildVisit_Continue;
+                },
+                &info);
+        }
     }
 
     CXString qualified = clang_getCursorDisplayName(cursor);
@@ -615,6 +636,50 @@ static std::string generate_forward_decl_wrapped(const FunctionInfo& fn,
         decl += " }";
 
     return decl;
+}
+
+// Re-emit a definition with its always_inline attributes removed, so that the compiler
+// produces a real out-of-line body for it instead of an available_externally one that
+// nothing can link against. The attribute is usually reached through a macro that also
+// supplies `inline` (BOOST_FORCEINLINE and its equivalents), and the whole macro token is
+// what the attribute's source range covers, so `inline` is put back when removing it would
+// otherwise leave the definition with external linkage and collide across translation
+// units.
+// True when the definition opens with a template header. `inline` may not precede one, and
+// a template already has the vague linkage that adding `inline` would be asking for.
+static bool opens_with_template(const std::string& blanked) {
+    size_t i = 0;
+    while (i < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[i]))) ++i;
+    return blanked.compare(i, 8, "template") == 0 &&
+           (i + 8 >= blanked.size() || !is_ident_char(static_cast<unsigned char>(blanked[i + 8])));
+}
+
+static std::string strip_always_inline(const std::string& text, unsigned base,
+                                       const std::vector<std::pair<unsigned, unsigned>>& ranges) {
+    if (ranges.empty()) return text;
+
+    std::vector<std::pair<unsigned, unsigned>> local;
+    for (const auto& r : ranges) {
+        if (r.first < base) continue;
+        size_t from = r.first - base, to = r.second - base;
+        if (to <= text.size() && from < to) local.emplace_back(from, to);
+    }
+    if (local.empty()) return text;
+
+    std::sort(local.begin(), local.end(),
+              [](const std::pair<unsigned, unsigned>& a, const std::pair<unsigned, unsigned>& b) {
+                  return a.first > b.first;
+              });
+
+    std::string out = text;
+    for (const auto& r : local)
+        out.erase(r.first, r.second - r.first);
+
+    const std::string blanked = blank_code_noise(out);
+    if (!opens_with_template(blanked) &&
+        !contains_decl_token(blanked.substr(0, decl_prefix_end(blanked)), "inline"))
+        out = "inline " + out;
+    return out;
 }
 
 // --- Renaming of internal-linkage functions ------------------------------------------
@@ -1158,7 +1223,11 @@ static std::string generate_preamble(const std::string& source,
             unsigned keep_line = offset_to_line(line_offsets, r.start);
             //preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
             // A retained template body can call a split-out static function too.
-            preamble += apply_static_renames(source.substr(r.start, r.end - r.start), renames);
+            preamble += apply_static_renames(
+                strip_always_inline(source.substr(r.start, r.end - r.start), r.start,
+                                    r.fn ? r.fn->always_inline_ranges
+                                         : std::vector<std::pair<unsigned, unsigned>>()),
+                renames);
         } else if (r.fn) {
             // The definition moved to a split file, so a declaration has to take its
             // place: inside the class for a member, otherwise right here, where the
@@ -2343,8 +2412,13 @@ static void emit_split_files(CXTranslationUnit tu,
             content << "#include \"" << context_preamble << "\"\n";
         content << "#include \"" << preamble_filename << "\"\n\n";
 
-        // Members are emitted in their out-of-line form; everything else as written.
-        std::string body = fn.outlined_body.empty() ? fn.body : fn.outlined_body;
+        // Members are emitted in their out-of-line form; everything else as written. An
+        // out-of-line form was rebuilt from the declarator and no longer carries the
+        // attribute, so only the verbatim body needs stripping.
+        std::string body = fn.outlined_body.empty()
+                               ? strip_always_inline(fn.body, fn.start_offset,
+                                                     fn.always_inline_ranges)
+                               : fn.outlined_body;
         if (fn.is_static) {
             // Best effort by design: `is_static` reflects linkage, not syntax. A
             // function in an anonymous namespace, or an `inline` one at namespace
@@ -2374,7 +2448,8 @@ static void emit_split_files(CXTranslationUnit tu,
             // Say `inline` explicitly whenever the text does not already. This has to run
             // before the #line directive is prepended, or it lands in front of it.
             const std::string blanked = blank_code_noise(body);
-            if (!contains_decl_token(blanked.substr(0, decl_prefix_end(blanked)), "inline"))
+            if (!opens_with_template(blanked) &&
+                !contains_decl_token(blanked.substr(0, decl_prefix_end(blanked)), "inline"))
                 body = "inline " + body;
         }
 
