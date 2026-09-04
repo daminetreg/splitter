@@ -236,9 +236,13 @@ static CXChildVisitResult build_emit_graph(CXCursor node, CXCursor, CXClientData
         if (file)
             path = fs::absolute(cx_to_string(clang_getFileName(file)), ec).lexically_normal().string();
 
-        // A definition the compiler must emit whatever uses it: written in the file being
-        // compiled, with external linkage, and not inline.
-        if (!ec && !path.empty() && path == g->main_file &&
+        // A definition the compiler must emit whatever uses it: external linkage and not
+        // inline. Which file it was written in does not matter -- a translation unit whose
+        // whole body arrives through an implementation include has no definitions of its
+        // own, and restricting the roots to the file being compiled left it with no roots
+        // at all, so nothing was ever reachable and nothing was ever split.
+        (void)g->main_file;
+        if (!ec && !path.empty() &&
             !clang_Cursor_isFunctionInlined(node) &&
             clang_getCursorLinkage(node) == CXLinkage_External)
             g->roots.insert(usr);
@@ -2105,6 +2109,7 @@ static void emit_split_files(CXTranslationUnit tu,
 // records only functions that will actually be used.
 static std::vector<std::string> header_split_candidates(
         CXTranslationUnit tu,
+        const std::string& main_file,
         const std::string& output_dir,
         const std::vector<std::string>& extra_flags,
         bool verbose,
@@ -2119,10 +2124,23 @@ static std::vector<std::string> header_split_candidates(
     const auto inc_dirs = unit_include_dirs(extra_flags);
     const std::string include_root = split_include_root(output_dir);
 
+    // How many times each file was pulled in. A file with no include guard that is read
+    // repeatedly is one half of a header/footer or push/pop pair; one read exactly once is
+    // an implementation include, which is a perfectly ordinary thing to split.
+    std::map<std::string, int> inclusion_count;
+    for (const auto& inc_path : includes)
+        ++inclusion_count[inc_path];
+
     std::set<std::string> seen;
     for (const auto& inc_path : includes) {
         if (!seen.insert(inc_path).second) continue;
-        if (!is_header_file(inc_path)) continue;
+        // clang_getInclusions() reports the file being compiled among its own inclusions.
+        if (inc_path == main_file) continue;
+        // Deliberately not filtered by extension: what makes a file a header here is that
+        // the translation unit included it, which is exactly what clang_getInclusions()
+        // reports. An implementation include -- .ipp, .inc, .inl, .tcc -- is as splittable
+        // as anything else, and Boost.Filesystem puts a whole translation unit's worth of
+        // code in one.
         if (is_stdlib_header(inc_path)) continue;
         if (g_split_headers.find(inc_path) != g_split_headers.end()) continue;
 
@@ -2138,17 +2156,20 @@ static std::vector<std::string> header_split_candidates(
         }
         if (fs::exists(manifest) && !stale) continue;
 
-        // One half of a header/footer or push/pop pair carries no include guard and is not
-        // meant to stand alone; rewriting half a pair is never correct.
+        // A file with no include guard read more than once is one half of a pair, and
+        // rewriting half a pair is never correct. Read exactly once it is an implementation
+        // include, which has no guard for the ordinary reason that it does not need one.
         const std::string src = read_file(inc_path);
-        if (src.empty() || !header_has_include_guard(src)) {
+        if (src.empty() ||
+            (!header_has_include_guard(src) && inclusion_count[inc_path] > 1)) {
             if (verbose)
-                out << "Skipping " << inc_path << ": no include guard, so it is one half of"
-                       " a pair and is not meant to be included on its own\n";
+                out << "Skipping " << inc_path << ": no include guard and included "
+                    << inclusion_count[inc_path] << " times, so it is one half of a pair"
+                       " and is not meant to be included on its own\n";
             const std::string unit_dir =
                 (fs::path(include_root) / fs::path(rel).parent_path()).string();
             write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
-                                          inc_path, "no include guard");
+                                          inc_path, "no include guard, included repeatedly");
             continue;
         }
         candidates.push_back(inc_path);
@@ -2164,6 +2185,11 @@ static SplitResult split_unit(CXTranslationUnit tu,
                               const std::string& source,
                               std::vector<FunctionInfo>& functions,
                               const std::set<std::string>& referenced,
+                              // Whether this unit is being split as an included file rather
+                              // than as the file being compiled. The caller knows; the file
+                              // name does not, and an implementation include is a header
+                              // here whatever it is called.
+                              bool input_is_header,
                               const std::string& output_dir,
                               const std::vector<std::string>& all_flags,
                               const std::vector<std::string>& extra_flags,
@@ -2174,7 +2200,6 @@ static SplitResult split_unit(CXTranslationUnit tu,
     SplitResult result;
     result.success = false;
 
-    const bool input_is_header = is_header_file(abs_path);
     const std::string preamble_filename = input_is_header
         ? fs::path(abs_path).filename().string()
         : fs::path(abs_path).stem().string() + "_preamble.h";
@@ -2190,13 +2215,20 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
-    prepare_functions(functions, source, referenced, is_header_file(abs_path));
+    prepare_functions(functions, source, referenced, input_is_header);
     dump_keep_decisions(functions);
 
-    if (functions.empty()) {
+    // A translation unit with nothing of its own to split still needs its preamble on disk:
+    // the pieces split out of its headers include it to compile in the context the header
+    // was seen in, and a unit whose whole body arrives through an included file has no
+    // functions of its own at all.
+    const bool nothing_of_its_own = functions.empty();
+    if (nothing_of_its_own) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
-        result.success = true;
-        return result;
+        if (input_is_header) {
+            result.success = true;
+            return result;
+        }
     }
 
     if (!claim_output_path(preamble_path, abs_path))
@@ -2223,6 +2255,11 @@ static SplitResult split_unit(CXTranslationUnit tu,
         if (verbose) out << "Generated preamble: " << preamble_path << " (updated)\n";
     } else {
         if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
+    }
+
+    if (nothing_of_its_own) {
+        result.success = true;
+        return result;
     }
 
     emit_split_files(tu, functions, input_path, abs_path, unit_dir,
@@ -2271,7 +2308,7 @@ static void resolve_header_deps(CXTranslationUnit tu,
             continue;
         }
 
-        SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, referenced, output_dir,
+        SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, referenced, true, output_dir,
                                         all_flags, extra_flags, context_preamble,
                                         parse_clean, verbose, out);
         if (!hdr_sr.success && verbose)
@@ -2856,7 +2893,8 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     // Deciding the header set first keeps the walk from recording functions nobody wants.
     const std::vector<std::string> candidates =
         input_is_header ? std::vector<std::string>()
-                        : header_split_candidates(tu, output_dir, extra_flags, verbose, out);
+                        : header_split_candidates(tu, abs_path, output_dir, extra_flags,
+                                                  verbose, out);
 
     std::set<std::string> wanted(candidates.begin(), candidates.end());
     wanted.insert(abs_path);
@@ -2875,7 +2913,8 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     std::set<std::string> referenced;
     collect_emitted(tu, abs_path, referenced);
 
-    result = split_unit(tu, abs_path, input_path, source, functions, referenced, output_dir,
+    result = split_unit(tu, abs_path, input_path, source, functions, referenced,
+                        input_is_header, output_dir,
                         all_flags, extra_flags, std::string(), parse_errors == 0,
                         verbose, out);
 
@@ -3005,7 +3044,8 @@ static SplitResult do_split(const std::string& input_path,
     // Deciding the header set first keeps the walk from recording functions nobody wants.
     const std::vector<std::string> candidates =
         input_is_header ? std::vector<std::string>()
-                        : header_split_candidates(tu, output_dir, extra_flags, verbose, out);
+                        : header_split_candidates(tu, abs_path, output_dir, extra_flags,
+                                                  verbose, out);
 
     std::set<std::string> wanted(candidates.begin(), candidates.end());
     wanted.insert(abs_path);
@@ -3024,7 +3064,8 @@ static SplitResult do_split(const std::string& input_path,
     std::set<std::string> referenced;
     collect_emitted(tu, abs_path, referenced);
 
-    result = split_unit(tu, abs_path, input_path, source, functions, referenced, output_dir,
+    result = split_unit(tu, abs_path, input_path, source, functions, referenced,
+                        input_is_header, output_dir,
                         all_flags, extra_flags, std::string(), parse_errors == 0,
                         verbose, out);
 
@@ -3148,9 +3189,12 @@ static int run_as_launcher(int argc, char* argv[]) {
         return run_command_quiet(cmd);
     }
 
-    if (sr.compilable_files.empty()) {
+    // A translation unit can have nothing of its own to split and still be worth splitting:
+    // when all of its code arrives through an included file, the pieces are that file's, and
+    // they are held in header_obj_files rather than compilable_files.
+    if (sr.compilable_files.empty() && sr.header_obj_files.empty()) {
         std::string cmd = build_passthrough_cmd();
-        if (verbose) std::cerr << "[cpp-splitter] no compilable files, passthrough: " << cmd << "\n";
+        if (verbose) std::cerr << "[cpp-splitter] nothing to split, passthrough: " << cmd << "\n";
         return run_command_quiet(cmd);
     }
 

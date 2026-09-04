@@ -105,8 +105,9 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   member_functions  members written out of line, and class templates kept in the header
 #   ctx_main          a header that only compiles in the context of its includer
 #   always_inline_main  an always-inline function split out of a header, and a call to it
+#   impl_include_main   a unit whose whole body arrives through an implementation include
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
-                always_inline_main)
+                always_inline_main impl_include_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -131,6 +132,6 @@ add_test(
 
 set_tests_properties(
   split.sample split.use_mylib split.static_specifier split.static_renames
-  split.member_functions split.ctx_main split.always_inline_main
+  split.member_functions split.ctx_main split.always_inline_main split.impl_include_main
   launcher.shared_inline_header
   PROPERTIES TIMEOUT 300)

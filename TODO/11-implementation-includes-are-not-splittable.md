@@ -9,6 +9,11 @@ list in `is_header_file()`, and the include-guard heuristic added for TODO 06. R
 first on its own changes nothing, which was measured rather than assumed -- see the
 implementation plan.
 
+**Status: implemented.** The `.ipp` is now recognised, split, and its pieces compiled.
+`libs/filesystem/src/utf8_codecvt_facet.cpp` no longer passes through untouched; it now
+fails on **TODO 10** instead, which both remaining translation units are blocked on. See
+"Outcome" at the end.
+
 ## Motivation
 
 An implementation include is a file that carries definitions and is included from exactly
@@ -174,3 +179,63 @@ them apart. That heuristic has to be sharpened before the extension check can go
   assertions used to check the split library end to end.
 - Regression fixture in `test/`, registered with `add_test`, covering a `.cpp` whose
   definitions all arrive through an included implementation file.
+
+## Outcome
+
+Implemented, and it took four changes rather than the two the plan expected -- the extra two
+only became visible once the first gates were open.
+
+- `header_split_candidates()` no longer filters by extension. Its input already came from
+  `clang_getInclusions()`, which is what "header" means here.
+- The include-guard rule is sharpened as planned: a file with no guard read **more than
+  once** is one half of a pair and skipped; read exactly once it is an implementation
+  include and is split. `clang_getInclusions()` reports repeats, so the count needs no extra
+  parsing. The four pair-halves on the Boost example -- `detail/header.hpp`,
+  `detail/footer.hpp`, `abi_suffix.hpp`, `iterator/detail/config_undef.hpp` -- are all still
+  skipped.
+- The file being compiled is excluded from its own candidate list, since
+  `clang_getInclusions()` reports it among its own inclusions.
+- `split_unit()` and `prepare_functions()` take `input_is_header` from the caller rather than
+  guessing from the file name. This is required, not cleanup: an implementation include is a
+  header here whatever it is called, and deciding otherwise sends its output to the wrong
+  directory and strips the `inline` its pieces need.
+
+Two further defects surfaced only once the file was actually reaching the splitter:
+
+- **The preamble was never written for a unit with no functions of its own.** Pieces split
+  out of a header include the translation unit's preamble for context (TODO 09), and a unit
+  whose whole body arrives through an include has nothing of its own, so the file the pieces
+  included did not exist: `fatal error: 'utf8_codecvt_facet_preamble.h' file not found`.
+  The preamble is now written whenever the unit is the one being compiled, whether or not it
+  has functions of its own.
+- **The reachability roots were restricted to the file being compiled.** With every
+  definition living in the `.ipp`, that left no roots at all, so nothing was reachable and
+  every function was kept in the header -- the file was split into zero compilable pieces.
+  A non-inline definition with external linkage is emitted by this translation unit whatever
+  file it was written in, so the restriction is gone.
+- The launcher also treated an empty `compilable_files` as nothing to do. When a unit's code
+  is all in an include, the pieces are the header's and live in `header_obj_files`, so both
+  are now checked.
+
+Verified:
+
+| check | before | after |
+|---|---|---|
+| `.ipp` recognised and split (Boost) | no | **yes** |
+| translation units passed through untouched | 1 | **0** |
+| pair-halves still skipped | 4 | **4** |
+| program linked against the split library | 9/9, 0 undefined | **9/9, 0 undefined** |
+| tests | 8 | **9** |
+
+`test/impl_include.ipp` with `test/impl_include_main.cpp` is the regression fixture: a
+translation unit with no definitions of its own, all of them arriving through an
+implementation include. It splits into three pieces, compiles, links and runs with no
+fallback.
+
+### Still blocked
+
+`utf8_codecvt_facet.cpp` does not yet produce split objects, so the Boost example stays at
+10 of 12. It now gets as far as `ld -r` and fails there on **TODO 10**: `do_in`, `do_out`
+and `do_length` are virtual overrides kept in the preamble, non-inline with external
+linkage, so every piece emits them. That is the same cause as `exception.cpp`, which means
+both remaining translation units are now blocked on TODO 10 alone.
