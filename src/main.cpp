@@ -86,6 +86,7 @@ struct FunctionInfo {
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
     bool is_specialization = false;   // explicit specialization: `template< > void f<T>()`
     bool is_virtual = false;          // virtual member function
+    bool is_ctor_or_dtor = false;     // constructor or destructor
     std::vector<std::string> conditionals;   // #if directives active at the definition
     bool defined_in_class = false;    // body written inside the class, not already out-of-line
     unsigned unnamed_ns_depth = 0;    // innermost consecutive unnamed namespaces around it
@@ -221,6 +222,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     info.file = cursor_filename;
     info.name = cx_to_string(clang_getCursorSpelling(cursor));
     info.is_template = (kind == CXCursor_FunctionTemplate);
+    info.is_ctor_or_dtor = (kind == CXCursor_Constructor || kind == CXCursor_Destructor);
     info.is_static = (clang_getCursorLinkage(cursor) == CXLinkage_Internal);
 
     // A definition already written out-of-line (`void C::f() { ... }`) needs no rewriting
@@ -950,6 +952,8 @@ static std::set<std::string> undefined_macros(const std::string& source) {
 // Fills in the derived fields on every function: whether its definition has to stay in the
 // header, and for class members the declaration left behind in the class plus the
 // out-of-line definition written into the split file.
+static bool is_header_file(const std::string& path);
+
 static void prepare_functions(std::vector<FunctionInfo>& functions,
                               const std::string& source) {
     const std::set<std::string> undeffed = undefined_macros(source);
@@ -980,8 +984,19 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         // functions with one name in two scopes and making every call ambiguous. Keeping
         // the definition in the preamble costs a copy per object, which internal linkage
         // makes harmless, and keeps the meaning of the code intact.
+        // A constructor or destructor is not one symbol but a family -- C1/C2/C3 and
+        // D0/D1/D2 -- and only the compiler decides which members of it to emit. Split out
+        // of a header the definition is `inline`, and `__attribute__((used))` pins exactly
+        // one variant: the piece emits the base-object constructor while every caller,
+        // which can no longer inline it, asks for the complete-object one, and the link
+        // fails on a symbol that `nm -C` reports as present because both variants demangle
+        // to the same text. Dropping `inline` would emit the whole family but make the
+        // definition strong, which collides as soon as two translation units include the
+        // header. So they stay put; construction is bound up with the class's fields
+        // anyway, and leaving it beside them costs little.
         if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
-            fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns) {
+            fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns ||
+            (fn.is_ctor_or_dtor && is_header_file(fn.file))) {
             fn.keep_in_header = true;
             continue;
         }
@@ -1485,7 +1500,11 @@ static std::string build_libclang_pch(const std::string& preamble_file,
 struct SplitResult {
     std::vector<std::string> compilable_files;
     std::string preamble_filename;
-    bool success;
+    // Must be initialised here. `SplitResult sr;` at block scope leaves a bare bool
+    // indeterminate, and both split drivers are reached through `if (!sr.success)`: when the
+    // stack happened to hold a non-zero byte, splitting was skipped entirely and the tool
+    // exited 0 having silently done nothing. It showed up as roughly one run in six.
+    bool success = false;
     std::vector<std::string> header_obj_dirs;
     std::vector<std::string> header_obj_files;
 };
@@ -2914,9 +2933,16 @@ static int run_as_launcher(int argc, char* argv[]) {
       auto actual_compiler = *pch_flags.begin();
       pch_flags = std::vector<std::string>(pch_flags.begin()+1, pch_flags.end());
       std::cout << "compiler_with_driver is: " << compiler << " " << actual_compiler<< std::endl;
+      pch_flags.insert(pch_flags.begin(),
+                       {"-I" + split_include_root(split_dir),
+                        "-I" + fs::absolute(input_file).parent_path().string()});
       build_pch(sr.preamble_filename, actual_compiler, "", pch_flags, split_dir, verbose, std::cerr);
     } else {
-      build_pch(sr.preamble_filename, compiler, "", other_flags, split_dir, verbose, std::cerr);
+      auto pch_flags = other_flags;
+      pch_flags.insert(pch_flags.begin(),
+                       {"-I" + split_include_root(split_dir),
+                        "-I" + fs::absolute(input_file).parent_path().string()});
+      build_pch(sr.preamble_filename, compiler, "", pch_flags, split_dir, verbose, std::cerr);
     }
 
     std::vector<std::string> obj_files;
@@ -3219,7 +3245,12 @@ int main(int argc, char* argv[]) {
     if (do_compile) {
         std::cout << "\n--- Compiling split files ---\n\n";
 
+        // The preamble is the source's own text, so it carries the source's includes: it
+        // needs the mirrored header tree and the source's directory just as the split
+        // pieces do, or a quote include of a sibling header cannot be found.
         std::vector<std::string> pch_flags = {"-std=c++17"};
+        pch_flags.push_back("-I" + split_include_root(output_dir));
+        pch_flags.push_back("-I" + fs::absolute(input_path).parent_path().string());
         for (const auto& f : extra_flags) pch_flags.push_back(f);
         bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, "", pch_flags, output_dir, true, std::cout);
         if (pch_ok) std::cout << "\n";

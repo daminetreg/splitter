@@ -84,3 +84,50 @@ add_executable(cpp-splitter src/main.cpp)
 target_include_directories(cpp-splitter PRIVATE "${clang_toolchain_root}/include")
 target_link_libraries(cpp-splitter Boost::headers "${clang_toolchain_root}/lib/libclang.so")
 set_target_properties(cpp-splitter PROPERTIES BUILD_RPATH "${clang_toolchain_root}/lib")
+# --- Tests ----------------------------------------------------------------------------
+#
+# Each test splits a fixture in test/, compiles the pieces, links them and runs the result.
+# The fixtures are written to return 0 only when the split code computes what the original
+# would have, so a wrong split shows up as a failing program rather than as output nobody
+# reads. The drivers additionally fail the test if cpp-splitter fell back to compiling the
+# source whole, which would otherwise produce a passing program that tested nothing.
+
+enable_testing()
+
+set(cpp_splitter_test_dir "${CMAKE_CURRENT_SOURCE_DIR}/test")
+set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
+
+# Fixtures split, compiled and linked on their own through the command line interface.
+#   sample            free functions, class methods and namespaces
+#   use_mylib         a source whose sibling header is split alongside it
+#   static_specifier  internal linkage without the `static` keyword, next to `static_cast`
+#   static_renames    a renamed internal-linkage function used from namespace scope
+#   member_functions  members written out of line, and class templates kept in the header
+#   ctx_main          a header that only compiles in the context of its includer
+foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main)
+  add_test(
+    NAME split.${fixture}
+    COMMAND ${CMAKE_COMMAND}
+            -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+            -DSOURCE=${cpp_splitter_test_dir}/${fixture}.cpp
+            -DWORKDIR=${cpp_splitter_test_output}/${fixture}
+            -DCXX=${CMAKE_CXX_COMPILER}
+            -P ${cpp_splitter_test_dir}/cmake/RunSplitTest.cmake)
+endforeach()
+
+# One header split separately by two translation units: both objects carry a copy of its
+# functions, so the final link has to merge them instead of rejecting them as duplicates.
+add_test(
+  NAME launcher.shared_inline_header
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          "-DSOURCES=${cpp_splitter_test_dir}/inline_a.cpp;${cpp_splitter_test_dir}/inline_b.cpp"
+          -DINCLUDE_DIR=${cpp_splitter_test_dir}
+          -DWORKDIR=${cpp_splitter_test_output}/shared_inline_header
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunLauncherTest.cmake)
+
+set_tests_properties(
+  split.sample split.use_mylib split.static_specifier split.static_renames
+  split.member_functions split.ctx_main launcher.shared_inline_header
+  PROPERTIES TIMEOUT 300)
