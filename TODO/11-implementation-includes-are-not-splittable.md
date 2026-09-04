@@ -1,21 +1,35 @@
 # 11 — A translation unit whose code arrives through a `.ipp` is not split at all
 
-**Severity:** Medium. Costs a translation unit whenever a project keeps implementations in
-an include file with an extension the splitter does not recognise, which is a common Boost
-and header-only-library idiom.
+**Severity:** Medium. Costs a translation unit whenever a project keeps its implementations
+in an include file rather than in the `.cpp`, which is a common Boost and
+header-only-library idiom.
+
+Two independent rules reject such a file, and they have to be fixed together: the extension
+list in `is_header_file()`, and the include-guard heuristic added for TODO 06. Removing the
+first on its own changes nothing, which was measured rather than assumed -- see the
+implementation plan.
 
 ## Motivation
 
-`is_header_file()` decides what counts as a header:
+An implementation include is a file that carries definitions and is included from exactly
+one place, so it is written without an include guard and given an extension that marks it as
+not-a-header: `.ipp`, `.inc`, `.inl`, `.tcc`. Both of those properties currently disqualify
+it from being split, for different reasons.
+
+The first is `is_header_file()`, which decides what counts as a header by extension:
 
 ```cpp
 static const char* exts[] = {".h", ".hpp", ".hxx", ".H", ".h++", ".hh"};
 ```
 
-`.ipp` is not in that list, and neither are the other conventional implementation-include
-extensions (`.inc`, `.inl`, `.tcc`, `.ixx`). Two things follow. The file is never treated as
-a splittable header of its own, and -- because `header_split_candidates()` filters on the
-same predicate -- it is never even considered as a candidate.
+`.ipp` is not in that list, so `header_split_candidates()` -- which filters on the same
+predicate -- never considers the file.
+
+The second is the include-guard heuristic from TODO 06: a file with no include guard is
+taken to be one half of a header/footer pair and skipped, because rewriting half a pair is
+never correct. An implementation include has no guard either, and the rule cannot tell the
+two apart. This gate sits behind the first, so it only becomes visible once the extension
+filter is removed.
 
 `libs/filesystem/src/utf8_codecvt_facet.cpp` is nothing but a wrapper around one:
 
@@ -69,7 +83,18 @@ No function definitions found in b.cpp
 [cpp-splitter] no compilable files, passthrough: ...
 ```
 
-`b.o.split` contains no pieces at all. Note the contrast: if `b.cpp` also defines a function
+`b.o.split` contains no pieces at all. Delete the `is_header_file(inc_path)` filter from
+`header_split_candidates()` and rebuild, and the same command reports the second gate
+instead:
+
+```
+Skipping impl.ipp: no include guard, so it is one half of a pair and is not meant to be
+included on its own
+Skipping b.cpp: no include guard, ...
+```
+
+still with no pieces produced -- and with the translation unit now nominating its own source
+file, because `clang_getInclusions()` lists the main file among its inclusions. Note the contrast: if `b.cpp` also defines a function
 of its own, that one function is split and the three in the `.ipp` are silently left in the
 preamble -- so the shortfall is not limited to the all-or-nothing case, it just becomes
 invisible.
@@ -77,9 +102,13 @@ invisible.
 ## Description
 
 The harvest itself is not the problem. Functions defined in a `.ipp` are visited like any
-other, because the visitor works from the parent translation unit's AST. What stops them
-being split is `header_split_candidates()` rejecting the file, so its functions are never in
-the wanted set and their text is copied verbatim into the preamble.
+other, because the visitor works from the parent translation unit's AST and does not care
+what the file is called. What stops them being split is `header_split_candidates()`
+rejecting the file, so its functions never enter the wanted set and their text is copied
+verbatim into the preamble instead.
+
+That rejection happens twice over, once per rule above, which is why the fix is not a
+one-line change to an extension list.
 
 ### Implementation plan
 
@@ -138,7 +167,7 @@ them apart. That heuristic has to be sharpened before the extension check can go
   the sharpened rule must not readmit what TODO 06 was written to exclude.
 - The translation unit's own source file never appears in its list of headers to split.
 - `libs/filesystem/src/utf8_codecvt_facet.cpp` produces split objects on the Boost example,
-  so no translation unit is left unsplit for want of a recognised extension.
+  taking it from 10 of 12 translation units splitting to 11 (12 once TODO 10 is fixed too).
 - The variant where `b.cpp` defines its own function as well splits both that function and
   the three from the `.ipp`, rather than only the former.
 - A program linked against the resulting library still passes the nine filesystem
