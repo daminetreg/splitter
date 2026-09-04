@@ -9,9 +9,9 @@ namespace {
 
 // Internal linkage comes from the anonymous namespace, so libclang reports this as
 // static even though there is no `static` keyword to remove. The `static_cast` below
-// used to be rewritten to `_cast`. Deliberately not `inline`: an inline definition is
-// split out without a symbol being emitted, which is a separate defect (see TODO/07).
-const char* find_sep(const char* p, std::size_t n) {
+// used to be rewritten to `_cast`. `inline` here also checks TODO/07: a definition taken
+// out of a .cpp must lose `inline`, or no symbol is emitted and the link fails.
+inline const char* find_sep(const char* p, std::size_t n) {
     return static_cast<const char*>(std::memchr(p, '/', n));
 }
 

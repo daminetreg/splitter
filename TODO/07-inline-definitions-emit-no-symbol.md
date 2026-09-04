@@ -6,6 +6,8 @@ so the failure surfaces late — at final link, in whatever consumes the library
 **Found while implementing TODO 02**, by a regression fixture that split cleanly and then
 failed to link.
 
+**Status: implemented and verified.** See "Outcome" at the end of this file.
+
 ## Motivation
 
 A function that is `inline` in the original source keeps its `inline` keyword when its
@@ -94,3 +96,42 @@ Option A is simpler and matches what the preamble already declares. Whichever is
 - A split header included by two translation units produces exactly one definition of
   each extracted inline function across the final link — no duplicate symbols.
 - `DOCS.md`'s description of inline handling matches the implemented design.
+
+## Outcome
+
+Neither option alone works: **Option A is right for a `.cpp`, Option B for a header**, and
+which one applies is decided by where the definition came from.
+
+- A definition taken out of a `.cpp` is the only one that will ever exist, so `inline` is
+  stripped (`strip_decl_specifier(body, "inline")`) and it becomes an ordinary strong
+  symbol, matching the declaration the preamble already emits.
+- A definition taken out of a *header* cannot do that. Each translation unit including the
+  header gets its own split directory and its own object, so several objects carry the same
+  function; Option A would turn that into duplicate strong symbols. `inline` therefore
+  stays -- vague linkage is exactly what lets the linker merge the copies -- and the symbol
+  is instead forced into existence with `__attribute__((used))`, emitted just before the
+  definition so the `#line` mapping is unaffected.
+- `-fkeep-inline-functions` is gone from both the launcher and CLI compile commands. It is
+  a GCC option; clang parses and ignores it (`warning: optimization flag
+  '-fkeep-inline-functions' is not supported`), so it never forced anything here.
+- `DOCS.md` gained a "Linkage of split definitions" entry and no longer claims
+  `-fkeep-inline-functions` does the work.
+
+Verified:
+
+| check | result |
+|---|---|
+| `inline` restored on `find_sep` in `test/static_specifier.cpp` | splits, compiles, links, runs (exit 0) |
+| symbol for that `.cpp`-split function | `T` -- strong, `inline` stripped |
+| symbol for a header-split function | `W` -- weak, vague linkage preserved |
+| header split into two translation units, both objects linked | links with no duplicate symbol, runs (exit 0) |
+| split objects carrying no definition at all | 0 of 14 |
+| `-fkeep-inline-functions` in any compile command | none |
+
+`test/inline_header.hpp` with `test/inline_a.cpp` and `test/inline_b.cpp` is the two
+translation unit case: both objects define `demo::weigh` and `demo::span` as weak symbols,
+and linking them together yields exactly one definition of each.
+
+On the Boost `filesystem` build the translation-unit outcome is unchanged -- the four that
+fail still fail, on missing declaration context in split headers (**TODO 06**) -- because
+they fall back before reaching a link. The `-fkeep-inline-functions` warnings are gone.

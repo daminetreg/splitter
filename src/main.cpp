@@ -1920,12 +1920,30 @@ static void emit_split_files(CXTranslationUnit tu,
             // text must then be left exactly as it is.
             body = strip_decl_specifier(body, "static");
         }
+        // Linkage of the split-out definition.
+        //
+        // A definition taken out of a .cpp is the only one there will ever be, so `inline`
+        // is dropped: an inline function that its own translation unit never odr-uses is
+        // not emitted at all, and the declaration in the preamble promises an ordinary
+        // symbol. Leaving it produced objects with dangling references.
+        //
+        // A definition taken out of a *header* is different: the header can be included by
+        // many translation units, each with its own split directory, so several objects
+        // will carry the same function. `inline` is exactly what makes that legal -- vague
+        // linkage lets the linker merge the copies -- so it stays, and instead the symbol
+        // is forced into existence. `-fkeep-inline-functions` used to be relied on for
+        // that; it is a GCC option that clang parses and ignores, so it never worked here.
+        if (!input_is_header)
+            body = strip_decl_specifier(body, "inline");
+
         body = apply_static_renames(body, static_renames);
 
         std::string line_directive = "#line " + std::to_string(fn.start_line) +
                                      " \"" + abs_path + "\"\n";
 
         body = line_directive + body;
+        if (input_is_header)
+            body = "__attribute__((used))\n" + body;
 
         if (!fn.scope_chain.empty()) {
             content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
@@ -2505,7 +2523,7 @@ static int run_as_launcher(int argc, char* argv[]) {
             std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
             if (!fs::exists(hcpp)) continue;
             if (!fs::exists(hobj) || needs_recompile(hcpp, hobj, "")) {
-                std::string cmd = shell_quote(compiler) + " -fkeep-inline-functions";
+                std::string cmd = shell_quote(compiler);
                 for (const auto& f : other_flags)
                     cmd += " " + shell_quote(f);
                 for (const auto& hdr_dir : sr.header_obj_dirs)
@@ -2792,7 +2810,7 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                std::string cmd = cxx_compiler + " -std=c++17 -fkeep-inline-functions -c";
+                std::string cmd = cxx_compiler + " -std=c++17 -c";
                 for (const auto& hdr_dir : sr.header_obj_dirs)
                     cmd += " -I" + hdr_dir;
                 cmd += " -o " + hobj + " " + hcpp;
