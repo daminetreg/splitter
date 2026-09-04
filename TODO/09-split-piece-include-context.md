@@ -6,6 +6,8 @@ falls back on the Boost example.
 **Found while implementing Step 2 of TODO 06**, which fixed the same problem on the
 discovery side and made this the remaining half.
 
+**Status: implemented and verified.** See "Outcome" at the end of this file.
+
 ## Motivation
 
 A split piece extracted from a header includes exactly one thing — that header's rewritten
@@ -82,3 +84,69 @@ established is absent.
 - Regression fixture: a header that requires a type completed by an earlier include, split
   and compiled through its includer — must compile.
 - No duplicate-symbol errors when two translation units both split the same header.
+
+## Outcome
+
+Implemented in `src/main.cpp`. The header case needed three fixes, not one -- the include
+directive was only the visible third of it.
+
+1. **Context preamble.** A split piece taken from a header now includes the translation
+   unit's preamble before the header itself:
+
+   ```cpp
+   #include "portability_preamble.h"   // replays the includer's prefix
+   #include "path.hpp"
+   ```
+
+   `split_unit()` and `emit_split_files()` take a `context_preamble`, empty for the
+   translation unit itself and set by `resolve_header_deps()` for each header.
+
+2. **Include order.** The split tree was appended *after* the project's own `-I` flags, so
+   an original header won the lookup over its rewritten copy -- bringing back the very
+   definitions that had been moved into split pieces. Adding the context preamble made this
+   visible immediately: 1008 `redefinition of` errors and every translation unit falling
+   back. The split directory and its mirrored include root now precede the project flags.
+   (The TODO 04 write-up asserted this ordering was already the case. It was not.)
+
+3. **The source's own directory is an implicit include directory.** A quote include
+   resolves relative to the including file first. The preamble carries the source's quote
+   includes but no longer sits in the source's directory, so `#include "ctx_base.hpp"`
+   could not resolve; and a header sitting beside its source fell to the `_abs` hash
+   fallback in `header_mirror_relpath()`, leaving its rewritten copy unreachable at the path
+   the source spells. `unit_include_dirs()` now appends the unit's source directory, and the
+   compile commands add `-I<source dir>` after the split tree.
+
+A fourth, smaller fix came out of the same run: a free function split out of a header kept
+its default arguments while the generated declaration also carried them, which is
+`redefinition of default argument`. `prepare_functions()` now strips default arguments from
+the definition of non-members as it already did for members. That is what cleared
+`boost/atomic/detail/futex.hpp` and let `lock_pool.cpp` link.
+
+Verified on the Boost `filesystem` build:
+
+| check | before | after |
+|---|---|---|
+| total `error:` lines | 1110 | **183** |
+| `no member named` | 396 | **20** |
+| `constexpr variable` | 80 | **48** |
+| `non-constexpr declaration of` | 68 | **0** |
+| header-dependency compile failures | 3 | **0** |
+| translation units linking from split objects | 2 | **3** |
+| translation units falling back | 9 | **8** |
+| wall time | 26.5s | **13.2s** |
+
+`test/ctx_main.cpp` with `ctx_base.hpp` and `ctx_user.hpp` is the fixture the plan asked
+for: `ctx_user.hpp` deliberately does not include the header that completes the type it
+uses, so it is only valid in its includer's context. It splits, compiles, links and runs
+with no fallback. The other three fixtures also run with no fallback, the two translation
+unit header test still links without duplicate symbols, and an incremental rebuild
+reproduces the same 5134 split files with no differences.
+
+### Not fully met
+
+Two acceptance criteria are only partly met: `no member named` reached 20 rather than 0,
+and `constexpr variable` 48 rather than 0. What remains is no longer include context -- the
+residue is 48 `constexpr variable ... must be initialized by a constant expression`, 20
+`no member named`, and 4 `only virtual member functions can be marked 'override'`, which is
+a gap in the specifier stripping from TODO 05. Eight of twelve translation units still fall
+back, now on their own split pieces rather than on header dependencies.

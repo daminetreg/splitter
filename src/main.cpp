@@ -844,6 +844,16 @@ static void prepare_functions(std::vector<FunctionInfo>& functions) {
         }
 
         if (!is_member) {
+            // The declaration left behind carries the default arguments, so the definition
+            // must not repeat them -- a default argument may be given only once per scope.
+            std::string decl = fn.body.substr(0, decl_end);
+            const std::string db0 = blank_code_noise(decl);
+            const size_t name0 = find_declarator(db0, fn.name);
+            if (name0 != std::string::npos) {
+                const size_t open0 = db0.find('(', name0 + fn.name.size());
+                if (open0 != std::string::npos && strip_default_args(decl, open0))
+                    fn.outlined_body = decl + fn.body.substr(decl_end);
+            }
             fn.keep_in_header = false;
             continue;
         }
@@ -1549,6 +1559,24 @@ static std::vector<std::string> include_dirs_from_flags(const std::vector<std::s
     return dirs;
 }
 
+// Directory of the source being split. A quote include resolves relative to the including
+// file first, so this behaves as an implicit include directory: without it a header sitting
+// beside its source falls to the _abs fallback below, and its rewritten copy is then
+// unreachable at the path the source spells -- the original wins the lookup and its
+// definitions collide with the split pieces that also define them.
+static std::string g_unit_source_dir;
+
+static std::vector<std::string> unit_include_dirs(const std::vector<std::string>& flags) {
+    std::vector<std::string> dirs = include_dirs_from_flags(flags);
+    if (!g_unit_source_dir.empty()) {
+        if (std::find(dirs.begin(), dirs.end(), g_unit_source_dir) == dirs.end())
+            dirs.push_back(g_unit_source_dir);
+        std::sort(dirs.begin(), dirs.end(),
+                  [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+    }
+    return dirs;
+}
+
 static std::string path_hash(const std::string& s) {
     size_t h = std::hash<std::string>{}(s);
     char buf[17];
@@ -1682,6 +1710,7 @@ static void emit_split_files(CXTranslationUnit tu,
                              const std::string& preamble_path,
                              const std::vector<std::string>& all_flags,
                              const std::vector<std::string>& extra_flags,
+                             const std::string& context_preamble,
                              bool input_is_header,
                              bool parse_clean,
                              bool verbose,
@@ -1703,7 +1732,7 @@ static std::vector<std::string> header_split_candidates(
     std::vector<std::string> includes;
     clang_getInclusions(tu, inclusion_visitor, &includes);
 
-    const auto inc_dirs = include_dirs_from_flags(extra_flags);
+    const auto inc_dirs = unit_include_dirs(extra_flags);
     const std::string include_root = split_include_root(output_dir);
 
     std::set<std::string> seen;
@@ -1753,6 +1782,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
                               const std::string& output_dir,
                               const std::vector<std::string>& all_flags,
                               const std::vector<std::string>& extra_flags,
+                              const std::string& context_preamble,
                               bool parse_clean,
                               bool verbose,
                               std::ostream& out) {
@@ -1767,7 +1797,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
     std::string unit_dir = output_dir;
     if (input_is_header) {
         const std::string rel =
-            header_mirror_relpath(abs_path, include_dirs_from_flags(extra_flags));
+            header_mirror_relpath(abs_path, unit_include_dirs(extra_flags));
         unit_dir = (fs::path(split_include_root(output_dir)) /
                     fs::path(rel).parent_path()).string();
     }
@@ -1812,7 +1842,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
     emit_split_files(tu, functions, input_path, abs_path, unit_dir,
                      split_include_root(output_dir), unit_tag,
                      preamble_filename, preamble_path, all_flags, extra_flags,
-                     input_is_header, parse_clean, verbose, out, result);
+                     context_preamble, input_is_header, parse_clean, verbose, out, result);
     result.success = true;
     return result;
 }
@@ -1823,6 +1853,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
 static void resolve_header_deps(CXTranslationUnit tu,
                                 const HarvestMap& harvest,
                                 const std::vector<std::string>& candidates,
+                                const std::string& context_preamble,
                                 SplitResult& result,
                                 const std::string& output_dir,
                                 const std::vector<std::string>& all_flags,
@@ -1844,7 +1875,7 @@ static void resolve_header_deps(CXTranslationUnit tu,
             // Nothing to split, but record the decision so it is not reconsidered on every
             // invocation.
             const std::string rel =
-                header_mirror_relpath(inc_path, include_dirs_from_flags(extra_flags));
+                header_mirror_relpath(inc_path, unit_include_dirs(extra_flags));
             const std::string unit_dir =
                 (fs::path(split_include_root(output_dir)) / fs::path(rel).parent_path()).string();
             if (verbose) out << "No function definitions found in " << inc_path << "\n";
@@ -1854,7 +1885,8 @@ static void resolve_header_deps(CXTranslationUnit tu,
         }
 
         SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, output_dir,
-                                        all_flags, extra_flags, parse_clean, verbose, out);
+                                        all_flags, extra_flags, context_preamble,
+                                        parse_clean, verbose, out);
         if (!hdr_sr.success && verbose)
             out << "[auto-split] warning: failed to split " << inc_path << "\n";
     }
@@ -2096,6 +2128,7 @@ static void emit_split_files(CXTranslationUnit tu,
                              const std::string& preamble_path,
                              const std::vector<std::string>& all_flags,
                              const std::vector<std::string>& extra_flags,
+                             const std::string& context_preamble,
                              bool input_is_header,
                              bool parse_clean,
                              bool verbose,
@@ -2129,6 +2162,13 @@ static void emit_split_files(CXTranslationUnit tu,
         if (should_keep_in_header(fn))
             content << "// Note: template - kept in preamble header for compilation\n";
         content << "// ---\n\n";
+        // A header is not necessarily self-contained: it is written to be included at a
+        // particular point, after earlier includes have completed the types it uses.
+        // Including its rewritten copy on its own reimposes a self-containedness
+        // requirement the original never had. Including the translation unit's preamble
+        // first replays the include prefix the header was actually seen behind.
+        if (!context_preamble.empty())
+            content << "#include \"" << context_preamble << "\"\n";
         content << "#include \"" << preamble_filename << "\"\n\n";
 
         // Members are emitted in their out-of-line form; everything else as written.
@@ -2282,7 +2322,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     // translation unit itself keeps the root of the split directory.
     std::string unit_dir = output_dir;
     if (input_is_header) {
-        std::string rel = header_mirror_relpath(abs_path, include_dirs_from_flags(extra_flags));
+        std::string rel = header_mirror_relpath(abs_path, unit_include_dirs(extra_flags));
         unit_dir = (fs::path(split_include_root(output_dir)) /
                     fs::path(rel).parent_path()).string();
     }
@@ -2400,6 +2440,8 @@ static SplitResult do_split_with_cache(const std::string& input_path,
             << "; splitting anyway, and no stale output will be pruned\n";
     }
 
+    g_unit_source_dir = fs::absolute(abs_path).parent_path().lexically_normal().string();
+
     // One walk of this translation unit yields the inventory for the file itself and for
     // every header it should split, each seen in the context its includer establishes.
     // Deciding the header set first keeps the walk from recording functions nobody wants.
@@ -2422,11 +2464,16 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     }
 
     result = split_unit(tu, abs_path, input_path, source, functions, output_dir,
-                        all_flags, extra_flags, parse_errors == 0, verbose, out);
+                        all_flags, extra_flags, std::string(), parse_errors == 0,
+                        verbose, out);
 
-    if (!input_is_header)
-        resolve_header_deps(tu, harvest, candidates, result, output_dir, all_flags,
-                            extra_flags, parse_errors == 0, verbose, out);
+    if (!input_is_header) {
+        // Split pieces of this unit's headers include this preamble first, so they compile
+        // in the context the header was harvested in.
+        const std::string tu_preamble = fs::path(abs_path).stem().string() + "_preamble.h";
+        resolve_header_deps(tu, harvest, candidates, tu_preamble, result, output_dir,
+                            all_flags, extra_flags, parse_errors == 0, verbose, out);
+    }
 
     return result;
 }
@@ -2458,7 +2505,7 @@ static SplitResult do_split(const std::string& input_path,
     // translation unit itself keeps the root of the split directory.
     std::string unit_dir = output_dir;
     if (input_is_header) {
-        std::string rel = header_mirror_relpath(abs_path, include_dirs_from_flags(extra_flags));
+        std::string rel = header_mirror_relpath(abs_path, unit_include_dirs(extra_flags));
         unit_dir = (fs::path(split_include_root(output_dir)) /
                     fs::path(rel).parent_path()).string();
     }
@@ -2539,6 +2586,8 @@ static SplitResult do_split(const std::string& input_path,
             << "; splitting anyway, and no stale output will be pruned\n";
     }
 
+    g_unit_source_dir = fs::absolute(abs_path).parent_path().lexically_normal().string();
+
     // One walk of this translation unit yields the inventory for the file itself and for
     // every header it should split, each seen in the context its includer establishes.
     // Deciding the header set first keeps the walk from recording functions nobody wants.
@@ -2561,11 +2610,16 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     result = split_unit(tu, abs_path, input_path, source, functions, output_dir,
-                        all_flags, extra_flags, parse_errors == 0, verbose, out);
+                        all_flags, extra_flags, std::string(), parse_errors == 0,
+                        verbose, out);
 
-    if (!input_is_header)
-        resolve_header_deps(tu, harvest, candidates, result, output_dir, all_flags,
-                            extra_flags, parse_errors == 0, verbose, out);
+    if (!input_is_header) {
+        // Split pieces of this unit's headers include this preamble first, so they compile
+        // in the context the header was harvested in.
+        const std::string tu_preamble = fs::path(abs_path).stem().string() + "_preamble.h";
+        resolve_header_deps(tu, harvest, candidates, tu_preamble, result, output_dir,
+                            all_flags, extra_flags, parse_errors == 0, verbose, out);
+    }
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);
 
@@ -2714,13 +2768,23 @@ static int run_as_launcher(int argc, char* argv[]) {
 
         std::string cmd = shell_quote(compiler);
 
-        for (const auto& f : other_flags)
-            cmd += " " + shell_quote(f);
-
+        // The split tree has to precede the project's own include directories. Its
+        // rewritten headers are the ones whose definitions were moved into split files;
+        // if an original wins the lookup instead, its definitions come back and collide
+        // with the pieces that now also define them.
         cmd += " -I" + shell_quote(split_dir);
         cmd += " -I" + shell_quote(split_include_root(split_dir));
         for (const auto& hdr_dir : sr.header_obj_dirs)
             cmd += " -I" + shell_quote(hdr_dir);
+
+        // The preamble is the source's own text, so it carries the source's quote includes.
+        // It no longer sits in the source's directory, where those would have resolved, so
+        // that directory has to be on the include path -- after the split tree, so the
+        // rewritten headers still win.
+        cmd += " -I" + shell_quote(fs::absolute(input_file).parent_path().string());
+
+        for (const auto& f : other_flags)
+            cmd += " " + shell_quote(f);
 
         if (fi == 0 && (has_md || has_mmd)) {
             cmd += has_mmd ? " -MMD" : " -MD";
@@ -2769,10 +2833,16 @@ static int run_as_launcher(int argc, char* argv[]) {
             if (!fs::exists(hcpp)) continue;
             if (!fs::exists(hobj) || needs_recompile(hcpp, hobj, "")) {
                 std::string cmd = shell_quote(compiler);
-                for (const auto& f : other_flags)
-                    cmd += " " + shell_quote(f);
+                // The unit's own preamble lives at the root of the split directory, and the
+                // header pieces include it for context. The split tree precedes the
+                // project's own include directories for the reason above.
+                cmd += " -I" + shell_quote(split_dir);
+                cmd += " -I" + shell_quote(split_include_root(split_dir));
                 for (const auto& hdr_dir : sr.header_obj_dirs)
                     cmd += " -I" + shell_quote(hdr_dir);
+                cmd += " -I" + shell_quote(fs::absolute(input_file).parent_path().string());
+                for (const auto& f : other_flags)
+                    cmd += " " + shell_quote(f);
                 cmd += " -c -o " + shell_quote(hobj) + " " + shell_quote(hcpp);
                 hdr_compile_jobs.push_back({cmd, hcpp, hobj});
             }
@@ -3004,6 +3074,7 @@ int main(int argc, char* argv[]) {
                               " -I" + split_include_root(output_dir);
             for (const auto& hdr_dir : sr.header_obj_dirs)
                 cmd += " -I" + hdr_dir;
+            cmd += " -I" + fs::absolute(input_path).parent_path().string();
             cmd += " -o " + obj_file +
                    " " + cpp_file;
 
@@ -3055,9 +3126,11 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                std::string cmd = cxx_compiler + " -std=c++17 -c";
+                std::string cmd = cxx_compiler + " -std=c++17 -c -I" + output_dir +
+                                  " -I" + split_include_root(output_dir);
                 for (const auto& hdr_dir : sr.header_obj_dirs)
                     cmd += " -I" + hdr_dir;
+                cmd += " -I" + fs::absolute(input_path).parent_path().string();
                 cmd += " -o " + hobj + " " + hcpp;
                 for (const auto& f : extra_flags)
                     cmd += " " + f;
