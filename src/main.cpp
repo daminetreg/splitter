@@ -175,35 +175,112 @@ static std::string sanitize_filename(const std::string& name) {
 // inclusion context its includer establishes, rather than from a standalone re-parse.
 using HarvestMap = std::map<std::string, std::vector<FunctionInfo>>;
 
-// Unified symbol names of every function this translation unit actually refers to.
+// The functions this translation unit will actually emit.
 //
 // A header declares far more than any one translation unit uses, and a definition nobody
 // uses is never emitted -- that is what `inline` is for. Splitting forces each definition
-// into an object of its own, which breaks that: a header function the build never wanted
-// becomes real code, and if its body calls something this translation unit does not define
-// the reference has nothing to bind to. Boost.Filesystem hides a block of inline forwarders
-// behind `#if !defined(BOOST_FILESYSTEM_SOURCE)` so the library never compiles them, and
-// from inside the library they are indistinguishable from ordinary functions defined
-// elsewhere -- there is no property of the declaration to test.
+// into an object of its own with __attribute__((used)), which breaks that: a body the build
+// never wanted becomes real code, and its calls to things this translation unit does not
+// define turn into references nothing resolves. Boost.Filesystem hides a block of inline
+// forwarders behind `#if !defined(BOOST_FILESYSTEM_SOURCE)` so the library never compiles
+// them, and from inside the library they look exactly like ordinary functions defined in
+// another object -- there is no property of the declaration to test for.
 //
-// So the rule is the compiler's own: split only what this translation unit refers to.
-// Everything else stays in the header, which costs nothing because it was never going to
-// be emitted here anyway.
-static void collect_referenced(CXTranslationUnit tu, std::set<std::string>& out) {
-    clang_visitChildren(clang_getTranslationUnitCursor(tu),
-        [](CXCursor node, CXCursor, CXClientData payload) -> CXChildVisitResult {
-            CXCursorKind k = clang_getCursorKind(node);
-            if (k == CXCursor_CallExpr || k == CXCursor_DeclRefExpr ||
-                k == CXCursor_MemberRefExpr) {
-                CXCursor ref = clang_getCursorReferenced(node);
-                if (!clang_Cursor_isNull(ref)) {
-                    std::string usr = cx_to_string(clang_getCursorUSR(ref));
-                    if (!usr.empty()) static_cast<std::set<std::string>*>(payload)->insert(usr);
-                }
-            }
-            return CXChildVisit_Recurse;
-        },
-        &out);
+// Counting every reference in the translation unit is not enough: a reference inside a body
+// that is itself never emitted does not make its target needed. What is needed is what the
+// compiler would emit -- start from the definitions it has to emit whatever else happens,
+// and follow calls from there.
+//
+// The two ways of getting this wrong are not symmetric. Missing a root leaves a function in
+// the header that could have been split: less splitting, nothing broken. Treating an
+// unneeded function as needed is what produces the dangling references above. So the roots
+// are kept deliberately narrow.
+struct EmitGraph {
+    std::string main_file;
+    std::map<std::string, std::set<std::string>> calls;  // definition -> what it refers to
+    std::set<std::string> roots;
+    std::vector<std::string> stack;                      // enclosing definitions
+};
+
+static CXChildVisitResult record_reference(CXCursor node, CXCursor, CXClientData payload) {
+    auto* g = static_cast<EmitGraph*>(payload);
+    const CXCursorKind k = clang_getCursorKind(node);
+    if (k == CXCursor_CallExpr || k == CXCursor_DeclRefExpr || k == CXCursor_MemberRefExpr) {
+        CXCursor ref = clang_getCursorReferenced(node);
+        if (!clang_Cursor_isNull(ref)) {
+            std::string target = cx_to_string(clang_getCursorUSR(ref));
+            if (!target.empty() && !g->stack.empty())
+                g->calls[g->stack.back()].insert(target);
+        }
+    }
+    return CXChildVisit_Recurse;
+}
+
+static CXChildVisitResult build_emit_graph(CXCursor node, CXCursor, CXClientData payload) {
+    auto* g = static_cast<EmitGraph*>(payload);
+    const CXCursorKind k = clang_getCursorKind(node);
+
+    const bool is_function =
+        k == CXCursor_FunctionDecl || k == CXCursor_CXXMethod ||
+        k == CXCursor_Constructor || k == CXCursor_Destructor ||
+        k == CXCursor_FunctionTemplate || k == CXCursor_ConversionFunction;
+
+    if (is_function && clang_isCursorDefinition(node)) {
+        const std::string usr = cx_to_string(clang_getCursorUSR(node));
+        if (usr.empty()) return CXChildVisit_Continue;
+
+        CXFile file = nullptr;
+        clang_getFileLocation(clang_getCursorLocation(node), &file, nullptr, nullptr, nullptr);
+        std::error_code ec;
+        std::string path;
+        if (file)
+            path = fs::absolute(cx_to_string(clang_getFileName(file)), ec).lexically_normal().string();
+
+        // A definition the compiler must emit whatever uses it: written in the file being
+        // compiled, with external linkage, and not inline.
+        if (!ec && !path.empty() && path == g->main_file &&
+            !clang_Cursor_isFunctionInlined(node) &&
+            clang_getCursorLinkage(node) == CXLinkage_External)
+            g->roots.insert(usr);
+
+        g->stack.push_back(usr);
+        clang_visitChildren(node, record_reference, g);
+        g->stack.pop_back();
+        return CXChildVisit_Continue;
+    }
+
+    // A namespace-scope variable is initialised whether or not anything reads it, so
+    // whatever its initialiser refers to is emitted too.
+    if (k == CXCursor_VarDecl && clang_isCursorDefinition(node)) {
+        g->stack.push_back("@dynamic-init");
+        g->roots.insert("@dynamic-init");
+        clang_visitChildren(node, record_reference, g);
+        g->stack.pop_back();
+        return CXChildVisit_Continue;
+    }
+
+    return CXChildVisit_Recurse;
+}
+
+static void collect_emitted(CXTranslationUnit tu,
+                            const std::string& main_file,
+                            std::set<std::string>& out) {
+    EmitGraph graph;
+    graph.main_file = fs::path(main_file).lexically_normal().string();
+    clang_visitChildren(clang_getTranslationUnitCursor(tu), build_emit_graph, &graph);
+
+    // Everything reachable from a root is emitted; nothing else is.
+    out = graph.roots;
+    std::vector<std::string> work(graph.roots.begin(), graph.roots.end());
+    while (!work.empty()) {
+        const std::string current = work.back();
+        work.pop_back();
+        auto it = graph.calls.find(current);
+        if (it == graph.calls.end()) continue;
+        for (const auto& target : it->second)
+            if (out.insert(target).second)
+                work.push_back(target);
+    }
 }
 
 struct VisitorData {
@@ -1119,7 +1196,7 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         // definition strong, which collides as soon as two translation units include the
         // header. So they stay put; construction is bound up with the class's fields
         // anyway, and leaving it beside them costs little.
-        // Only split what this translation unit refers to; see collect_referenced().
+        // Only split what this translation unit actually emits; see collect_emitted().
         if (input_is_header && !fn.usr.empty() && referenced.find(fn.usr) == referenced.end()) {
             fn.keep_in_header = true;
             continue;
@@ -2796,7 +2873,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     }
 
     std::set<std::string> referenced;
-    collect_referenced(tu, referenced);
+    collect_emitted(tu, abs_path, referenced);
 
     result = split_unit(tu, abs_path, input_path, source, functions, referenced, output_dir,
                         all_flags, extra_flags, std::string(), parse_errors == 0,
@@ -2945,7 +3022,7 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     std::set<std::string> referenced;
-    collect_referenced(tu, referenced);
+    collect_emitted(tu, abs_path, referenced);
 
     result = split_unit(tu, abs_path, input_path, source, functions, referenced, output_dir,
                         all_flags, extra_flags, std::string(), parse_errors == 0,
