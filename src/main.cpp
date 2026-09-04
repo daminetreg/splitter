@@ -77,6 +77,7 @@ struct FunctionInfo {
     unsigned end_line;
     unsigned start_offset;
     unsigned end_offset;
+    std::string file;                 // absolute path of the file holding the definition
     std::vector<ScopeEntry> scope_chain;
     bool is_template;
     bool is_static;
@@ -157,11 +158,15 @@ static std::string sanitize_filename(const std::string& name) {
     return result;
 }
 
+// Functions defined in a translation unit, bucketed by the file that defines them. A
+// header's inventory is taken from the translation unit that includes it, in the macro and
+// inclusion context its includer establishes, rather than from a standalone re-parse.
+using HarvestMap = std::map<std::string, std::vector<FunctionInfo>>;
+
 struct VisitorData {
     CXTranslationUnit tu;
-    const std::string* source;
-    std::vector<FunctionInfo>* functions;
-    const std::string* filename;
+    const std::set<std::string>* wanted;   // files whose functions to record
+    HarvestMap* harvest;
 };
 
 static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClientData data) {
@@ -176,9 +181,10 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     if (!cursor_file)
         return CXChildVisit_Continue;
 
-    std::string cursor_filename = cx_to_string(clang_getFileName(cursor_file));
-    if (cursor_filename != *vd->filename)
-        return CXChildVisit_Continue;
+    std::error_code fec;
+    std::string cursor_filename =
+        fs::absolute(cx_to_string(clang_getFileName(cursor_file)), fec).lexically_normal().string();
+    const bool wanted_file = !fec && vd->wanted->count(cursor_filename) != 0;
 
     CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -190,6 +196,9 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     }
 
     if (!is_function_def) {
+        // Recurse regardless of file: a namespace opened in one header can hold definitions
+        // belonging to another, and the enclosing scopes are what give a definition its
+        // qualification.
         if (kind == CXCursor_Namespace || kind == CXCursor_ClassDecl ||
             kind == CXCursor_StructDecl || kind == CXCursor_ClassTemplate) {
             return CXChildVisit_Recurse;
@@ -197,7 +206,11 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
         return CXChildVisit_Continue;
     }
 
+    if (!wanted_file)
+        return CXChildVisit_Continue;
+
     FunctionInfo info;
+    info.file = cursor_filename;
     info.name = cx_to_string(clang_getCursorSpelling(cursor));
     info.is_template = (kind == CXCursor_FunctionTemplate);
     info.is_static = (clang_getCursorLinkage(cursor) == CXLinkage_Internal);
@@ -285,7 +298,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
 
     info.body = get_source_range_text(vd->tu, extent);
 
-    vd->functions->push_back(std::move(info));
+    (*vd->harvest)[cursor_filename].push_back(std::move(info));
 
     return CXChildVisit_Continue;
 }
@@ -1658,57 +1671,204 @@ static void write_skipped_header_manifest(const std::string& unit_dir,
     ofs << "# not split: " << reason << "\n";
 }
 
-static void resolve_header_deps(CXTranslationUnit tu,
-                                 SplitResult& result,
-                                 const std::string& output_dir,
-                                 const std::vector<std::string>& extra_flags,
-                                 bool verbose,
-                                 std::ostream& out) {
+static void emit_split_files(CXTranslationUnit tu,
+                             const std::vector<FunctionInfo>& functions,
+                             const std::string& input_path,
+                             const std::string& abs_path,
+                             const std::string& output_dir,
+                             const std::string& include_root,
+                             const std::string& unit_tag,
+                             const std::string& preamble_filename,
+                             const std::string& preamble_path,
+                             const std::vector<std::string>& all_flags,
+                             const std::vector<std::string>& extra_flags,
+                             bool input_is_header,
+                             bool parse_clean,
+                             bool verbose,
+                             std::ostream& out,
+                             SplitResult& result);
+
+// Headers this translation unit should split. Decided before the AST walk so that the walk
+// records only functions that will actually be used.
+static std::vector<std::string> header_split_candidates(
+        CXTranslationUnit tu,
+        const std::string& output_dir,
+        const std::vector<std::string>& extra_flags,
+        bool verbose,
+        std::ostream& out) {
+    std::vector<std::string> candidates;
+    if (!auto_include_split_enabled())
+        return candidates;
+
     std::vector<std::string> includes;
     clang_getInclusions(tu, inclusion_visitor, &includes);
-
-    bool do_auto_split = auto_include_split_enabled();
 
     const auto inc_dirs = include_dirs_from_flags(extra_flags);
     const std::string include_root = split_include_root(output_dir);
 
-    std::set<std::string> seen_includes;
+    std::set<std::string> seen;
     for (const auto& inc_path : includes) {
-        if (!do_auto_split) break;
-        if (!seen_includes.insert(inc_path).second) continue;
+        if (!seen.insert(inc_path).second) continue;
         if (!is_header_file(inc_path)) continue;
         if (is_stdlib_header(inc_path)) continue;
         if (g_split_headers.find(inc_path) != g_split_headers.end()) continue;
 
-        // Must match the path write_header_manifest() produces for this header, which
-        // is the mirrored location plus ".split". The two used to disagree, so the
-        // staleness check never found a manifest and every header was re-split on every
-        // invocation.
-        std::string manifest = (fs::path(include_root) /
-            (header_mirror_relpath(inc_path, inc_dirs) + ".split")).string();
+        const std::string rel = header_mirror_relpath(inc_path, inc_dirs);
+        const std::string manifest = (fs::path(include_root) / (rel + ".split")).string();
         bool stale = false;
         if (fs::exists(manifest)) {
-            auto hdr_time = fs::last_write_time(inc_path);
-            auto man_time = fs::last_write_time(manifest);
+            std::error_code ec;
+            auto hdr_time = fs::last_write_time(inc_path, ec);
+            auto man_time = fs::last_write_time(manifest, ec);
+            if (ec) continue;
             stale = (hdr_time > man_time);
         }
+        if (fs::exists(manifest) && !stale) continue;
 
-        if (!fs::exists(manifest) || stale) {
-            if (verbose) out << "\n[auto-split] " << inc_path << "\n";
-            SplitResult hdr_sr = do_split(inc_path, output_dir, extra_flags, verbose, out);
-            if (!hdr_sr.success && verbose)
-                out << "[auto-split] warning: failed to split " << inc_path << "\n";
+        // One half of a header/footer or push/pop pair carries no include guard and is not
+        // meant to stand alone; rewriting half a pair is never correct.
+        const std::string src = read_file(inc_path);
+        if (src.empty() || !header_has_include_guard(src)) {
+            if (verbose)
+                out << "Skipping " << inc_path << ": no include guard, so it is one half of"
+                       " a pair and is not meant to be included on its own\n";
+            const std::string unit_dir =
+                (fs::path(include_root) / fs::path(rel).parent_path()).string();
+            write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
+                                          inc_path, "no include guard");
+            continue;
         }
+        candidates.push_back(inc_path);
     }
+    return candidates;
+}
+
+// Writes the preamble and the split files for one file -- the translation unit itself or
+// one of its headers -- from an inventory already harvested out of `tu`.
+static SplitResult split_unit(CXTranslationUnit tu,
+                              const std::string& abs_path,
+                              const std::string& input_path,
+                              const std::string& source,
+                              std::vector<FunctionInfo>& functions,
+                              const std::string& output_dir,
+                              const std::vector<std::string>& all_flags,
+                              const std::vector<std::string>& extra_flags,
+                              bool parse_clean,
+                              bool verbose,
+                              std::ostream& out) {
+    SplitResult result;
+    result.success = false;
+
+    const bool input_is_header = is_header_file(abs_path);
+    const std::string preamble_filename = input_is_header
+        ? fs::path(abs_path).filename().string()
+        : fs::path(abs_path).stem().string() + "_preamble.h";
+
+    std::string unit_dir = output_dir;
+    if (input_is_header) {
+        const std::string rel =
+            header_mirror_relpath(abs_path, include_dirs_from_flags(extra_flags));
+        unit_dir = (fs::path(split_include_root(output_dir)) /
+                    fs::path(rel).parent_path()).string();
+    }
+
+    const std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
+    const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
+
+    prepare_functions(functions);
+
+    if (functions.empty()) {
+        if (verbose) out << "No function definitions found in " << input_path << "\n";
+        result.success = true;
+        return result;
+    }
+
+    if (!claim_output_path(preamble_path, abs_path))
+        return result;
+
+    fs::create_directories(unit_dir);
+
+    result.preamble_filename = preamble_path;
+    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
+    const std::string preamble =
+        generate_preamble(source, functions, unit_tag, abs_path, static_renames);
+
+    std::string existing_preamble;
+    if (fs::exists(preamble_path))
+        existing_preamble = read_file(preamble_path);
+    if (existing_preamble != preamble) {
+        std::ofstream ofs(preamble_path);
+        if (!ofs.is_open()) {
+            std::cerr << "Error: cannot write preamble to " << preamble_path << "\n";
+            return result;
+        }
+        ofs << preamble;
+        ofs.close();
+        if (verbose) out << "Generated preamble: " << preamble_path << " (updated)\n";
+    } else {
+        if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
+    }
+
+    emit_split_files(tu, functions, input_path, abs_path, unit_dir,
+                     split_include_root(output_dir), unit_tag,
+                     preamble_filename, preamble_path, all_flags, extra_flags,
+                     input_is_header, parse_clean, verbose, out, result);
+    result.success = true;
+    return result;
+}
+
+// Splits every header this translation unit should split, using the inventory harvested
+// from `tu` rather than re-parsing each header on its own, then collects the objects and
+// include directories the caller has to link and compile against.
+static void resolve_header_deps(CXTranslationUnit tu,
+                                const HarvestMap& harvest,
+                                const std::vector<std::string>& candidates,
+                                SplitResult& result,
+                                const std::string& output_dir,
+                                const std::vector<std::string>& all_flags,
+                                const std::vector<std::string>& extra_flags,
+                                bool parse_clean,
+                                bool verbose,
+                                std::ostream& out) {
+    for (const auto& inc_path : candidates) {
+        if (verbose) out << "\n[auto-split] " << inc_path << "\n";
+
+        auto it = harvest.find(inc_path);
+        std::vector<FunctionInfo> fns =
+            (it == harvest.end()) ? std::vector<FunctionInfo>() : it->second;
+
+        const std::string src = read_file(inc_path);
+        if (src.empty()) continue;
+
+        if (fns.empty()) {
+            // Nothing to split, but record the decision so it is not reconsidered on every
+            // invocation.
+            const std::string rel =
+                header_mirror_relpath(inc_path, include_dirs_from_flags(extra_flags));
+            const std::string unit_dir =
+                (fs::path(split_include_root(output_dir)) / fs::path(rel).parent_path()).string();
+            if (verbose) out << "No function definitions found in " << inc_path << "\n";
+            write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
+                                          inc_path, "no function definitions");
+            continue;
+        }
+
+        SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, output_dir,
+                                        all_flags, extra_flags, parse_clean, verbose, out);
+        if (!hdr_sr.success && verbose)
+            out << "[auto-split] warning: failed to split " << inc_path << "\n";
+    }
+
+    std::vector<std::string> includes;
+    clang_getInclusions(tu, inclusion_visitor, &includes);
 
     std::set<std::string> seen_dirs;
     for (const auto& inc_path : includes) {
         auto it = g_split_headers.find(inc_path);
         if (it != g_split_headers.end()) {
             if (verbose) out << "[header-dep] " << inc_path << " -> " << it->second.split_dir << "\n";
-            if (seen_dirs.insert(it->second.split_dir).second) {
+            if (seen_dirs.insert(it->second.split_dir).second)
                 result.header_obj_dirs.push_back(it->second.split_dir);
-            }
             for (const auto& cpp : it->second.compilable_files) {
                 std::string obj = cpp.substr(0, cpp.size() - 4) + ".o";
                 result.header_obj_files.push_back(obj);
@@ -2086,8 +2246,6 @@ static void emit_split_files(CXTranslationUnit tu,
         g_split_headers[abs_path] = std::move(hdr_info);
         write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
         if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
-    } else {
-        resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
     }
 }
 
@@ -2242,55 +2400,34 @@ static SplitResult do_split_with_cache(const std::string& input_path,
             << "; splitting anyway, and no stale output will be pruned\n";
     }
 
-    std::vector<FunctionInfo> functions;
-    VisitorData vd{tu, &source, &functions, &abs_path};
+    // One walk of this translation unit yields the inventory for the file itself and for
+    // every header it should split, each seen in the context its includer establishes.
+    // Deciding the header set first keeps the walk from recording functions nobody wants.
+    const std::vector<std::string> candidates =
+        input_is_header ? std::vector<std::string>()
+                        : header_split_candidates(tu, output_dir, extra_flags, verbose, out);
+
+    std::set<std::string> wanted(candidates.begin(), candidates.end());
+    wanted.insert(abs_path);
+
+    HarvestMap harvest;
+    VisitorData vd{tu, &wanted, &harvest};
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
-    prepare_functions(functions);
 
-    if (functions.empty()) {
-        if (verbose) out << "No function definitions found in " << input_path << "\n";
-        result.success = true;
-        if (!input_is_header) {
-            resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
-        }
-        return result;
-    }
-
-    if (!claim_output_path(preamble_path, abs_path))
-        return result;
-
-    fs::create_directories(unit_dir);
-
-    result.preamble_filename = preamble_path;
-    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
-    std::string preamble =
-        generate_preamble(source, functions, unit_tag, abs_path, static_renames);
-
+    std::vector<FunctionInfo> functions;
     {
-        std::string existing_preamble;
-        if (fs::exists(preamble_path))
-            existing_preamble = read_file(preamble_path);
-        if (existing_preamble != preamble) {
-            std::ofstream ofs(preamble_path);
-            if (!ofs.is_open()) {
-                std::cerr << "Error: cannot write preamble to " << preamble_path << "\n";
-                return result;
-            }
-            ofs << preamble;
-            ofs.close();
-            if (verbose) out << "Generated preamble: " << preamble_path << " (updated)\n";
-        } else {
-            if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
-        }
+        auto hit = harvest.find(abs_path);
+        if (hit != harvest.end()) functions = hit->second;
     }
 
-    emit_split_files(tu, functions, input_path, abs_path, unit_dir,
-                     split_include_root(output_dir), unit_tag,
-                     preamble_filename, preamble_path, all_flags, extra_flags,
-                     input_is_header, parse_errors == 0, verbose, out, result);
+    result = split_unit(tu, abs_path, input_path, source, functions, output_dir,
+                        all_flags, extra_flags, parse_errors == 0, verbose, out);
 
-    result.success = true;
+    if (!input_is_header)
+        resolve_header_deps(tu, harvest, candidates, result, output_dir, all_flags,
+                            extra_flags, parse_errors == 0, verbose, out);
+
     return result;
 }
 
@@ -2402,62 +2539,36 @@ static SplitResult do_split(const std::string& input_path,
             << "; splitting anyway, and no stale output will be pruned\n";
     }
 
-    std::vector<FunctionInfo> functions;
-    VisitorData vd{tu, &source, &functions, &abs_path};
+    // One walk of this translation unit yields the inventory for the file itself and for
+    // every header it should split, each seen in the context its includer establishes.
+    // Deciding the header set first keeps the walk from recording functions nobody wants.
+    const std::vector<std::string> candidates =
+        input_is_header ? std::vector<std::string>()
+                        : header_split_candidates(tu, output_dir, extra_flags, verbose, out);
+
+    std::set<std::string> wanted(candidates.begin(), candidates.end());
+    wanted.insert(abs_path);
+
+    HarvestMap harvest;
+    VisitorData vd{tu, &wanted, &harvest};
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
-    prepare_functions(functions);
 
-    if (functions.empty()) {
-        if (verbose) out << "No function definitions found in " << input_path << "\n";
-        if (!input_is_header) {
-            resolve_header_deps(tu, result, output_dir, extra_flags, verbose, out);
-        }
-        clang_disposeTranslationUnit(tu);
-        clang_disposeIndex(index);
-        result.success = true;
-        return result;
-    }
-
-    if (!claim_output_path(preamble_path, abs_path))
-        return result;
-
-    fs::create_directories(unit_dir);
-
-    result.preamble_filename = preamble_path;
-    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
-    std::string preamble =
-        generate_preamble(source, functions, unit_tag, abs_path, static_renames);
-
+    std::vector<FunctionInfo> functions;
     {
-        std::string existing_preamble;
-        if (fs::exists(preamble_path))
-            existing_preamble = read_file(preamble_path);
-        if (existing_preamble != preamble) {
-            std::ofstream ofs(preamble_path);
-            if (!ofs.is_open()) {
-                std::cerr << "Error: cannot write preamble to " << preamble_path << "\n";
-                clang_disposeTranslationUnit(tu);
-                clang_disposeIndex(index);
-                return result;
-            }
-            ofs << preamble;
-            ofs.close();
-            if (verbose) out << "Generated preamble: " << preamble_path << " (updated)\n";
-        } else {
-            if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
-        }
+        auto hit = harvest.find(abs_path);
+        if (hit != harvest.end()) functions = hit->second;
     }
 
-    emit_split_files(tu, functions, input_path, abs_path, unit_dir,
-                     split_include_root(output_dir), unit_tag,
-                     preamble_filename, preamble_path, all_flags, extra_flags,
-                     input_is_header, parse_errors == 0, verbose, out, result);
+    result = split_unit(tu, abs_path, input_path, source, functions, output_dir,
+                        all_flags, extra_flags, parse_errors == 0, verbose, out);
 
+    if (!input_is_header)
+        resolve_header_deps(tu, harvest, candidates, result, output_dir, all_flags,
+                            extra_flags, parse_errors == 0, verbose, out);
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);
 
-    result.success = true;
     return result;
 }
 

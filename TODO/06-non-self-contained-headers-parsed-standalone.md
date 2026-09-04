@@ -3,7 +3,7 @@
 **Severity:** Medium. Produces parse errors and, worse, continues past them to emit
 output derived from an incomplete AST.
 
-**Status: Step 1 implemented and verified. Step 2 not started.** See "Outcome" below.
+**Status: both steps implemented and verified.** See "Outcome" below.
 
 ## Motivation
 
@@ -95,9 +95,7 @@ Two changes, the first a safety fix and the second the real solution.
 
 ## Outcome
 
-**Step 1 (fail closed) is done. Step 2 (harvest from the parent TU) is not**, and is left
-open -- it is a rearchitecture of how headers are discovered, not a fix to this behaviour,
-and it carries the performance work with it.
+### Step 1 -- fail closed
 
 Implemented in `src/main.cpp`:
 
@@ -132,14 +130,52 @@ Verified on the Boost `filesystem` build:
 
 The three fixtures still split, compile, link and run.
 
-### What Step 2 would still buy
+### Step 2 -- harvest from the parent translation unit
 
-Unchanged by Step 1: 2 of 12 translation units link from split objects, and the same four
-fail. Their remaining errors -- `no member named`, `constexpr variable`,
-`non-constexpr declaration of`, `constructor cannot have a return type` -- are missing
-declaration context in headers that *do* parse standalone but not the way their includer
-sees them. Only harvesting from the parent translation unit fixes that.
+Headers are no longer re-parsed on their own. One walk of the translation unit now yields
+the inventory for the file itself and for every header it should split, each seen in the
+macro and inclusion context its includer establishes:
 
-The redundant parses are also still there: 2769 `[auto-split]` header parses across 12
-translation units. The Step 2 acceptance criteria (one libclang parse per translation unit,
-and a measurable wall-time drop) are therefore not met.
+- `FunctionInfo` records the file that defines it, and the visitor buckets functions into a
+  `HarvestMap` keyed by that file instead of filtering to the main file. It recurses into
+  namespaces and classes regardless of which file they came from, since a namespace opened
+  in one header can hold definitions belonging to another.
+- `header_split_candidates()` decides which headers to split *before* the walk -- applying
+  the manifest, staleness and include-guard checks from Step 1 -- so the walk records only
+  functions that will be used, rather than harvesting the whole dependency graph.
+- `split_unit()` writes the preamble and the split files for one file from an inventory
+  already in hand. Both the translation unit itself and each of its headers go through it.
+- `resolve_header_deps()` drives that for every candidate and no longer calls `do_split()`.
+  `clang_parseTranslationUnit2()` is now reached once per invocation, from the driver.
+
+Measured on the Boost `filesystem` build:
+
+| check | before Step 2 | after |
+|---|---|---|
+| wall time | 46.6s | **26.5s** |
+| header re-parses | 2769 | **0** |
+| total `error:` lines | 1263 | **1110** |
+
+The incremental rebuild stays deterministic: touching one source reproduces the same 5134
+split files with no differences and no `redefinition` errors.
+
+### What Step 2 did *not* fix, and why
+
+This file previously predicted that harvesting would also fix the remaining
+`no member named` / `constexpr variable` / `non-constexpr declaration of` failures. **That
+was wrong** -- those counts are unchanged (396, 80, 68), and the same four translation units
+still fall back.
+
+Harvesting removed the standalone-parseability requirement from *discovery*, but the split
+pieces reimpose it at *compile* time. A piece extracted from a header includes only that
+header's rewritten copy:
+
+```cpp
+#include "std_category_impl.hpp"
+```
+
+and nothing else. `boost/system/detail/std_category_impl.hpp` is written to be included
+only after `error_condition` is complete, so compiling it alone yields
+`calling 'default_error_condition' with incomplete return type`. The inventory was never
+the problem; the include context of the generated split piece is. That is a separate
+defect, recorded as **TODO 09**.
