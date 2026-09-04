@@ -1595,6 +1595,69 @@ static bool auto_include_split_enabled() {
     return true;
 }
 
+// --- Headers that must not be split --------------------------------------------------
+//
+// Automatic header splitting parses each discovered header as its own translation unit.
+// Many real headers are not self-contained by design -- prefix/suffix and push/pop pairs,
+// and headers that need a macro context their includer establishes -- and cannot be parsed
+// alone. A header that fails to parse must be left alone entirely rather than split from a
+// partial AST, because the rewritten copy goes on the include path ahead of the real one:
+// a half-parsed copy would silently displace a correct header.
+
+// A header meant to be included once carries an include guard. One deliberately designed
+// for repeated inclusion -- one half of a header/footer or push/pop pair -- carries none,
+// and rewriting either half on its own is never correct.
+static bool header_has_include_guard(const std::string& source) {
+    const std::string blanked = blank_code_noise(source);
+    if (blanked.find("#pragma once") != std::string::npos ||
+        blanked.find("# pragma once") != std::string::npos)
+        return true;
+
+    // Classic guard: `#ifndef X` followed within a few lines by `#define X`.
+    std::istringstream iss(blanked);
+    std::string line, guard;
+    int since_ifndef = -1;
+    while (std::getline(iss, line)) {
+        std::istringstream ls(line);
+        std::string hash, directive, ident;
+        ls >> hash;
+        if (hash == "#") {
+            ls >> directive >> ident;
+        } else if (!hash.empty() && hash[0] == '#') {
+            directive = hash.substr(1);
+            ls >> ident;
+        } else {
+            if (since_ifndef >= 0 && ++since_ifndef > 4) since_ifndef = -1;
+            continue;
+        }
+        if (directive == "ifndef" && !ident.empty()) {
+            guard = ident;
+            since_ifndef = 0;
+        } else if (directive == "define" && since_ifndef >= 0 && ident == guard) {
+            return true;
+        } else if (since_ifndef >= 0 && ++since_ifndef > 4) {
+            since_ifndef = -1;
+        }
+    }
+    return false;
+}
+
+// Cache the decision not to split a header, so it is made once rather than on every
+// invocation. An empty compilable list is what load_header_manifests() treats as "nothing
+// to link", and resolve_header_deps() takes the file's existence as "already decided".
+static void write_skipped_header_manifest(const std::string& unit_dir,
+                                          const std::string& header_filename,
+                                          const std::string& abs_header_path,
+                                          const std::string& reason) {
+    std::error_code ec;
+    fs::create_directories(unit_dir, ec);
+    if (ec) return;
+    std::ofstream ofs((fs::path(unit_dir) / (header_filename + ".split")).string());
+    if (!ofs.is_open()) return;
+    ofs << abs_header_path << "\n" << 0 << "\n";
+    ofs << "# not split: " << reason << "\n";
+}
+
 static void resolve_header_deps(CXTranslationUnit tu,
                                  SplitResult& result,
                                  const std::string& output_dir,
@@ -1855,10 +1918,6 @@ static unsigned check_diagnostics(CXTranslationUnit tu, bool verbose) {
         }
         clang_disposeDiagnostic(diag);
     }
-    if (error_count > 0 && verbose) {
-        std::cerr << "Warning: " << error_count << " parse error(s) found. "
-                  << "Output may be incomplete.\n";
-    }
     return error_count;
 }
 
@@ -1878,6 +1937,7 @@ static void emit_split_files(CXTranslationUnit tu,
                              const std::vector<std::string>& all_flags,
                              const std::vector<std::string>& extra_flags,
                              bool input_is_header,
+                             bool parse_clean,
                              bool verbose,
                              std::ostream& out,
                              SplitResult& result) {
@@ -1986,8 +2046,12 @@ static void emit_split_files(CXTranslationUnit tu,
         }
     }
 
+    // Pruning removes outputs that the current run did not produce. After a parse that
+    // reported errors the current file list is not trustworthy -- a run that saw almost no
+    // functions would delete a good run's work -- so leave the directory alone.
     int removed_count = 0;
-    for (const auto& entry : fs::directory_iterator(output_dir)) {
+    for (const auto& entry : parse_clean ? fs::directory_iterator(output_dir)
+                                         : fs::directory_iterator()) {
         if (!entry.is_regular_file()) continue;
         std::string path = entry.path().string();
         std::string fname = entry.path().filename().string();
@@ -2071,6 +2135,17 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
     std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
+    if (input_is_header && !header_has_include_guard(source)) {
+        if (verbose)
+            out << "Skipping " << input_path
+                << ": no include guard, so it is one half of a pair and is not meant to be"
+                   " included on its own\n";
+        write_skipped_header_manifest(unit_dir, preamble_filename, abs_path,
+                                      "no include guard");
+        result.success = true;
+        return result;
+    }
+
     std::vector<std::string> parse_flags_vec = all_flags;
     std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
     if (!libclang_pch.empty()) {
@@ -2142,7 +2217,27 @@ static SplitResult do_split_with_cache(const std::string& input_path,
         if (verbose) out << "[server] parsed and cached: " << abs_path << "\n";
     }
 
-    check_diagnostics(tu, verbose);
+    const unsigned parse_errors = check_diagnostics(tu, verbose);
+
+    // A header that will not parse standalone is skipped outright: no split pieces, no
+    // rewritten copy, no manifest entry. Proceeding from a partial AST used to emit both,
+    // and the rewritten copy then shadowed the real header for every consumer.
+    if (input_is_header && parse_errors > 0) {
+        if (verbose)
+            out << "Skipping " << input_path << ": not parseable standalone ("
+                << parse_errors << " parse error(s))\n";
+        write_skipped_header_manifest(unit_dir, preamble_filename, abs_path,
+                                      "not parseable standalone");
+        result.success = true;
+        return result;
+    }
+
+    if (parse_errors > 0 && verbose) {
+        // Not a header, so splitting continues; say so plainly rather than leaving the
+        // reader to guess whether the output can be trusted.
+        out << "Warning: " << parse_errors << " parse error(s) in " << input_path
+            << "; splitting anyway, and no stale output will be pruned\n";
+    }
 
     std::vector<FunctionInfo> functions;
     VisitorData vd{tu, &source, &functions, &abs_path};
@@ -2190,7 +2285,7 @@ static SplitResult do_split_with_cache(const std::string& input_path,
     emit_split_files(tu, functions, input_path, abs_path, unit_dir,
                      split_include_root(output_dir), unit_tag,
                      preamble_filename, preamble_path, all_flags, extra_flags,
-                     input_is_header, verbose, out, result);
+                     input_is_header, parse_errors == 0, verbose, out, result);
 
     result.success = true;
     return result;
@@ -2234,6 +2329,17 @@ static SplitResult do_split(const std::string& input_path,
     std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
     std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
+    if (input_is_header && !header_has_include_guard(source)) {
+        if (verbose)
+            out << "Skipping " << input_path
+                << ": no include guard, so it is one half of a pair and is not meant to be"
+                   " included on its own\n";
+        write_skipped_header_manifest(unit_dir, preamble_filename, abs_path,
+                                      "no include guard");
+        result.success = true;
+        return result;
+    }
+
     std::vector<std::string> parse_flags_vec = all_flags;
     std::string libclang_pch = build_libclang_pch(preamble_path, all_flags, verbose, out);
     if (!libclang_pch.empty()) {
@@ -2266,7 +2372,29 @@ static SplitResult do_split(const std::string& input_path,
         return result;
     }
 
-    check_diagnostics(tu, verbose);
+    const unsigned parse_errors = check_diagnostics(tu, verbose);
+
+    // A header that will not parse standalone is skipped outright: no split pieces, no
+    // rewritten copy, no manifest entry. Proceeding from a partial AST used to emit both,
+    // and the rewritten copy then shadowed the real header for every consumer.
+    if (input_is_header && parse_errors > 0) {
+        if (verbose)
+            out << "Skipping " << input_path << ": not parseable standalone ("
+                << parse_errors << " parse error(s))\n";
+        write_skipped_header_manifest(unit_dir, preamble_filename, abs_path,
+                                      "not parseable standalone");
+        clang_disposeTranslationUnit(tu);
+        clang_disposeIndex(index);
+        result.success = true;
+        return result;
+    }
+
+    if (parse_errors > 0 && verbose) {
+        // Not a header, so splitting continues; say so plainly rather than leaving the
+        // reader to guess whether the output can be trusted.
+        out << "Warning: " << parse_errors << " parse error(s) in " << input_path
+            << "; splitting anyway, and no stale output will be pruned\n";
+    }
 
     std::vector<FunctionInfo> functions;
     VisitorData vd{tu, &source, &functions, &abs_path};
@@ -2318,7 +2446,7 @@ static SplitResult do_split(const std::string& input_path,
     emit_split_files(tu, functions, input_path, abs_path, unit_dir,
                      split_include_root(output_dir), unit_tag,
                      preamble_filename, preamble_path, all_flags, extra_flags,
-                     input_is_header, verbose, out, result);
+                     input_is_header, parse_errors == 0, verbose, out, result);
 
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);

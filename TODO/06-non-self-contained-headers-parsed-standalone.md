@@ -3,6 +3,8 @@
 **Severity:** Medium. Produces parse errors and, worse, continues past them to emit
 output derived from an incomplete AST.
 
+**Status: Step 1 implemented and verified. Step 2 not started.** See "Outcome" below.
+
 ## Motivation
 
 Automatic header splitting feeds every `#include`d project header to libclang as its own
@@ -90,3 +92,54 @@ Two changes, the first a safety fix and the second the real solution.
 - Regression fixture: a header pair where the second `#error`s unless the first was
   included, consumed by one translation unit; the build must succeed with both headers
   skipped.
+
+## Outcome
+
+**Step 1 (fail closed) is done. Step 2 (harvest from the parent TU) is not**, and is left
+open -- it is a rearchitecture of how headers are discovered, not a fix to this behaviour,
+and it carries the performance work with it.
+
+Implemented in `src/main.cpp`:
+
+- `header_has_include_guard()` decides the denylist generically instead of by name. A
+  header meant to be included once carries `#pragma once` or a classic `#ifndef X` /
+  `#define X` pair; one designed for repeated inclusion -- half of a header/footer or
+  push/pop pair -- carries neither, and rewriting half a pair is never correct. This
+  catches `detail/header.hpp`, `detail/footer.hpp` and `iterator/detail/config_undef.hpp`
+  without hardcoding them, and is checked before parsing, so those headers cost nothing.
+- A header whose standalone parse reports errors is now skipped outright: no split pieces,
+  no rewritten copy, no manifest entry. This catches `abi_prefix.hpp` / `abi_suffix.hpp`
+  (which `#error` when included without their partner) and the Boost.MPL preprocessed
+  headers.
+- `write_skipped_header_manifest()` caches the decision with the reason, so it is made once
+  rather than on every invocation, and `load_header_manifests()` will not register it
+  (an empty compilable list means "nothing to link").
+- The `Warning: N parse error(s) found. Output may be incomplete.` line is gone.
+  `check_diagnostics()` no longer editorialises; each caller says what it actually did --
+  `Skipping <header>: ...` for a skipped header, or an explicit
+  `splitting anyway, and no stale output will be pruned` for a source.
+- Stale-output pruning is now gated on a clean parse. A run that saw almost no functions
+  because the parse failed can no longer delete a good run's work.
+
+Verified on the Boost `filesystem` build:
+
+| check | before | after |
+|---|---|---|
+| `Output may be incomplete` warnings | 73 | **0** |
+| rewritten copies of `abi_prefix` / `abi_suffix` / `header` / `footer` | emitted | **0** |
+| total `error:` lines | 2804 | **1263** |
+| headers skipped, decision cached with a reason | n/a | 314 |
+
+The three fixtures still split, compile, link and run.
+
+### What Step 2 would still buy
+
+Unchanged by Step 1: 2 of 12 translation units link from split objects, and the same four
+fail. Their remaining errors -- `no member named`, `constexpr variable`,
+`non-constexpr declaration of`, `constructor cannot have a return type` -- are missing
+declaration context in headers that *do* parse standalone but not the way their includer
+sees them. Only harvesting from the parent translation unit fixes that.
+
+The redundant parses are also still there: 2769 `[auto-split]` header parses across 12
+translation units. The Step 2 acceptance criteria (one libclang parse per translation unit,
+and a measurable wall-time drop) are therefore not met.
