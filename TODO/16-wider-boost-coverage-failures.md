@@ -233,8 +233,9 @@ than inlined.
 The filesystem example still splits 12 of 12 with no fallbacks and scores 9/9; the test
 suite is 15 tests, four of them new.
 
-The 62 fallbacks are unchanged. They are not link failures, so nothing above says what they
-are; they are now classified in TODO 17 to 23, one file per cause:
+The 62 fallbacks are **now zero**. They were not link failures, so nothing above said what
+they were; they were classified in TODO 17 to 23, one file per cause, and all seven are
+implemented:
 
 | | TUs | cause |
 |---|---:|---|
@@ -246,9 +247,23 @@ are; they are now classified in TODO 17 to 23, one file per cause:
 | TODO 22 | 1 | a trailing `//` comment on the declarator swallows the semicolon |
 | TODO 23 | 1 | a `static` function in a header is renamed only in its own file |
 
-The script groups by symptom, so its buckets are not quite these counts: TODO 19's seven
-appear as four different messages plus three inside TODO 17's, which is the point that file
+The script groups by symptom, so its buckets were not quite these counts: TODO 19's seven
+appeared as four different messages plus three inside TODO 17's, which is the point that file
 makes -- one cause wearing five faces.
+
+With all seven fixed, `filesystem;spirit;system;core` builds with **no fallbacks at all**:
+
+| | before | after |
+|---|---:|---:|
+| objects built | 457 | 457 |
+| failed edges | 0 | 0 |
+| translation units split | 373 | **434** |
+| fallbacks to plain compilation | 62 | **0** |
+
+Fixing TODO 17 introduced three regressions of its own, all caught by this run rather than by
+its fixture: a `template<...>` prefix stranded outside a moved definition, a type definition
+carried away with the variable declared beside it, and a variable range swallowing a function
+that had already been split. They are recorded in TODO 17's outcome.
 
 Measuring this needs `./classify-fallbacks.sh` rather than the build log: the build runs at
 `-j32` and the diagnostics of thirty-two translation units interleave, so attributing an

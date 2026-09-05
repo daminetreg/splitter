@@ -105,3 +105,16 @@ line reader is introduced rather than diverge.
 - The two Boost translation units named above no longer fall back.
 - The conditionals written into a split piece are byte-for-byte a valid preprocessor
   directive: no piece contains a line ending in `\` followed by `#line`.
+
+## Outcome
+
+Implemented. `logical_lines()` performs the splice once and both directive scanners --
+`active_conditionals()` and `undefined_macros()` -- read from it. Each logical line carries
+the offset it started at, because `active_conditionals()` compares that against a
+definition's start offset.
+
+Both translation units split.
+
+Fixture: `test/multiline_conditional_main.cpp`, whose condition spans three physical lines
+with a `/* */` in the middle, and which defines a function after the matching `#endif` to
+show the conditional stack stayed balanced.

@@ -121,3 +121,35 @@ change.
 - The wider Boost run loses the 31 fallbacks in this class; `grep -c 'multiple definition'`
   over its log is zero.
 - The filesystem example still splits 12 of 12 with no fallbacks and scores 9/9.
+
+## Outcome
+
+Implemented. Variables are harvested alongside functions, and one with external linkage that
+is neither `inline` nor `constexpr` nor inside a template moves to the definitions header,
+with an `extern` left at the position it occupied.
+
+Three shapes turned up only once variables started moving, all of them the same mistake --
+taking more of a declaration than the variable owns -- and all of them regressions the wider
+Boost run caught rather than the fixture:
+
+* A `template<...>` prefix sits outside the cursor's extent, the same way an explicit
+  specialization's `template< >` does. Moving `template<int M> spinlock
+  spinlock_pool<M>::pool_[41] = {...};` stranded the prefix and carried a definition into the
+  definitions header without the template header it needs.
+* `struct foo { ... } f;` declares a type and a variable together. Only the declarator moves
+  now; the type stays as ordinary text. Taking the whole declaration also swallowed the
+  member functions defined in that type, putting back definitions that had been split while
+  their pieces were compiled anyway.
+* A variable range that overlaps a function range is dropped as a safety net. Folding
+  overlapping ranges and emitting the union verbatim is right for a macro expansion and wrong
+  here.
+
+The silent half is unchanged: internal-linkage variables still get a copy per piece, so a
+`static int calls = 0;` shared by two functions still counts in two objects. Moving them
+needs the rename that TODO 23 declined to generalise, and nothing observable in this corpus
+depends on it.
+
+Fixture: `test/preamble_variables_main.cpp`, which carries all nine kinds -- moved,
+`const`, `constexpr`, `inline`, `static`, a static data member, a multi-declarator
+declaration, an array, a class-template member and an inline type definition -- and checks
+the values rather than only linking.

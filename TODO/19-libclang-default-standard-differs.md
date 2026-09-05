@@ -124,3 +124,22 @@ every project that defaults to something else, which is the same bug with a diff
 - The seven Boost translation units listed above split without falling back, with no `-std`
   added to their commands by hand.
 - `CPP_SPLITTER_VERBOSE=1` reports the standard the parse used.
+
+## Outcome
+
+Implemented, and the cause was one step further back than this file assumed: libclang was not
+falling back to its own default at all. `build_clang_flags()` put a hardcoded `-std=c++17` in
+front of the user's flags, so a command line naming no standard was parsed at C++17 while the
+driver compiled at gnu++14. The disagreement was ours, not libclang's -- which does not
+change the fix, but does mean it had been deliberate once.
+
+`probe_driver_standard()` now asks the driver what it defaults to and hands libclang that.
+The command line still wins where it names a standard, and an unrecognised or unavailable
+answer falls back to the `-std=c++17` this used to force, so no project is worse off than
+before. The launcher's verbose output names the standard the parse used.
+
+All seven translation units split.
+
+Fixture: `launcher.default_standard`, which needs a driver of its own -- the check is that
+split and plain agree, and no `-std` may appear on the command line, which is exactly what
+the other fixtures' driver passes.

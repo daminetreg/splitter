@@ -109,3 +109,16 @@ that libclang parsed successfully.
   `//` comment lines before the body, and a second one whose declarator ends in a closed
   `/* */` comment, to show the helper does not over-trigger.
 - `chrono/src/process_cpu_clocks.cpp` no longer falls back.
+
+## Outcome
+
+Implemented. `terminate_declaration()` compares the last line of the text against the same
+line of its blanked copy; if they differ, the line ends inside a comment and the semicolon
+starts a new line. All three sites that terminated a declaration by concatenation use it,
+including `generate_forward_decl_wrapped()`, where a swallowed semicolon would have taken the
+closing namespace braces with it.
+
+`chrono/src/process_cpu_clocks.cpp` splits.
+
+Fixture: `test/trailing_comment_header.hpp`, which pairs the two-comment-line case with a
+declarator ending in a closed `/* */` to show the helper does not over-trigger.

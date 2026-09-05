@@ -109,3 +109,15 @@ prefix built from `scope_chain` then comes out right everywhere without further 
   longer fall back.
 - The generated definition reads `clz_dispatch<unsigned long>::call`, not `clz_dispatch::call`
   -- checked by grepping the piece, not only by the fact that it compiles.
+
+## Outcome
+
+Implemented. Where the semantic parent is a specialization -- `clang_getSpecializedCursorTemplate`
+is non-null -- the scope chain takes `clang_getCursorDisplayName`, which carries the argument
+list. A display name that cannot be written -- no `<`, or a type printed as `(anonymous ...)`
+or `(lambda ...)` -- keeps the definition in the header with a `keep_reason()` of its own.
+
+Both Boost.Container translation units split.
+
+Fixture: `test/specialization_member_header.hpp`, which pairs two full specializations with a
+member of the primary template that must still be kept.

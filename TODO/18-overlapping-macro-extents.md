@@ -119,3 +119,14 @@ reason it reports true rather than accidentally true.
   header against the original outside function extents shows only removals, never
   insertions.
 - The wider Boost run loses the 18 fallbacks in this class.
+
+## Outcome
+
+Implemented. `prepare_functions()` sweeps the extents for overlap rather than counting exact
+duplicates, and `generate_preamble()` folds each overlapping run into its union, kept and
+emitted once. An assertion states the invariant the emit loop depends on and that nothing
+stated before: after folding, the ranges are strictly increasing and non-overlapping.
+
+The 18 fallbacks in this class are gone.
+
+Fixture: `test/macro_argument_extent_header.hpp`.

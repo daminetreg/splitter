@@ -135,3 +135,17 @@ it would recover are one translation unit in this corpus.
 - The `.cpp` rename still works: `split.static_renames` and `split.static_specifier` keep
   passing, and the mangled name still appears in the split output for a `static` function
   defined in a `.cpp`.
+
+## Outcome
+
+Implemented as option A: an internal-linkage definition in a header or implementation include
+is kept in the preamble. `thread/src/pthread/thread.cpp` splits.
+
+Option B -- one rename map for the whole translation unit -- is still the shape the rename was
+reaching for, and is still not worth its risk: it changes how split headers are shared between
+translation units, and the splitting it would recover is nine small functions in
+`platform_time.hpp`.
+
+Fixture: `test/static_in_header_def.hpp` and its user, plus a `static` function in the source
+itself so the `.cpp` rename cannot be quietly disabled -- the fixture checks that its mangled
+name still appears in the split output.
