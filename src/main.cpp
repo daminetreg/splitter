@@ -103,6 +103,9 @@ struct FunctionInfo {
     bool in_class_template = false;   // member of a class template: cannot go out-of-line
     bool in_anonymous_class = false;  // no class name to qualify a definition with
     bool keep_in_header = false;      // definition has to stay in the preamble
+    // Another definition reports the same extent: the mark of a macro that expands to more
+    // than one declaration, whose extent is the invocation rather than any one declarator.
+    bool shares_extent = false;
     std::string member_decl;          // in-class declaration left behind (members only)
     std::string outlined_body;        // `T Class::name(args) { ... }` (members only)
 };
@@ -508,6 +511,7 @@ static bool has_vague_linkage(const FunctionInfo& fn) {
 }
 
 static std::string keep_reason(const FunctionInfo& fn) {
+    if (fn.shares_extent)       return "shares its source extent with another definition";
     if (fn.is_template)         return "function template";
     if (fn.in_class_template)   return "member of a class template";
     if (fn.in_anonymous_class)  return "member of an unnamed class";
@@ -814,7 +818,14 @@ static std::string strip_always_inline(const std::string& text, unsigned base,
     for (const auto& r : ranges) {
         if (r.first < base) continue;
         size_t from = r.first - base, to = r.second - base;
-        if (to <= text.size() && from < to) local.emplace_back(from, to);
+        if (to > text.size() || from >= to) continue;
+        // An attribute that spans the whole definition did not come from the text it would
+        // be cut out of. Its tokens arrived through a macro, so libclang reports the macro
+        // invocation as the attribute's extent -- and the invocation is also the
+        // definition's extent. Erasing it deletes the definition, and every other
+        // declaration the same macro produced, leaving a bare `inline` in a class body.
+        if (from == 0 && to == text.size()) continue;
+        local.emplace_back(from, to);
     }
     if (local.empty()) return text;
 
@@ -1176,8 +1187,9 @@ static void dump_keep_decisions(const std::vector<FunctionInfo>& functions) {
     if (!dump) return;
     for (const auto& fn : functions) {
         if (fn.file.find(dump) == std::string::npos) continue;
-        fprintf(stderr, "[keep] line=%-5u keep=%d ai=%d ranges=%zu tmpl=%d virt=%d ctor=%d spec=%d anon=%d %s\n",
-                fn.start_line, (int)fn.keep_in_header, (int)!fn.always_inline_ranges.empty(),
+        fprintf(stderr, "[keep] line=%-5u keep=%d shared=%d ai=%d ranges=%zu tmpl=%d virt=%d ctor=%d spec=%d anon=%d %s\n",
+                fn.start_line, (int)fn.keep_in_header, (int)fn.shares_extent,
+                (int)!fn.always_inline_ranges.empty(),
                 fn.always_inline_ranges.size(), (int)fn.is_template, (int)fn.is_virtual,
                 (int)fn.is_ctor_or_dtor, (int)fn.is_specialization, (int)fn.in_unnamed_ns,
                 fn.name.c_str());
@@ -1191,8 +1203,25 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
                               bool input_is_header) {
     const std::set<std::string> undeffed = undefined_macros(source);
 
+    // One extent, several definitions: the mark of a macro that expands to more than one
+    // declaration. generate_preamble() collapses such extents so the macro is not written
+    // out once per definition it produced, which means splitting any one of them would
+    // silently take the rest with it.
+    {
+        std::map<std::pair<unsigned, unsigned>, unsigned> extent_uses;
+        for (const auto& fn : functions)
+            ++extent_uses[{fn.start_offset, fn.end_offset}];
+        for (auto& fn : functions)
+            fn.shares_extent = extent_uses[{fn.start_offset, fn.end_offset}] > 1;
+    }
+
     for (auto& fn : functions) {
         fn.conditionals = active_conditionals(source, fn.start_offset);
+
+        if (fn.shares_extent) {
+            fn.keep_in_header = true;
+            continue;
+        }
 
         if (!undeffed.empty()) {
             const std::string body_blanked = blank_code_noise(fn.body);

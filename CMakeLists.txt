@@ -107,8 +107,9 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   always_inline_main  an always-inline function split out of a header, and a call to it
 #   impl_include_main   a unit whose whole body arrives through an implementation include
 #   preamble_linkage    a virtual definition kept in the preamble, which may exist once only
+#   macro_members_main  a class whose members are produced by one macro expansion
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
-                always_inline_main impl_include_main preamble_linkage)
+                always_inline_main impl_include_main preamble_linkage macro_members_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -147,5 +148,6 @@ add_test(
 set_tests_properties(
   split.sample split.use_mylib split.static_specifier split.static_renames
   split.member_functions split.ctx_main split.always_inline_main split.impl_include_main
-  split.preamble_linkage launcher.shared_inline_header launcher.depfile_names_originals
+  split.preamble_linkage split.macro_members_main
+  launcher.shared_inline_header launcher.depfile_names_originals
   PROPERTIES TIMEOUT 300)
