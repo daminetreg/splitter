@@ -682,6 +682,7 @@ static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_virtual)          return "virtual member function";
     if (fn.in_unnamed_ns)       return "enclosed by an unnamed namespace";
     if (fn.is_static)           return "internal linkage in a header";
+    if (fn.name == "main" && fn.scope_chain.empty()) return "the program's entry point";
     if (fn.is_ctor_or_dtor)     return "constructor or destructor in a header";
     if (!fn.always_inline_ranges.empty()) return "always-inline";
     return "not emitted by this translation unit, or not movable out of the header";
@@ -1634,6 +1635,17 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         // anyway, and leaving it beside them costs little.
         // Only split what this translation unit actually emits; see collect_emitted().
         if (input_is_header && !fn.usr.empty() && referenced.find(fn.usr) == referenced.end()) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        // `main` is not an ordinary function. It may not be inline, and a split piece taken
+        // out of a header is written `inline` so that several objects may carry it -- so a
+        // `main` defined in an included file becomes `inline main`, which is ill-formed.
+        // Boost.Test writes exactly that: unit_test_main.ipp defines main, and every test
+        // that includes the framework in header-only mode picks it up. There is also nothing
+        // to gain: a program has one main, and it can only be emitted once.
+        if (fn.name == "main" && fn.scope_chain.empty()) {
             fn.keep_in_header = true;
             continue;
         }
@@ -3124,8 +3136,24 @@ static void load_header_manifests(const std::string& output_dir) {
 }
 
 
+// The compiler the launcher was asked to wrap. Empty when cpp-splitter is driven directly,
+// in which case the probes below have nothing to ask and fall back to a default.
+static std::string g_compiler;
+
+// The system include directories to hand libclang.
+//
+// They must come from the compiler this build actually uses, not from whatever `g++` happens
+// to be on PATH. The two are not interchangeable: GCC's `xmmintrin.h` implements the SSE
+// intrinsics with `__builtin_ia32_*`, which clang does not have, so feeding GCC's include
+// directories to libclang made every parse that reached `<xmmintrin.h>` fail --
+//
+//     xmmintrin.h:136: error: use of undeclared identifier '__builtin_ia32_addss'
+//
+// -- and the unit fall back. Nothing in Boost reached it until Boost.Geometry, which pulls it
+// in through Boost.Multiprecision; then it accounted for most of Geometry's test suite.
 static const std::vector<std::string>& cached_system_includes() {
-    static std::vector<std::string> includes = detect_system_includes();
+    static std::vector<std::string> includes =
+        g_compiler.empty() ? detect_system_includes() : detect_system_includes(g_compiler);
     return includes;
 }
 
@@ -3174,10 +3202,6 @@ static std::string probe_driver_standard(const std::string& compiler) {
         if (value == k.first) return "-std=" + dialect + k.second;
     return "";
 }
-
-// The compiler the launcher was asked to wrap. Empty when cpp-splitter is driven directly,
-// in which case the standard probe has nothing to ask and adds nothing.
-static std::string g_compiler;
 
 static const std::string& cached_driver_standard() {
     static const std::string std_flag =

@@ -23,11 +23,21 @@ LIBS="${1:-filesystem;spirit;system;core;geometry;smart_ptr;assert}"
 SPLIT=/tmp/boost-libs-split
 PLAIN=/tmp/boost-libs-plain
 
+# Both builds use the same job count, so the wall times stay comparable.
+#
+# 32 is too many for Boost.Geometry. Each of its test translation units is a large template
+# instantiation on its own, and the splitter adds a libclang AST of the same unit alongside
+# the compile -- thirty-two of those at once exhausted 122 GiB and the OOM killer took 52
+# processes, which ninja reported as 35 failed objects. That looked exactly like a splitter
+# defect and was not one, so the number is a knob rather than a constant.
+JOBS="${CPP_SPLITTER_TEST_JOBS:-32}"
+
 # `tipi run` re-splits its arguments through a shell, so the CMake list separator has to
 # survive that as well as this script's own quoting.
 LIBS_ESCAPED="${LIBS//;/\\;}"
 
 echo "==> libraries: $LIBS"
+echo "==> jobs: $JOBS"
 echo "==> building cpp-splitter"
 tipi run cmake --build "$REPO/build" -j32 >/dev/null || exit 1
 
@@ -47,7 +57,7 @@ configure() {   # configure <dir> [extra cmake args...]
 build_tests() {  # build_tests <dir> <logfile> -> seconds
     local start end
     start=$(date +%s%3N)
-    ( cd "$1" && CPP_SPLITTER_VERBOSE=1 tipi run ninja -j32 -k 0 tests ) > "$2" 2>&1
+    ( cd "$1" && CPP_SPLITTER_VERBOSE=1 tipi run ninja -j"$JOBS" -k 0 tests ) > "$2" 2>&1
     end=$(date +%s%3N)
     awk -v v="$((end - start))" 'BEGIN { printf "%.1f", v/1000 }'
 }
