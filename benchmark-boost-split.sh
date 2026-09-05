@@ -12,6 +12,10 @@
 #   one source   the case splitting is meant to help: only the pieces whose text changed are
 #                recompiled, rather than the whole translation unit.
 #   one header   the expensive case, since a widely included header invalidates many units.
+#   one body     the case the whole design is aimed at: change the body of a single inline
+#                function in a widely included header. Without splitting every translation
+#                unit that includes the header recompiles in full. With it, only the piece
+#                holding that one function should need recompiling.
 #
 # Usage: ./benchmark-boost-split.sh [runs]        (default 1)
 set -euo pipefail
@@ -23,6 +27,25 @@ SPLIT=/tmp/bench-split
 BOOST="$REPO/example/boost-to-split"
 SOURCE="$BOOST/libs/filesystem/src/portability.cpp"
 HEADER="$BOOST/libs/filesystem/include/boost/filesystem/path.hpp"
+BODY_HEADER="$BOOST/libs/filesystem/include/boost/filesystem/operations.hpp"
+BODY_BACKUP="$(mktemp)"
+
+# The body edit rewrites a tracked source file, so restore it whatever happens.
+cp "$BODY_HEADER" "$BODY_BACKUP"
+trap 'cp "$BODY_BACKUP" "$BODY_HEADER"; rm -f "$BODY_BACKUP"' EXIT
+
+# Change the body of is_regular_file(path const&) without changing what it does. Each call
+# inserts a different marker, so successive edits are genuinely different text.
+patch_body() {
+    python3 - "$BODY_HEADER" "$1" <<'PY'
+import sys
+path, marker = sys.argv[1], sys.argv[2]
+signature = "inline bool is_regular_file(path const& p)\n{\n"
+src = open(path).read()
+src = src.replace(signature, signature + "    (void)%s; // benchmark probe\n" % marker, 1)
+open(path, "w").write(src)
+PY
+}
 
 ms() { date +%s%3N; }
 human() { awk -v v="$1" 'BEGIN { printf "%6.1fs", v/1000 }'; }
@@ -34,7 +57,7 @@ export CPP_SPLITTER_NO_SERVER=1
 build() {  # build <dir> -> elapsed ms
     local dir="$1" start end
     start=$(ms)
-    ( cd "$dir" && tipi run ninja -j8 >/dev/null 2>&1 ) || { echo "BUILD FAILED in $dir" >&2; exit 1; }
+    ( cd "$dir" && tipi run ninja -j32 >/dev/null 2>&1 ) || { echo "BUILD FAILED in $dir" >&2; exit 1; }
     end=$(ms)
     echo $((end - start))
 }
@@ -80,6 +103,14 @@ for run in $(seq 1 "$RUNS"); do
     touch "$HEADER"; p=$(build "$PLAIN")
     touch "$HEADER"; s=$(build "$SPLIT")
     report "one header" "$p" "$s"
+
+    # The full build above is already done and settled; only this edit is timed.
+    cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body "$((run * 2))"
+    p=$(build "$PLAIN")
+    cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body "$((run * 2 + 1))"
+    s=$(build "$SPLIT")
+    report "one body" "$p" "$s"
+    cp "$BODY_BACKUP" "$BODY_HEADER"
 done
 
 echo
