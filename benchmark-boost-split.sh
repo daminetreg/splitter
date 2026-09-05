@@ -17,6 +17,11 @@
 #                unit that includes the header recompiles in full. With it, only the piece
 #                holding that one function should need recompiling.
 #
+# Splitting turns one link of a dozen objects into one of several hundred, so the linker
+# doing the combining is worth measuring too. Set CPP_SPLITTER_LINKER to compare one:
+#
+#   CPP_SPLITTER_LINKER=mold ./benchmark-boost-split.sh
+#
 # Usage: ./benchmark-boost-split.sh [runs]        (default 1)
 set -euo pipefail
 
@@ -71,7 +76,11 @@ configure() {  # configure <dir> [launcher...]
         "$@" >/dev/null 2>&1
 }
 
+LINKER="${CPP_SPLITTER_LINKER:-ld}"
+export CPP_SPLITTER_LINKER="$LINKER"
+
 echo "==> building cpp-splitter"
+echo "==> relocatable linker: $LINKER"
 tipi run cmake --build "$REPO/build" -j32 >/dev/null
 
 printf '\n%-14s %10s %10s %10s\n' scenario plain split ratio
@@ -121,3 +130,4 @@ for name in plain split; do
 done
 pieces=$(find "$SPLIT" -name '*.cpp' -path '*.split*' 2>/dev/null | wc -l)
 echo "    split pieces generated: $pieces"
+echo "    relocatable linker:     $LINKER"

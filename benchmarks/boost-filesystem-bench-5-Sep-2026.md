@@ -144,10 +144,54 @@ Timing is worthless if the output is wrong, so alongside every measurement:
   a build without the launcher rebuilds;
 - the eleven `ctest` fixtures pass.
 
+## Relocatable linker: `ld` vs `mold`
+
+Splitting turns one link of twelve objects into twelve links of several hundred, so the
+linker doing the combining stops being an incidental choice. `CPP_SPLITTER_LINKER` selects
+it; it defaults to `ld` and is passed `-r` either way.
+
+End to end, with mold 2.30.0:
+
+| scenario | `ld` | `mold` |
+|---|---:|---:|
+| full | 7.4s | 7.2s |
+| no-op | 0.2s | 0.2s |
+| one source | 0.2s | 0.2s |
+| one header | 0.3s | 0.3s |
+| one function body | 1.8s | 1.8s |
+| **library** | **12M** | **9.3M** |
+| build tree | 269M | 265M |
+
+The timings are within noise; the library is 22% smaller.
+
+That the total barely moves is not evidence that the linker does not matter — it is evidence
+that the link is not where the time goes. Timing the step in isolation, on the largest unit
+(72 objects):
+
+| linker | per link | output |
+|---|---:|---:|
+| `ld` | 40 ms | 11M |
+| `mold` | **20 ms** | **7.7M** |
+
+**mold is twice as fast at the relocatable link and produces an object 30% smaller.** Across
+twelve units that saves about 0.24s of a 7.4s build — roughly what the end-to-end numbers
+show, and about 3%. The link is around 5% of a full split build; halving it cannot do more
+than that.
+
+The size reduction is the more interesting result, and it compounds: the split library is
+large because every piece carries its own copy of whatever inline and template code it needs,
+and mold evidently merges more of that duplication than GNU ld does when producing a
+relocatable object. The library it produces links and passes the same nine assertions.
+
+Worth revisiting if the compile side gets faster — at which point 5% becomes a larger share —
+or on a project whose units split into thousands of pieces rather than hundreds, where the
+link would scale up faster than the compilation.
+
 ## Reproducing
 
 ```sh
 ./benchmark-boost-split.sh [runs]
+CPP_SPLITTER_LINKER=mold ./benchmark-boost-split.sh [runs]
 ```
 
 No environment variables are needed; the splitter splits by default since the server was

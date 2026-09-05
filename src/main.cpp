@@ -2974,6 +2974,18 @@ static bool read_split_cache(const std::string& split_dir, const std::string& ha
     return true;
 }
 
+// The linker used to combine a unit's pieces back into one object.
+//
+// Splitting turns one link of a dozen objects into one of several hundred, so which linker
+// does the combining stops being an incidental choice. `CPP_SPLITTER_LINKER` names the
+// program; it defaults to `ld` and is passed `-r` either way, since mold, lld and GNU ld all
+// spell relocatable output the same. Set it to `mold` or `ld.lld` to try another.
+static std::string relocatable_linker() {
+    const char* env = std::getenv("CPP_SPLITTER_LINKER");
+    if (env && *env) return env;
+    return "ld";
+}
+
 static int run_as_launcher(int argc, char* argv[]) {
     bool verbose = launcher_verbose();
     std::string compiler = argv[1];
@@ -3263,13 +3275,15 @@ static int run_as_launcher(int argc, char* argv[]) {
             if (verbose) std::cerr << "[cpp-splitter] single .o, copying " << obj_files[0] << " -> " << output_file << "\n";
             fs::copy_file(obj_files[0], output_file, fs::copy_options::overwrite_existing);
         } else {
-            std::string cmd = "ld -r -o " + shell_quote(output_file);
+            const std::string linker = relocatable_linker();
+            std::string cmd = shell_quote(linker) + " -r -o " + shell_quote(output_file);
             for (const auto& obj : obj_files)
                 cmd += " " + shell_quote(obj);
-            if (verbose) std::cerr << "[cpp-splitter] ld -r: " << cmd << "\n";
+            if (verbose) std::cerr << "[cpp-splitter] " << linker << " -r: " << cmd << "\n";
             int ret = run_command_quiet(cmd);
             if (ret != 0) {
-                std::cerr << "cpp-splitter: relocatable link failed\n";
+                std::cerr << "cpp-splitter: relocatable link failed using '" << linker
+                          << "'\n";
                 split_build_failed = true;
             }
         }
