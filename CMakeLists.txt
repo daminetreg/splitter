@@ -116,11 +116,12 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   static_in_header_main  a static function in one header, called from another
 #   macro_argument_extent_main  one macro, two overlapping but unequal extents
 #   preamble_variables_main  variable definitions carried into every piece
+#   macro_definition_main  a macro expanding to one out-of-line member definition
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
                 always_inline_main impl_include_main preamble_linkage macro_members_main
                 retracted_macro_main ipp_ctor_main multiline_conditional_main
                 trailing_comment_main specialization_member_main static_in_header_main
-                macro_argument_extent_main preamble_variables_main)
+                macro_argument_extent_main preamble_variables_main macro_definition_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -200,6 +201,7 @@ set_tests_properties(
   split.ipp_ctor_main split.multiline_conditional_main split.trailing_comment_main
   split.specialization_member_main split.static_in_header_main
   split.macro_argument_extent_main split.preamble_variables_main
+  split.macro_definition_main
   launcher.shared_inline_header launcher.depfile_names_originals
   launcher.explicit_specialization launcher.default_standard
   launcher.header_edit_behind_pch

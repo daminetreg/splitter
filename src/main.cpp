@@ -109,6 +109,9 @@ struct FunctionInfo {
     // Another definition reports the same extent: the mark of a macro that expands to more
     // than one declaration, whose extent is the invocation rather than any one declarator.
     bool shares_extent = false;
+    // The extent was a fragment of a macro invocation and has been widened to the whole
+    // invocation, which can then be moved as a unit.
+    bool macro_invocation = false;
     bool uses_undefined_macro = false;  // body or conditionals need a macro the file #undefs
     std::string member_decl;          // in-class declaration left behind (members only)
     std::string outlined_body;        // `T Class::name(args) { ... }` (members only)
@@ -668,6 +671,7 @@ static bool has_vague_linkage(const FunctionInfo& fn) {
 
 static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.shares_extent)       return "shares its source extent with another definition";
+    if (fn.macro_invocation)    return "produced by a macro invocation, which moved as a unit";
     if (fn.uses_undefined_macro) return "needs a macro the file undefines";
     if (fn.is_template)         return "function template";
     if (fn.in_class_template)   return "member of a class template";
@@ -1453,6 +1457,58 @@ static void dump_keep_decisions(const std::vector<FunctionInfo>& functions) {
     fflush(stderr);
 }
 
+static bool extent_is_a_definition(const FunctionInfo& fn, const std::string& text);
+
+// Widen a macro-invocation fragment to the whole invocation.
+//
+// When a definition's tokens come from a macro body, libclang reports its extent inside the
+// invocation -- and what lands there can be a fragment of it. Boost.Test writes
+//
+//     BOOST_TEST_SINGLETON_CONS_IMPL(collector_t)
+//
+// which expands to one member function, and the extent reported for that function is the
+// two characters `t)`: the tail of the argument and the closing paren. Nothing can be done
+// with a fragment. The invocation, however, is a unit -- it produced this definition and
+// nothing else the file refers to -- so widening to it makes the definition movable again.
+//
+// Returns false when the text around `start` does not look like the inside of an
+// invocation, in which case the caller leaves the definition alone.
+static bool widen_to_macro_invocation(const std::string& blanked, unsigned& start, unsigned& end) {
+    // Walk back to the `(` that opens the argument list.
+    size_t i = start;
+    int depth = 0;
+    while (i > 0) {
+        const char c = blanked[--i];
+        if (c == ')') ++depth;
+        else if (c == '(') {
+            if (depth == 0) break;
+            --depth;
+        }
+    }
+    if (i == 0 || blanked[i] != '(') return false;
+    const size_t open = i;
+
+    // The macro's name sits immediately before it.
+    while (i > 0 && std::isspace(static_cast<unsigned char>(blanked[i - 1]))) --i;
+    const size_t name_end = i;
+    while (i > 0 && is_ident_char(static_cast<unsigned char>(blanked[i - 1]))) --i;
+    if (i == name_end) return false;
+    if (std::isdigit(static_cast<unsigned char>(blanked[i]))) return false;
+
+    // And forward to the `)` that closes it.
+    size_t j = open;
+    depth = 0;
+    for (; j < blanked.size(); ++j) {
+        if (blanked[j] == '(') ++depth;
+        else if (blanked[j] == ')' && --depth == 0) break;
+    }
+    if (j >= blanked.size()) return false;
+
+    start = static_cast<unsigned>(i);
+    end = static_cast<unsigned>(j) + 1;
+    return true;
+}
+
 static void prepare_functions(std::vector<FunctionInfo>& functions,
                               const std::string& source,
                               const std::set<std::string>& referenced,
@@ -1491,6 +1547,31 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
             if (j - i > 1)
                 for (size_t k = i; k < j; ++k) by_extent[k]->shares_extent = true;
             i = j;
+        }
+    }
+
+    // A macro that expands to exactly one out-of-line member definition. Its extent is a
+    // fragment of the invocation; widening to the whole invocation makes it a unit that can
+    // be moved to the definitions header, which is where a non-inline definition in a header
+    // has to go. The restriction to a single out-of-line member is what makes the move safe:
+    // the class already declares it, so nothing left in the file refers to the text.
+    {
+        const std::string blanked = blank_code_noise(source);
+        for (auto& fn : functions) {
+            if (fn.shares_extent || fn.defined_in_class) continue;
+            if (extent_is_a_definition(fn, fn.body)) continue;
+            bool is_member = false;
+            for (const auto& e : fn.scope_chain)
+                if (e.kind == ScopeKind::Class) { is_member = true; break; }
+            if (!is_member) continue;
+
+            unsigned start = fn.start_offset, end = fn.end_offset;
+            if (!widen_to_macro_invocation(blanked, start, end)) continue;
+            if (end > source.size()) continue;
+            fn.start_offset = start;
+            fn.end_offset = end;
+            fn.body = source.substr(start, end - start);
+            fn.macro_invocation = true;
         }
     }
 
@@ -1697,6 +1778,7 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
 // left where it was -- less moving, nothing broken.
 static std::string variable_declaration_head(const std::string& text);
 
+
 // Whether a `template<...>` prefix precedes `start`.
 //
 // The prefix sits outside the cursor's extent -- the same thing that makes an explicit
@@ -1891,6 +1973,26 @@ static std::string variable_declaration_head(const std::string& text) {
     return "";
 }
 
+// Whether a definition's extent text is actually a definition.
+//
+// It is not when the tokens came from a macro body: libclang then reports the extent in the
+// invocation, and what lands there can be a fragment of it. BOOST_TEST_SINGLETON_CONS_IMPL
+// expands to one member function, and the extent libclang gives for it is the two characters
+// `t)` -- the tail of `BOOST_TEST_SINGLETON_CONS_IMPL(collector_t)`. Moving that anywhere
+// leaves the invocation unterminated, and the next `#include` in the file is then read as a
+// macro argument:
+//
+//     error: embedding a #include directive within macro arguments is not supported
+//
+// A brace means a body was written here. Failing that, the declarator's own name appearing
+// in the text means the declaration was: `Foo::Foo() = default;` has no brace and is still a
+// definition that can be moved.
+static bool extent_is_a_definition(const FunctionInfo& fn, const std::string& text) {
+    const std::string blanked = blank_code_noise(text);
+    if (definition_decl_end(blanked) != std::string::npos) return true;
+    return !fn.name.empty() && find_declarator(blanked, fn.name) != std::string::npos;
+}
+
 // Builds the preamble, and separates out the definitions that must not be repeated.
 //
 // The preamble is included by every split piece, so everything it carries is compiled once
@@ -2000,7 +2102,8 @@ static std::string generate_preamble(const std::string& source,
                                          : std::vector<std::pair<unsigned, unsigned>>()),
                 renames);
 
-            if (definitions && r.fn && !has_vague_linkage(*r.fn)) {
+            if (definitions && r.fn && !has_vague_linkage(*r.fn) &&
+                (r.fn->macro_invocation || extent_is_a_definition(*r.fn, text))) {
                 // Kept, but it may exist in only one object. Out of the shared preamble it
                 // goes; a member is already declared by its class, and a free function gets
                 // a declaration left where its body was. The text is lifted out of whatever

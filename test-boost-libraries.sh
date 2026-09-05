@@ -5,7 +5,9 @@
 # The filesystem example is twelve translation units of ordinary library code. Boost's test
 # suites are a different shape -- hundreds of small translation units, each pulling in heavy
 # headers -- and Spirit is different again: header-only, and about as template-dense as C++
-# gets. Both find things the filesystem example cannot.
+# gets. Geometry is a third shape: header-only like Spirit, but where Spirit's weight is in
+# expression templates, Geometry's is in tag dispatch over a large concept hierarchy, and its
+# tests are real programs rather than compile checks. Each finds things the others cannot.
 #
 # Every library's tests are built twice, once through the splitter and once without, and the
 # two are compared. A test that fails to build without the splitter is not the splitter's
@@ -17,7 +19,7 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOST="$REPO/example/boost-to-split"
-LIBS="${1:-filesystem;spirit;system;core;smart_ptr;assert}"
+LIBS="${1:-filesystem;spirit;system;core;geometry;smart_ptr;assert}"
 SPLIT=/tmp/boost-libs-split
 PLAIN=/tmp/boost-libs-plain
 
