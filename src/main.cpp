@@ -492,6 +492,22 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
 }
 
 // Decided by prepare_functions(), which needs the source text and so cannot run here.
+// Why a definition was left in the preamble. The piece is still written, so that the file
+// list stays stable, but it is not compiled -- and the reader of that file deserves to know
+// which of the many keep rules applied rather than being told every one of them is
+// "template", which is what this used to say.
+static std::string keep_reason(const FunctionInfo& fn) {
+    if (fn.is_template)         return "function template";
+    if (fn.in_class_template)   return "member of a class template";
+    if (fn.in_anonymous_class)  return "member of an unnamed class";
+    if (fn.is_specialization)   return "explicit specialization";
+    if (fn.is_virtual)          return "virtual member function";
+    if (fn.in_unnamed_ns)       return "enclosed by an unnamed namespace";
+    if (fn.is_ctor_or_dtor)     return "constructor or destructor in a header";
+    if (!fn.always_inline_ranges.empty()) return "always-inline";
+    return "not emitted by this translation unit, or not movable out of the header";
+}
+
 static bool should_keep_in_header(const FunctionInfo& fn) {
     return fn.keep_in_header;
 }
@@ -2584,7 +2600,8 @@ static void emit_split_files(CXTranslationUnit tu,
         content << "// Function: " << fn.signature << "\n";
         content << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
         if (should_keep_in_header(fn))
-            content << "// Note: template - kept in preamble header for compilation\n";
+            content << "// Note: kept in the preamble, not compiled -- "
+                    << keep_reason(fn) << "\n";
         content << "// ---\n\n";
         // A header is not necessarily self-contained: it is written to be included at a
         // particular point, after earlier includes have completed the types it uses.
