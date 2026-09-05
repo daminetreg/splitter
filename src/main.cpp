@@ -183,7 +183,29 @@ static std::string sanitize_filename(const std::string& name) {
 // Functions defined in a translation unit, bucketed by the file that defines them. A
 // header's inventory is taken from the translation unit that includes it, in the macro and
 // inclusion context its includer establishes, rather than from a standalone re-parse.
+// A variable definition written at namespace scope, or an out-of-class static data member.
+//
+// The preamble is the source with the function bodies carved out, so everything that is not
+// a function is copied through verbatim -- and every split piece includes the preamble. An
+// ordinary variable with external linkage is therefore defined once per piece, and `ld -r`
+// rejects the result. This is the same question has_vague_linkage() answers for functions,
+// asked about the other kind of definition a file contains.
+struct VariableInfo {
+    std::string file;
+    std::string name;
+    std::string text;                 // source text, through the terminating `;`
+    unsigned start_offset = 0;
+    unsigned end_offset = 0;
+    unsigned start_line = 0;
+    std::string type_spelling;        // for the declaration left behind, when the text cannot give one
+    std::vector<ScopeEntry> scope_chain;
+    bool is_member = false;           // out-of-class static data member: the class declares it
+    bool move_out = false;            // may exist in only one object
+    std::string replacement;          // what the preamble gets in place of the definition
+};
+
 using HarvestMap = std::map<std::string, std::vector<FunctionInfo>>;
+using VarHarvestMap = std::map<std::string, std::vector<VariableInfo>>;
 
 // The functions this translation unit will actually emit.
 //
@@ -301,10 +323,111 @@ struct VisitorData {
     CXTranslationUnit tu;
     const std::set<std::string>* wanted;   // files whose functions to record
     HarvestMap* harvest;
+    VarHarvestMap* variables;
 };
 
 static std::string blank_code_noise(const std::string& text);
 static bool contains_decl_token(const std::string& blanked, const std::string& kw);
+
+// The source text of a variable definition, through its terminating semicolon.
+//
+// libclang's extent for a VarDecl stops at the initialiser, so the `;` has to be found in
+// the source: without it the definition written into the definitions header does not parse,
+// and the `;` left behind in the preamble dangles after the declaration that replaced it.
+//
+// Extending to the `;` also merges the declarators of `int a = 0, b = 1;` into one range,
+// which generate_preamble() then folds and keeps verbatim. That is the right answer -- one
+// declarator of such a declaration cannot be moved without the others -- and it falls out of
+// the same mechanism that handles macro expansions.
+static bool extend_through_semicolon(const std::string& blanked, unsigned& to) {
+    int depth = 0;
+    for (size_t i = to; i < blanked.size(); ++i) {
+        const char c = blanked[i];
+        if (c == '(' || c == '[' || c == '{') ++depth;
+        else if (c == ')' || c == ']' || c == '}') --depth;
+        else if (c == ';' && depth <= 0) { to = static_cast<unsigned>(i) + 1; return true; }
+        else if (depth < 0) break;   // ran out of the declaration's scope
+    }
+    return false;
+}
+
+static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string& file) {
+    if (!vd->variables) return;
+
+    CXCursor parent = clang_getCursorSemanticParent(cursor);
+    const CXCursorKind pk = clang_getCursorKind(parent);
+    const bool at_namespace_scope =
+        pk == CXCursor_Namespace || pk == CXCursor_TranslationUnit;
+    const bool is_member = pk == CXCursor_ClassDecl || pk == CXCursor_StructDecl ||
+                           pk == CXCursor_UnionDecl;
+    if (!at_namespace_scope && !is_member) return;
+
+    // A member's *definition* is the one written outside the class; the in-class
+    // declaration is not a definition and never reaches here, except for the inline and
+    // constexpr cases, which are excluded below anyway.
+    if (is_member) {
+        const CXCursorKind lex = clang_getCursorKind(clang_getCursorLexicalParent(cursor));
+        if (lex == CXCursor_ClassDecl || lex == CXCursor_StructDecl ||
+            lex == CXCursor_UnionDecl || lex == CXCursor_ClassTemplate)
+            return;
+    }
+
+    VariableInfo info;
+    info.file = file;
+    info.name = cx_to_string(clang_getCursorSpelling(cursor));
+    info.is_member = is_member;
+
+    CXSourceRange extent = clang_getCursorExtent(cursor);
+    unsigned s_off = 0, e_off = 0, line = 0;
+    clang_getFileLocation(clang_getRangeStart(extent), nullptr, &line, nullptr, &s_off);
+    clang_getFileLocation(clang_getRangeEnd(extent), nullptr, nullptr, nullptr, &e_off);
+    info.start_offset = s_off;
+    info.end_offset = e_off;
+    info.start_line = line;
+    info.type_spelling = cx_to_string(clang_getTypeSpelling(clang_getCursorType(cursor)));
+
+    // Enclosing namespaces, so a moved definition can be reopened in its own scope. The
+    // walk stops at a class for the same reason it does for functions: what is inside one
+    // is not something a definitions header can reopen.
+    std::vector<ScopeEntry> scope_parts;
+    CXCursor up = parent;
+    bool in_template = false;
+    while (true) {
+        const CXCursorKind uk = clang_getCursorKind(up);
+        if (uk != CXCursor_Namespace && uk != CXCursor_ClassDecl &&
+            uk != CXCursor_StructDecl && uk != CXCursor_UnionDecl &&
+            uk != CXCursor_ClassTemplate &&
+            uk != CXCursor_ClassTemplatePartialSpecialization)
+            break;
+        // A static data member of a class template has vague linkage, and a definitions
+        // header cannot reopen a template anyway.
+        if (uk == CXCursor_ClassTemplate || uk == CXCursor_ClassTemplatePartialSpecialization)
+            in_template = true;
+        const std::string uname = cx_to_string(clang_getCursorSpelling(up));
+        if (!uname.empty())
+            scope_parts.push_back(
+                {uname, uk == CXCursor_Namespace ? ScopeKind::Namespace : ScopeKind::Class});
+        up = clang_getCursorSemanticParent(up);
+    }
+    std::reverse(scope_parts.begin(), scope_parts.end());
+    info.scope_chain = scope_parts;
+
+    // Only an ordinary external-linkage definition has to be moved. Everything with vague
+    // or internal linkage may appear in every piece, which is what the preamble does.
+    // `inline` is read from the pretty-printed declaration rather than the source text
+    // because, like constexpr on a function, it is routinely spelled as a macro.
+    info.move_out = clang_getCursorLinkage(cursor) == CXLinkage_External && !in_template;
+    if (info.move_out) {
+        const std::string pretty = cx_to_string(clang_getCursorPrettyPrinted(cursor, nullptr));
+        const std::string blanked = blank_code_noise(pretty);
+        const size_t eq = blanked.find('=');
+        const std::string head = blanked.substr(0, eq == std::string::npos ? blanked.size() : eq);
+        if (contains_decl_token(head, "inline") || contains_decl_token(head, "constexpr"))
+            info.move_out = false;
+    }
+
+    (*vd->variables)[file].push_back(std::move(info));
+}
 
 static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClientData data) {
     auto* vd = static_cast<VisitorData*>(data);
@@ -330,6 +453,11 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
         kind == CXCursor_Constructor || kind == CXCursor_Destructor ||
         kind == CXCursor_FunctionTemplate) {
         is_function_def = clang_isCursorDefinition(cursor);
+    }
+
+    if (kind == CXCursor_VarDecl && clang_isCursorDefinition(cursor)) {
+        if (wanted_file) harvest_variable(vd, cursor, cursor_filename);
+        return CXChildVisit_Continue;
     }
 
     if (!is_function_def) {
@@ -1556,6 +1684,131 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
     }
 }
 
+// Narrows the harvested variables to the ones that will actually be moved, and gives each
+// its source text.
+//
+// A variable that stays in the preamble needs no entry at all: it is ordinary text between
+// the function extents and is copied through, which is what already happens. Only the ones
+// that move need to be cut out, so anything this cannot handle confidently is dropped and
+// left where it was -- less moving, nothing broken.
+static std::string variable_declaration_head(const std::string& text);
+
+// A type that can be written in front of a name to declare it. Arrays and function pointers
+// spell their declarator around the name (`int [3]`, `void (*)(int)`), so `extern <type>
+// <name>;` does not work for them and the source text has to provide the declaration
+// instead.
+static bool type_spelling_is_simple(const std::string& type) {
+    return !type.empty() &&
+           type.find('[') == std::string::npos &&
+           type.find('(') == std::string::npos;
+}
+
+static void prepare_variables(std::vector<VariableInfo>& variables, const std::string& source) {
+    const std::string blanked = blank_code_noise(source);
+
+    // Extend every extent through its terminating semicolon. libclang stops at the
+    // initialiser, and without the `;` the definition written into the definitions header
+    // does not parse and the `;` left behind dangles after the declaration replacing it.
+    std::vector<VariableInfo> usable;
+    for (auto& var : variables) {
+        if (!var.move_out) continue;
+        if (var.end_offset > source.size() || var.start_offset >= var.end_offset) continue;
+        unsigned end = var.end_offset;
+        if (!extend_through_semicolon(blanked, end)) continue;
+        var.end_offset = end;
+        usable.push_back(std::move(var));
+    }
+
+    // Declarators of one declaration now share an end offset. `int a = 1, b = 2;` is one
+    // definition of two variables: it moves whole or not at all, and the preamble gets an
+    // `extern` for each name.
+    std::sort(usable.begin(), usable.end(),
+              [](const VariableInfo& a, const VariableInfo& b) {
+                  if (a.end_offset != b.end_offset) return a.end_offset < b.end_offset;
+                  return a.start_offset < b.start_offset;
+              });
+
+    std::vector<VariableInfo> kept;
+    size_t i = 0;
+    while (i < usable.size()) {
+        size_t j = i + 1;
+        while (j < usable.size() && usable[j].end_offset == usable[i].end_offset) ++j;
+
+        VariableInfo group = usable[i];
+        group.start_offset = usable[i].start_offset;
+        group.text = source.substr(group.start_offset, group.end_offset - group.start_offset);
+
+        // `inline` gives a variable vague linkage, so it may -- and must -- appear in every
+        // piece. libclang reports it as ordinary external linkage, and does not print it
+        // back in the pretty-printed declaration either, so the source text is the only
+        // place it can be read.
+        const std::string head = variable_declaration_head(group.text);
+        const std::string head_blanked = blank_code_noise(head);
+        if (contains_decl_token(head_blanked, "inline") ||
+            contains_decl_token(head_blanked, "constexpr")) {
+            i = j;
+            continue;
+        }
+
+        bool usable_group = true;
+        if (j - i == 1) {
+            // One declarator: the source text spells the type exactly as written, arrays
+            // and function pointers included.
+            if (group.is_member) {
+                group.replacement.clear();          // the class already declares it
+            } else if (!head.empty()) {
+                group.replacement = terminate_declaration("extern " + head);
+            } else if (type_spelling_is_simple(group.type_spelling)) {
+                group.replacement = "extern " + group.type_spelling + " " + group.name + ";";
+            } else {
+                usable_group = false;
+            }
+        } else {
+            // Several declarators: the text gives no per-name declaration, so each is
+            // rebuilt from its type. A declarator whose type cannot be written that way
+            // takes the whole declaration out of the running -- it moves whole or not at
+            // all, and half of it moving would be worse than none.
+            for (size_t k = i; k < j && usable_group; ++k) {
+                if (usable[k].is_member || !type_spelling_is_simple(usable[k].type_spelling))
+                    usable_group = false;
+            }
+            if (usable_group) {
+                group.replacement.clear();
+                for (size_t k = i; k < j; ++k)
+                    group.replacement +=
+                        "extern " + usable[k].type_spelling + " " + usable[k].name + ";\n";
+            }
+        }
+
+        // Nothing that can be moved safely. It stays in the preamble, where every piece
+        // gets a copy -- which is the defect, so the link fails and the unit falls back to
+        // compiling whole. That is the safe direction: slower, never wrong.
+        if (usable_group) kept.push_back(std::move(group));
+        i = j;
+    }
+    variables.swap(kept);
+}
+
+// The declarator part of a variable definition: everything before the initialiser, in
+// whichever of its three spellings the source used. Empty when the text does not look like
+// one declaration of one variable -- `int a = 0, b = 1;` declares two, and neither can be
+// moved without the other.
+static std::string variable_declaration_head(const std::string& text) {
+    const std::string blanked = blank_code_noise(text);
+    int depth = 0;
+    for (size_t i = 0; i < blanked.size(); ++i) {
+        const char c = blanked[i];
+        if (depth == 0) {
+            if (c == '=' || c == '(' || c == '{' || c == ';')
+                return trim_ws(text.substr(0, i));
+            if (c == ',') return "";
+        }
+        if (c == '(' || c == '[' || c == '{' || c == '<') ++depth;
+        else if (c == ')' || c == ']' || c == '}' || c == '>') --depth;
+    }
+    return "";
+}
+
 // Builds the preamble, and separates out the definitions that must not be repeated.
 //
 // The preamble is included by every split piece, so everything it carries is compiled once
@@ -1573,6 +1826,7 @@ static std::string wrap_in_namespaces(const std::string& body,
 
 static std::string generate_preamble(const std::string& source,
                                      const std::vector<FunctionInfo>& functions,
+                                     const std::vector<VariableInfo>& variables,
                                      const std::string& stem,
                                      const std::string& source_path,
                                      const StaticRenameMap& renames,
@@ -1581,10 +1835,16 @@ static std::string generate_preamble(const std::string& source,
         unsigned start, end;
         bool keep;
         const FunctionInfo* fn;
+        const VariableInfo* var;
     };
     std::vector<Range> ranges;
     for (const auto& fn : functions) {
-        ranges.push_back({fn.start_offset, fn.end_offset, should_keep_in_header(fn), &fn});
+        ranges.push_back({fn.start_offset, fn.end_offset, should_keep_in_header(fn), &fn, nullptr});
+    }
+    // Only the variables that move are listed. One that stays is ordinary text between the
+    // function extents and is copied through without an entry, which is what it already was.
+    for (const auto& var : variables) {
+        ranges.push_back({var.start_offset, var.end_offset, false, nullptr, &var});
     }
     std::sort(ranges.begin(), ranges.end(),
               [](const Range& a, const Range& b) {
@@ -1618,6 +1878,7 @@ static std::string generate_preamble(const std::string& source,
                 if (r.end > prev.end) prev.end = r.end;
                 prev.keep = true;
                 prev.fn = nullptr;
+                prev.var = nullptr;
                 continue;
             }
             merged.push_back(r);
@@ -1670,6 +1931,21 @@ static std::string generate_preamble(const std::string& source,
                 }
             } else {
                 preamble += text;
+            }
+        } else if (r.var) {
+            // A variable that may exist in only one object. It goes to the definitions
+            // header, reopened in its namespaces, and an `extern` declaration takes its
+            // place -- at the position it occupied, so it precedes every use the file had.
+            // An out-of-class static data member needs no declaration: its class has one.
+            ensure_newline();
+            if (!definitions) {
+                // No definitions header to move it to: leave it exactly where it was.
+                preamble += apply_static_renames(r.var->text, renames);
+            } else {
+                *definitions += wrap_in_namespaces(
+                    apply_static_renames(r.var->text, renames), r.var->scope_chain);
+                *definitions += "\n";
+                if (!r.var->replacement.empty()) preamble += r.var->replacement + "\n";
             }
         } else if (r.fn) {
             // The definition moved to a split file, so a declaration has to take its
@@ -2385,6 +2661,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
                               const std::string& input_path,
                               const std::string& source,
                               std::vector<FunctionInfo>& functions,
+                              std::vector<VariableInfo>& variables,
                               const std::set<std::string>& referenced,
                               // Whether this unit is being split as an included file rather
                               // than as the file being compiled. The caller knows; the file
@@ -2417,13 +2694,14 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
     prepare_functions(functions, source, referenced, input_is_header);
+    prepare_variables(variables, source);
     dump_keep_decisions(functions);
 
     // A translation unit with nothing of its own to split still needs its preamble on disk:
     // the pieces split out of its headers include it to compile in the context the header
     // was seen in, and a unit whose whole body arrives through an included file has no
     // functions of its own at all.
-    const bool nothing_of_its_own = functions.empty();
+    const bool nothing_of_its_own = functions.empty() && variables.empty();
     if (nothing_of_its_own) {
         if (verbose) out << "No function definitions found in " << input_path << "\n";
         if (input_is_header) {
@@ -2441,7 +2719,8 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
     std::string definitions;
     const std::string preamble =
-        generate_preamble(source, functions, unit_tag, abs_path, static_renames, &definitions);
+        generate_preamble(source, functions, variables, unit_tag, abs_path, static_renames,
+                          &definitions);
 
     std::string existing_preamble;
     if (fs::exists(preamble_path))
@@ -2500,6 +2779,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
 // include directories the caller has to link and compile against.
 static void resolve_header_deps(CXTranslationUnit tu,
                                 const HarvestMap& harvest,
+                                const VarHarvestMap& var_harvest,
                                 const std::set<std::string>& referenced,
                                 const std::vector<std::string>& candidates,
                                 const std::string& context_preamble,
@@ -2516,6 +2796,9 @@ static void resolve_header_deps(CXTranslationUnit tu,
         auto it = harvest.find(inc_path);
         std::vector<FunctionInfo> fns =
             (it == harvest.end()) ? std::vector<FunctionInfo>() : it->second;
+        auto vit = var_harvest.find(inc_path);
+        std::vector<VariableInfo> vars =
+            (vit == var_harvest.end()) ? std::vector<VariableInfo>() : vit->second;
 
         const std::string src = read_file(inc_path);
         if (src.empty()) continue;
@@ -2533,8 +2816,8 @@ static void resolve_header_deps(CXTranslationUnit tu,
             continue;
         }
 
-        SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, referenced, true, output_dir,
-                                        all_flags, extra_flags, context_preamble,
+        SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, vars, referenced, true,
+                                        output_dir, all_flags, extra_flags, context_preamble,
                                         parse_clean, verbose, out);
         if (!hdr_sr.success && verbose)
             out << "[auto-split] warning: failed to split " << inc_path << "\n";
@@ -3097,7 +3380,8 @@ static SplitResult do_split(const std::string& input_path,
     wanted.insert(abs_path);
 
     HarvestMap harvest;
-    VisitorData vd{tu, &wanted, &harvest};
+    VarHarvestMap var_harvest;
+    VisitorData vd{tu, &wanted, &harvest, &var_harvest};
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
 
@@ -3110,7 +3394,13 @@ static SplitResult do_split(const std::string& input_path,
     std::set<std::string> referenced;
     collect_emitted(tu, abs_path, referenced);
 
-    result = split_unit(tu, abs_path, input_path, source, functions, referenced,
+    std::vector<VariableInfo> variables;
+    {
+        auto vit = var_harvest.find(abs_path);
+        if (vit != var_harvest.end()) variables = vit->second;
+    }
+
+    result = split_unit(tu, abs_path, input_path, source, functions, variables, referenced,
                         input_is_header, output_dir,
                         all_flags, extra_flags, std::string(), parse_errors == 0,
                         verbose, out);
@@ -3119,7 +3409,8 @@ static SplitResult do_split(const std::string& input_path,
         // Split pieces of this unit's headers include this preamble first, so they compile
         // in the context the header was harvested in.
         const std::string tu_preamble = fs::path(abs_path).stem().string() + "_preamble.h";
-        resolve_header_deps(tu, harvest, referenced, candidates, tu_preamble, result, output_dir,
+        resolve_header_deps(tu, harvest, var_harvest, referenced, candidates, tu_preamble,
+                            result, output_dir,
                             all_flags, extra_flags, parse_errors == 0, verbose, out);
     }
     clang_disposeTranslationUnit(tu);
