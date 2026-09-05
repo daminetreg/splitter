@@ -1,13 +1,12 @@
-# 15 — A macro before a function's return type is left behind when the definition is removed
+# 15 — Macros that expand to nothing are left behind in generated files
 
-**Severity:** High, and currently latent. The Boost example builds statically, where
-`BOOST_FILESYSTEM_DECL` expands to nothing and the stray text is invisible. Configure the
-same tree for dynamic linking and those 250 leftovers become visibility attributes attached
-to whatever declaration happens to follow them.
+**Severity:** Low. Cosmetic only. An earlier revision of this file claimed it was a latent
+ABI bug; that was wrong, and the correction is recorded below because the reasoning is worth
+keeping.
 
-## Motivation
+## What happens
 
-Generated preambles are full of this:
+Generated preambles contain lines like this:
 
 ```cpp
 //  normal  --------------------------------------------------------------------------//
@@ -16,150 +15,100 @@ BOOST_FILESYSTEM_DECL
 
 
 BOOST_FILESYSTEM_DECL 
-
-
-//  generic_path ---------------------------------------------------------------------//
-
-BOOST_FILESYSTEM_DECL 
 ```
 
-`path_preamble.h` contains 43 occurrences of `BOOST_FILESYSTEM_DECL`, of which **41 are
-stray** -- the macro alone on a line, its declaration gone. Across a Boost.Filesystem split
-build: 120 stray lines in 9 preambles, and another 130 in the rewritten headers, so about 250
-in total. `BOOST_ATOMIC_DECL`, `BOOST_FILESYSTEM_NO_SANITIZE_MEMORY` and
-`BOOST_ATTRIBUTE_UNUSED` are left behind the same way.
+`path_preamble.h` has 43 occurrences of `BOOST_FILESYSTEM_DECL`, 41 of them alone on a line
+with the declaration they belonged to gone. About 250 across a Boost.Filesystem split build
+counting the rewritten headers, along with `BOOST_ATOMIC_DECL`,
+`BOOST_FILESYSTEM_NO_SANITIZE_MEMORY` and `BOOST_ATTRIBUTE_UNUSED`.
 
-### Why it does not currently break anything
+A function's libclang extent begins at its return type. A macro invocation before that is
+outside the extent, so removing the definition leaves the macro's source text in the
+surrounding gap, which is copied verbatim.
 
-The example is built with `BUILD_SHARED_LIBS=OFF` and no `BOOST_ALL_DYN_LINK`, so
-`boost/filesystem/config.hpp` takes this branch:
+## Why it is harmless
+
+**Only macros that expand to nothing are ever left behind.** Anything that expands to a real
+token produces a token for the cursor to cover, so the extent starts at the macro and it is
+removed and reproduced with the declaration like any other specifier.
+
+Measured across every expansion shape:
 
 ```cpp
-#else
-#define BOOST_FILESYSTEM_DECL
-#endif
+#define M_NOTHING
+#define M_ATTR    __attribute__((visibility("default")))
+#define M_INLINE  inline
+#define M_BOTH    inline __attribute__((always_inline))
+#define M_COMMENT /* nothing but a comment */
 ```
 
-The macro expands to nothing and the stray text vanishes at preprocessing. That is the only
-reason 250 dangling declaration specifiers have gone unnoticed.
-
-### Why it will
-
-With `BOOST_ALL_DYN_LINK` or `BOOST_FILESYSTEM_DYN_LINK` the same macro becomes
-`BOOST_SYMBOL_EXPORT`, that is `__attribute__((visibility("default")))`. A dangling attribute
-is not discarded: it attaches to the next declaration. Measured directly, compiling with
-`-fvisibility=hidden`, which this build already passes:
-
-```cpp
-#define DECL __attribute__((visibility("default")))
-DECL
-
-DECL
-
-int leaked() { return 1; }
-```
-
-| | visibility of `leaked()` |
+| macro expands to | in the generated preamble |
 |---|---|
-| preceded by stray attributes | `GLOBAL DEFAULT` |
-| control, nothing before it | `GLOBAL HIDDEN` |
+| nothing | `M_NOTHING` left stray, then `int a(int v);` |
+| an attribute | `M_ATTR    int b(int v);` — absorbed |
+| `inline` | `M_INLINE  int c(int v);` — absorbed |
+| both | `M_BOTH    int d(int v);` — absorbed |
+| a comment | `M_COMMENT` left stray, then `int e(int v);` |
 
-So in a shared-library build the effect is that an arbitrary set of functions -- whichever
-ones happen to follow a removed definition -- get exported when they should not be. That is a
-silent ABI change, not a compile error, which is the worst shape for it to take.
+The two that are left behind expand to nothing and vanish at preprocessing. The three that
+carry meaning are all handled correctly, including reproducing the specifier on the
+declaration the preamble keeps in the definition's place.
 
-Where nothing at all follows the stray macro before the end of a block, the same text is a
-syntax error instead.
+So the leftovers are exactly the case where the text has no effect. There is no configuration
+in which one of them becomes meaningful: if `BOOST_FILESYSTEM_DECL` were defined as
+`BOOST_SYMBOL_EXPORT` for a dynamic build, it would expand to an attribute and would
+therefore be absorbed rather than stranded.
 
-## Reproduction
+### The correction
 
-```sh
-./benchmark-boost-split.sh            # or any split build of the example
-grep -c '^BOOST_FILESYSTEM_DECL[[:space:]]*$' \
-    /tmp/bench-split/libs/filesystem/CMakeFiles/boost_filesystem.dir/src/path.cpp.o.split/path_preamble.h
-```
+The previous revision argued that a dynamic build would strand visibility attributes, which
+would then attach to the following declaration and silently export it. The experiment
+supporting that -- a dangling `__attribute__((visibility("default")))` does change the
+following function from `HIDDEN` to `DEFAULT` under `-fvisibility=hidden` -- was correct in
+isolation but tested a situation the splitter cannot produce, because it never strands a
+macro that expands to anything. The conclusion did not follow from the evidence, and the
+severity was wrong by several levels.
 
-For the semantic half, add `-DBOOST_ALL_DYN_LINK` to the configure line and compare
-`readelf -sW` output for a function that follows a split-out definition against the same
-function in an unsplit build.
+## Why it is still worth fixing
 
-## Description
+Readability of generated output, which is the only thing anyone reads when a split goes
+wrong. Two false leads in this project have already come from noise in generated files: this
+one, and a `// Note: template - kept in preamble header` comment that was emitted for all ten
+keep reasons, which sent someone looking for a template that was not there.
 
-`generate_preamble()` removes each function by its libclang extent, `[start_offset,
-end_offset)`. For
-
-```cpp
-BOOST_FILESYSTEM_DECL path path_algorithms::lexically_normal_v3(path const& p)
-{
-    ...
-}
-```
-
-the extent begins at `path`, the return type -- not at `BOOST_FILESYSTEM_DECL`. When the
-macro expands to nothing there is no token for it to cover, so the cursor cannot start any
-earlier, and the source text of the macro invocation sits outside the range that gets cut.
-Everything from the previous item up to `start_offset` is copied verbatim into the preamble,
-and that includes the macro.
-
-This is not specific to attribute macros. Any macro invocation between the previous
-declaration and the start of a function's extent survives the removal.
+250 lines of dangling macro names in files people read while debugging is a small tax on every
+future investigation.
 
 ## Implementation spec
 
-### The rule
+When copying the gap before a removed definition, drop a trailing run of whitespace and whole
+identifier tokens -- the specifiers libclang did not include because they expanded to nothing.
+Stop at anything that cannot be part of a declaration specifier: `; } { ) : ,`, the start of
+the file, or a line beginning with `#`.
 
-When removing or replacing a function's extent, extend the start of the removed range
-backwards over the declaration specifiers that libclang did not include: whitespace, and
-whole identifier tokens separated only by whitespace. Stop at the first character that cannot
-be part of a declaration specifier -- any of `; } { ) : ,` or the start of the file, or a
-preprocessor directive line.
+Because only empty expansions reach this path, the transformation cannot change meaning; it
+removes text the preprocessor was going to remove anyway. That makes it much safer than the
+previous revision's version of the same change, and it does not need to handle attributes,
+`inline`, or anything else that carries meaning.
 
-Identifiers are the only thing that needs absorbing. Real keywords like `inline`, `static`
-and `constexpr` are already inside the extent, because they produce tokens; only macro
-invocations that expanded to nothing, or to an attribute clang attributed to the declaration
-rather than to the range, are left outside it.
+Scan `blank_code_noise()`'s output and apply offsets to the original, as the rest of the file
+does, so comments and string literals are not misread.
 
-### Where
+Two boundaries to respect:
 
-`generate_preamble()`, on the `Range` built for each `FunctionInfo`. Compute the adjusted
-start once when the ranges are built, so that both the gap-copying and the sorting see the
-same boundaries; adjusting it later would let a gap and a range overlap.
-
-Note that `Range` entries are deduplicated by identical `(start, end)` for the macro-expansion
-case described in the comment there -- `BOOST_BITMASK` and friends -- so the widened start
-must be computed before that comparison, not after.
-
-### Boundary cases to get right
-
-1. **Two definitions with nothing between them.** Widening the second must not run back into
-   the first; stopping at `}` handles it.
-2. **A definition at the start of a namespace body.** Stopping at `{` handles it.
-3. **A macro invocation with arguments**, `BOOST_ATTR(x) void f() {}`. Stopping at `)` leaves
-   the invocation behind, which is the status quo rather than a regression. Absorbing a
-   balanced parenthesised group before an identifier would handle it, and is worth doing only
-   if such a case actually appears.
-4. **A preprocessor directive immediately before**, `#endif` then the definition. The scan
-   must not cross a line beginning with `#`, or a conditional's `#endif` would be swallowed
-   and the preprocessor left unbalanced.
-5. **A comment before the definition.** `blank_code_noise()` already blanks comments, so
-   scanning the blanked copy and applying offsets to the original keeps them intact, as the
-   rest of the file does.
-6. **The out-of-line member form.** `prepare_functions()` builds `member_decl` and
-   `outlined_body` from `fn.body`, which starts at the same extent, so a specifier before the
-   return type is missing from those too. The widened start should be recorded on
-   `FunctionInfo` and used wherever `body` is taken, not only in the preamble.
+- The adjusted start must be computed when the ranges are built, before the deduplication of
+  identical `(start, end)` pairs that handles macros like `BOOST_BITMASK` expanding to many
+  functions at one extent.
+- The scan must not cross a preprocessor line, or an `#endif` could be swallowed and the
+  conditional left unbalanced.
 
 ## Acceptance Criteria
 
-- No line consisting only of an all-capitals identifier appears in any generated preamble or
-  rewritten header for the Boost example; the count goes from about 250 to zero.
-- `BOOST_FILESYSTEM_DECL` still appears where it belongs: on the declarations the preamble
-  legitimately keeps.
-- Configured with `-DBOOST_ALL_DYN_LINK`, the set of exported symbols in the split library
-  matches the set in an unsplit build, compared with `readelf -sW`. This is the criterion that
-  matters; the others are proxies for it.
-- The example still splits 12 of 12 translation units with no fallbacks, and the library still
-  links and passes its nine assertions.
-- A regression fixture in `test/`, registered with `add_test`, in which a function carrying a
-  macro-expanded declaration specifier is split out, asserting the specifier does not survive
-  in the preamble and does not attach to the following declaration.
+- No line consisting only of an identifier appears in a generated preamble or rewritten
+  header for the Boost example: about 250 to zero.
+- Specifiers that expand to something are still reproduced on the declarations the preamble
+  keeps, which the table above is the test for.
+- The example still splits 12 of 12 translation units with no fallbacks, the library still
+  links and passes its nine assertions, and the eleven tests still pass.
+- Since the change is cosmetic, the generated objects should be unchanged: comparing the
+  split library before and after is the cheapest way to confirm nothing meaningful moved.
