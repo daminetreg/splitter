@@ -2,6 +2,8 @@
 
 **Severity:** Blocker. Nothing else in this list is observable until this is fixed.
 
+**Status: resolved by removing the server.** See "Outcome" at the end.
+
 ## Motivation
 
 `cpp-splitter` used as `CMAKE_CXX_COMPILER_LAUNCHER` silently does nothing unless a
@@ -91,3 +93,31 @@ tipi run cmake -GNinja -S example/boost-to-split -B build-split \
 tipi run cmake --build build-split -j8
 find build-split -name '*.split' | wc -l    # 0 before the fix
 ```
+
+## Outcome
+
+Fixed by deleting the feature rather than repairing the branch.
+
+The server existed to keep parsed translation units in memory so that a later split could
+reuse them. Weighed against that: it was the reason this bug existed at all; it made
+`CPP_SPLITTER_NO_SERVER=1` mandatory in every script, test driver and set of build
+instructions, because without it the launcher passed every compile straight through and
+split nothing while reporting success; and it cannot help a build distributed across
+machines, which is where a tool that produces thousands of independent compilations is
+eventually going to run.
+
+Removed: the Unix socket protocol and its framing, `CachedTU` and the in-memory translation
+unit cache, `try_server_split()`, `do_split_with_cache()`, `run_server()` and its signal
+handling, the `--server` and `--socket` command line modes, and the
+`CPP_SPLITTER_SOCKET` and `CPP_SPLITTER_NO_SERVER` environment variables. Both drivers now
+call `do_split()` directly. `example/benchmark_server.sh`, which measured only the server,
+is deleted too.
+
+Verified: Boost.Filesystem builds through the launcher with **no environment variable set at
+all**, splitting 12 of 12 translation units with no fallbacks, where previously it split
+none unless `CPP_SPLITTER_NO_SERVER=1` was exported. The eleven tests pass, and the scripts
+and test drivers no longer set the variable.
+
+The caching the server was reaching for is still wanted, and TODO 14 proposes it in a form
+that survives a distributed build: a precompiled header built from the source's include
+prefix, and skipping the split entirely when none of its inputs changed.

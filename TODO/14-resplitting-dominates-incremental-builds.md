@@ -87,12 +87,6 @@ This does not help the benchmark's worst row, where the header genuinely did cha
 makes a no-op or unrelated edit free rather than merely fast, which is the common case in a
 real edit-build loop.
 
-**3. Only then consider the server.** A persistent process holding parsed translation units
-in memory is the obvious answer and is already half-built, but it is also the reason
-`CPP_SPLITTER_NO_SERVER=1` is currently mandatory (TODO 01) and it does not survive a
-distributed build. A file-based prefix PCH plus input hashing gets most of the benefit
-without a daemon, and both work when the build is farmed out to other machines.
-
 ## Acceptance Criteria
 
 - The `one function body in a header` row is faster with the splitter than without, on the

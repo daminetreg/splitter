@@ -19,8 +19,7 @@ set(split_dir "${WORKDIR}/split")
 set(program "${WORKDIR}/program")
 
 execute_process(
-  COMMAND ${CMAKE_COMMAND} -E env CPP_SPLITTER_NO_SERVER=1
-          "${SPLITTER}" "${SOURCE}" "${split_dir}"
+  COMMAND "${SPLITTER}" "${SOURCE}" "${split_dir}"
           --compile -o "${program}" --cxx "${CXX}"
   OUTPUT_VARIABLE split_stdout
   ERROR_VARIABLE split_stderr

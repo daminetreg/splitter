@@ -23,8 +23,7 @@ set(object "${WORKDIR}/unit.o")
 set(depfile "${WORKDIR}/unit.d")
 
 execute_process(
-  COMMAND ${CMAKE_COMMAND} -E env CPP_SPLITTER_NO_SERVER=1
-          "${SPLITTER}" "${CXX}" -std=c++17 "-I${source_dir}"
+  COMMAND "${SPLITTER}" "${CXX}" -std=c++17 "-I${source_dir}"
           -MD -MF "${depfile}" -MT "${object}"
           -c -o "${object}" "${SOURCE}"
   OUTPUT_VARIABLE launch_stdout

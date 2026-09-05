@@ -21,8 +21,7 @@ foreach(source IN LISTS SOURCES)
   set(object "${WORKDIR}/${stem}.o")
 
   execute_process(
-    COMMAND ${CMAKE_COMMAND} -E env CPP_SPLITTER_NO_SERVER=1
-            "${SPLITTER}" "${CXX}" -std=c++17 "-I${INCLUDE_DIR}"
+    COMMAND   "${SPLITTER}" "${CXX}" -std=c++17 "-I${INCLUDE_DIR}"
             -c -o "${object}" "${source}"
     OUTPUT_VARIABLE launch_stdout
     ERROR_VARIABLE launch_stderr

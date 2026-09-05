@@ -1,7 +1,7 @@
 # C++ Function Splitter
 
 ## Overview
-The C++ Function Splitter is a command-line tool designed to parse C++ source and header files using the libclang AST. Its primary purpose is to split C++ function and method implementations into individual output files. It supports compiling and linking these split files back into a working binary. The tool can also split inline functions from header files, automatically handling include path substitutions and object file linking. Furthermore, it can integrate with CMake as a `CMAKE_CXX_COMPILER_LAUNCHER` to transparently split and compile C++ code during the build process, leveraging a persistent server for efficient caching of translation units.
+The C++ Function Splitter is a command-line tool designed to parse C++ source and header files using the libclang AST. Its primary purpose is to split C++ function and method implementations into individual output files. It supports compiling and linking these split files back into a working binary. The tool can also split inline functions from header files, automatically handling include path substitutions and object file linking. Furthermore, it can integrate with CMake as a `CMAKE_CXX_COMPILER_LAUNCHER` to transparently split and compile C++ code during the build process.
 
 ## User Preferences
 I want iterative development. Ask before making major changes. I prefer detailed explanations for complex architectural decisions.
@@ -21,32 +21,33 @@ The C++ Function Splitter is implemented in `src/main.cpp` and uses the libclang
 - **Static Function Handling:** Static functions are split and renamed with a unique mangled name (e.g., `__static_<filestem>__<funcname>`) to prevent linker collisions.
 - **Namespace Handling:** Namespace-scoped functions are properly wrapped within their respective namespace blocks in the split files.
 - **Precompiled Headers (PCH):** Two-level PCH system:
-  - *libclang PCH* (`<preamble>.pch/<hash>.pch`): Built via `clang_saveTranslationUnit()` from the preamble header. On subsequent runs, passed as `-include-pch` to `clang_parseTranslationUnit2()` to dramatically speed up AST parsing (replacing `CXTranslationUnit_PrecompiledPreamble`). This makes the cached preamble a distributable file artifact, removing the need for a centralized in-memory server.
+  - *libclang PCH* (`<preamble>.pch/<hash>.pch`): Built via `clang_saveTranslationUnit()` from the preamble header. On subsequent runs, passed as `-include-pch` to `clang_parseTranslationUnit2()` to dramatically speed up AST parsing (replacing `CXTranslationUnit_PrecompiledPreamble`). This artefact currently has no consumer; see `TODO/08` and `TODO/14`.
   - *GCC PCH* (`<preamble>.gch/<hash>.gch`): Built for compilation of split files. GCC auto-discovers PCH via the `.gch/` directory.
   - Both use content-hash naming: if the hash-named file exists, the PCH is current; otherwise old entries are cleaned and it rebuilds.
 - **Incremental Recompilation:** Compares timestamps of source files, preamble, and PCH against object files to recompile only changed components.
 - **Parallel Compilation:** Utilizes Boost.Process and `std::thread` for concurrent compilation of split files using a work-stealing pattern.
-- **Compiler Launcher Mode:** Operates as a compiler wrapper, splitting the source via a server, compiling each piece, and combining them into a single `.o`. It handles dependency tracking flags (`-MD`/`-MMD`/`-MF`/`-MT`).
-- **Server Mode:** A persistent background server uses a Unix domain socket to maintain a cache of parsed translation units. This allows subsequent split requests to reuse cached preambles, accelerating parsing. The server employs `clang_reparseTranslationUnit()` for efficient updates when only source body changes.
+- **Compiler Launcher Mode:** Operates as a compiler wrapper, splitting the source, compiling each piece, and combining them into a single `.o`. It handles dependency tracking flags (`-MD`/`-MMD`/`-MF`/`-MT`).
 
 **UI/UX and Design Patterns:**
 - Comments are added to output files with function signatures, source file, and line range for traceability.
 - The tool auto-detects C++ compiler system include paths by executing `g++ -E -x c++ /dev/null -v` to ensure correct resolution of standard library types.
 
 **Verbose/Debug Logging:**
-- Set `CPP_SPLITTER_VERBOSE=1` (or `=on`) to enable verbose logging in launcher mode, server mode, and the `do_split_with_cache` function.
-- Launcher logs: shows input file, flags passed to server, compile commands, and `ld -r` invocations.
-- Server logs: shows received flags, libclang flags (including system includes), and cached TU status.
+- Set `CPP_SPLITTER_VERBOSE=1` (or `=on`) to enable verbose logging in launcher mode.
+- Launcher logs: shows input file, split flags, compile commands, dependency-file rewriting, and `ld -r` invocations.
 
 **Recent Changes:**
-- Fixed `launcher_verbose()` to check `CPP_SPLITTER_VERBOSE` env var (was incorrectly checking `TIPI_CPP_SPLITTER_VERBOSE` and `VERBOSE`).
-- Added verbose logging in launcher, server handler, and `do_split_with_cache` to trace flag flow from launcher → server → libclang.
-- Added `cached_system_includes()` to avoid re-spawning `g++ -E -v` on every server request.
-- Implemented fallback-to-normal-compilation when splitting fails: in both launcher mode (passthrough to original compiler command) and CLI mode (compile source directly without splitting). Fallback triggers on split parse failure, split compilation failure, header dep compilation failure, or relocatable link failure.
-- Fixed launcher mode to fall back to local `do_split()` when server is unavailable, instead of immediately falling through to passthrough compilation. This ensures automatic header splitting works in launcher mode even without a running server.
-- Added `CPP_SPLITTER_AUTO_INCLUDE_SPLIT` feature flag: automatic header splitting is enabled by default; set to `off` or `0` to disable it.
-- Replaced timestamp-based PCH staleness detection with content-hash-named PCH files inside `<preamble>.gch/` and `<preamble>.pch/` directories.
-- Added libclang PCH support: `build_libclang_pch()` parses the preamble header with libclang, saves via `clang_saveTranslationUnit()` to `<preamble>.pch/<hash>.pch`. On subsequent splits, this PCH is loaded via `-include-pch`, replacing `CXTranslationUnit_PrecompiledPreamble` and enabling distributed builds without a centralized server.
+- Removed the split server entirely: the socket protocol, the in-memory translation unit
+  cache, `--server`/`--socket`, and `CPP_SPLITTER_SOCKET`/`CPP_SPLITTER_NO_SERVER`. The
+  launcher splits locally and needs no environment variable to do so. Caching that survives
+  a distributed build is proposed in `TODO/14` instead.
+- The launcher rewrites the dependency file so it names the original headers rather than the
+  rewritten copies, and caches it so a build that recompiles nothing still reports what it
+  knows. Without this, editing a header rebuilt nothing that included it.
+- The preamble is layered by linkage: definitions that may appear in many objects stay in it,
+  and those that may appear once go to a definitions header included by exactly one piece.
+- Only functions the translation unit actually emits are split, computed by reachability from
+  the definitions the compiler must emit.
 
 ## External Dependencies
 - **C++ compiler:** g++

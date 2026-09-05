@@ -51,8 +51,6 @@ ms() { date +%s%3N; }
 human() { awk -v v="$1" 'BEGIN { printf "%6.1fs", v/1000 }'; }
 ratio_of() { awk -v a="$1" -v b="$2" 'BEGIN { if (a > 0) printf "%.2f", b/a; else printf "-" }'; }
 
-# The splitter only splits when told the server is unavailable; see TODO/01.
-export CPP_SPLITTER_NO_SERVER=1
 
 build() {  # build <dir> -> elapsed ms
     local dir="$1" start end

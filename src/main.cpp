@@ -16,8 +16,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include <boost/process.hpp>
@@ -1793,163 +1791,6 @@ struct SplitHeaderInfo {
 
 static std::unordered_map<std::string, SplitHeaderInfo> g_split_headers;
 
-struct CachedTU {
-    CXIndex index = nullptr;
-    CXTranslationUnit tu = nullptr;
-    std::vector<std::string> flags;
-    fs::file_time_type source_mtime;
-
-    ~CachedTU() {
-        if (tu) clang_disposeTranslationUnit(tu);
-        if (index) clang_disposeIndex(index);
-    }
-
-    CachedTU() = default;
-    CachedTU(CachedTU&& o) noexcept
-        : index(o.index), tu(o.tu), flags(std::move(o.flags)), source_mtime(o.source_mtime)
-    { o.index = nullptr; o.tu = nullptr; }
-    CachedTU& operator=(CachedTU&& o) noexcept {
-        if (this != &o) {
-            if (tu) clang_disposeTranslationUnit(tu);
-            if (index) clang_disposeIndex(index);
-            index = o.index; tu = o.tu;
-            flags = std::move(o.flags); source_mtime = o.source_mtime;
-            o.index = nullptr; o.tu = nullptr;
-        }
-        return *this;
-    }
-    CachedTU(const CachedTU&) = delete;
-    CachedTU& operator=(const CachedTU&) = delete;
-};
-
-static std::unordered_map<std::string, CachedTU> g_tu_cache;
-
-static std::string default_socket_path() {
-    const char* env = std::getenv("CPP_SPLITTER_SOCKET");
-    if (env) return env;
-    std::string path = "/tmp/cpp-splitter-" + std::to_string(getuid()) + ".sock";
-    return path;
-}
-
-static bool send_all(int fd, const void* buf, size_t len) {
-    const char* p = static_cast<const char*>(buf);
-    while (len > 0) {
-        ssize_t n = ::send(fd, p, len, MSG_NOSIGNAL);
-        if (n <= 0) return false;
-        p += n;
-        len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-static bool recv_all(int fd, void* buf, size_t len) {
-    char* p = static_cast<char*>(buf);
-    while (len > 0) {
-        ssize_t n = ::recv(fd, p, len, 0);
-        if (n <= 0) return false;
-        p += n;
-        len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-static bool send_msg(int fd, const std::string& msg) {
-    uint32_t len = static_cast<uint32_t>(msg.size());
-    if (!send_all(fd, &len, 4)) return false;
-    if (len > 0 && !send_all(fd, msg.data(), len)) return false;
-    return true;
-}
-
-static bool recv_msg(int fd, std::string& msg) {
-    uint32_t len = 0;
-    if (!recv_all(fd, &len, 4)) return false;
-    if (len > 64 * 1024 * 1024) return false;
-    msg.resize(len);
-    if (len > 0 && !recv_all(fd, &msg[0], len)) return false;
-    return true;
-}
-
-static std::string encode_request(const std::string& input,
-                                   const std::string& output_dir,
-                                   const std::vector<std::string>& flags,
-                                   bool verbose) {
-    std::ostringstream oss;
-    oss << input << '\n' << output_dir << '\n' << (verbose ? "1" : "0") << '\n';
-    oss << flags.size() << '\n';
-    for (const auto& f : flags) oss << f << '\n';
-    return oss.str();
-}
-
-struct DecodedRequest {
-    std::string input;
-    std::string output_dir;
-    bool verbose;
-    std::vector<std::string> flags;
-};
-
-static DecodedRequest decode_request(const std::string& msg) {
-    DecodedRequest req;
-    std::istringstream iss(msg);
-    std::getline(iss, req.input);
-    std::getline(iss, req.output_dir);
-    std::string v; std::getline(iss, v);
-    req.verbose = (v == "1");
-    std::string n; std::getline(iss, n);
-    int nflags = 0;
-    try { nflags = std::stoi(n); } catch (...) {}
-    for (int i = 0; i < nflags; ++i) {
-        std::string f; std::getline(iss, f);
-        req.flags.push_back(f);
-    }
-    return req;
-}
-
-static std::string encode_response(const SplitResult& sr, const std::string& output_text) {
-    std::ostringstream oss;
-    oss << (sr.success ? "1" : "0") << '\n';
-    oss << sr.preamble_filename << '\n';
-    oss << sr.compilable_files.size() << '\n';
-    for (const auto& f : sr.compilable_files) oss << f << '\n';
-    oss << sr.header_obj_dirs.size() << '\n';
-    for (const auto& d : sr.header_obj_dirs) oss << d << '\n';
-    oss << sr.header_obj_files.size() << '\n';
-    for (const auto& f : sr.header_obj_files) oss << f << '\n';
-    oss << output_text;
-    return oss.str();
-}
-
-static SplitResult decode_response(const std::string& msg, std::string& output_text) {
-    SplitResult sr;
-    std::istringstream iss(msg);
-    std::string s; std::getline(iss, s);
-    sr.success = (s == "1");
-    std::getline(iss, sr.preamble_filename);
-    std::string n; std::getline(iss, n);
-    int nfiles = 0;
-    try { nfiles = std::stoi(n); } catch (...) {}
-    for (int i = 0; i < nfiles; ++i) {
-        std::string f; std::getline(iss, f);
-        sr.compilable_files.push_back(f);
-    }
-    std::string nd; std::getline(iss, nd);
-    int ndirs = 0;
-    try { ndirs = std::stoi(nd); } catch (...) {}
-    for (int i = 0; i < ndirs; ++i) {
-        std::string d; std::getline(iss, d);
-        sr.header_obj_dirs.push_back(d);
-    }
-    std::string no; std::getline(iss, no);
-    int nobjs = 0;
-    try { nobjs = std::stoi(no); } catch (...) {}
-    for (int i = 0; i < nobjs; ++i) {
-        std::string f; std::getline(iss, f);
-        sr.header_obj_files.push_back(f);
-    }
-    std::ostringstream rest;
-    rest << iss.rdbuf();
-    output_text = rest.str();
-    return sr;
-}
 
 static void inclusion_visitor(CXFile included_file, CXSourceLocation* /*stack*/,
                               unsigned /*include_len*/, CXClientData client_data) {
@@ -2465,124 +2306,6 @@ static void load_header_manifests(const std::string& output_dir) {
     }
 }
 
-static SplitResult do_split_with_cache(const std::string& input_path,
-                                        const std::string& output_dir,
-                                        const std::vector<std::string>& extra_flags,
-                                        bool verbose,
-                                        std::ostream& out);
-
-static SplitResult try_server_split(const std::string& input_path,
-                                     const std::string& output_dir,
-                                     const std::vector<std::string>& extra_flags,
-                                     bool verbose,
-                                     std::ostream& out) {
-    SplitResult empty;
-    empty.success = false;
-
-    std::string sock_path = default_socket_path();
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return empty;
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(fd);
-        return empty;
-    }
-
-    std::string req = encode_request(input_path, output_dir, extra_flags, verbose);
-    if (!send_msg(fd, req)) {
-        close(fd);
-        return empty;
-    }
-
-    std::string resp;
-    if (!recv_msg(fd, resp)) {
-        close(fd);
-        return empty;
-    }
-    close(fd);
-
-    std::string output_text;
-    SplitResult sr = decode_response(resp, output_text);
-    if (!output_text.empty()) out << output_text;
-    return sr;
-}
-
-static int g_server_fd = -1;
-static std::string g_server_socket_path;
-
-static void server_cleanup(int) {
-    if (g_server_fd >= 0) close(g_server_fd);
-    if (!g_server_socket_path.empty()) unlink(g_server_socket_path.c_str());
-    _exit(0);
-}
-
-static int run_server(const std::string& sock_path) {
-    g_server_socket_path = sock_path;
-    unlink(sock_path.c_str());
-
-    g_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (g_server_fd < 0) {
-        std::cerr << "Error: cannot create socket\n";
-        return 1;
-    }
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
-
-    if (bind(g_server_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        std::cerr << "Error: cannot bind to " << sock_path << "\n";
-        close(g_server_fd);
-        return 1;
-    }
-
-    if (listen(g_server_fd, 5) < 0) {
-        std::cerr << "Error: listen failed\n";
-        close(g_server_fd);
-        unlink(sock_path.c_str());
-        return 1;
-    }
-
-    signal(SIGINT, server_cleanup);
-    signal(SIGTERM, server_cleanup);
-    signal(SIGPIPE, SIG_IGN);
-
-    std::cerr << "[cpp-splitter server] listening on " << sock_path << "\n";
-    std::cerr << "[cpp-splitter server] cached TUs: " << g_tu_cache.size() << "\n";
-
-    while (true) {
-        int client = accept(g_server_fd, nullptr, nullptr);
-        if (client < 0) continue;
-
-        std::string req_msg;
-        if (!recv_msg(client, req_msg)) {
-            close(client);
-            continue;
-        }
-
-        auto req = decode_request(req_msg);
-        if (req.verbose) {
-            std::cerr << "[cpp-splitter server] received " << req.flags.size() << " flag(s):";
-            for (const auto& f : req.flags) std::cerr << " " << f;
-            std::cerr << "\n";
-        }
-        std::ostringstream capture;
-        SplitResult sr = do_split_with_cache(req.input, req.output_dir, req.flags, req.verbose, capture);
-        std::string resp = encode_response(sr, capture.str());
-        send_msg(client, resp);
-        close(client);
-
-        std::cerr << "[cpp-splitter server] split " << req.input
-                  << " -> " << sr.compilable_files.size() << " files"
-                  << " (cached TUs: " << g_tu_cache.size() << ")\n";
-    }
-}
 
 static const std::vector<std::string>& cached_system_includes() {
     static std::vector<std::string> includes = detect_system_includes();
@@ -2622,7 +2345,7 @@ static unsigned check_diagnostics(CXTranslationUnit tu, bool verbose) {
     return error_count;
 }
 
-// Shared tail of do_split() and do_split_with_cache(): builds the PCH, writes one split
+// Shared tail of do_split(): builds the PCH, writes one split
 // .cpp per function, prunes outputs left over from a previous run, and registers header
 // dependencies. Both callers reach this point with identical state; keeping it in one
 // place is what stops the two paths from drifting apart.
@@ -2831,198 +2554,6 @@ static void emit_split_files(CXTranslationUnit tu,
 }
 
 
-static SplitResult do_split_with_cache(const std::string& input_path,
-                                        const std::string& output_dir,
-                                        const std::vector<std::string>& extra_flags,
-                                        bool verbose,
-                                        std::ostream& out) {
-    SplitResult result;
-    result.success = false;
-
-    std::string abs_path = fs::absolute(input_path).string();
-    std::string source = read_file(abs_path);
-    if (source.empty()) {
-        if (verbose) std::cerr << "Error: could not read file or file is empty\n";
-        return result;
-    }
-
-    std::string stem = fs::path(input_path).stem().string();
-    auto all_flags = build_clang_flags(extra_flags, is_header_file(abs_path));
-    if (verbose) {
-        out << "[server] libclang flags (" << all_flags.size() << "):";
-        for (const auto& f : all_flags) out << " " << f;
-        out << "\n";
-    }
-
-    bool input_is_header = is_header_file(abs_path);
-    std::string preamble_filename = input_is_header
-        ? fs::path(input_path).filename().string()
-        : stem + "_preamble.h";
-
-    // A header is mirrored under <split_dir>/include at the path it was included as; the
-    // translation unit itself keeps the root of the split directory.
-    std::string unit_dir = output_dir;
-    if (input_is_header) {
-        std::string rel = header_mirror_relpath(abs_path, unit_include_dirs(extra_flags));
-        unit_dir = (fs::path(split_include_root(output_dir)) /
-                    fs::path(rel).parent_path()).string();
-    }
-
-    // Split pieces are named after the whole file name rather than its stem, so a source
-    // and a header that share a stem (path.cpp / path.hpp) can never match each other's
-    // outputs -- the stale-output pruning keys off this prefix.
-    std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
-    std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
-
-    if (input_is_header && !header_has_include_guard(source)) {
-        if (verbose)
-            out << "Skipping " << input_path
-                << ": no include guard, so it is one half of a pair and is not meant to be"
-                   " included on its own\n";
-        write_skipped_header_manifest(unit_dir, preamble_filename, abs_path,
-                                      "no include guard");
-        result.success = true;
-        return result;
-    }
-
-    // The preamble is this very file with the function bodies carved out, so it declares
-    // every class, enum and typedef the file declares. Feeding its PCH back in while
-    // parsing the file redefines all of them. The first run got away with it because no
-    // preamble existed yet; from the second run on the parse was wrecked, the visitor
-    // found almost nothing, and the stale-output pruning then deleted the previous run's
-    // split files. The PCH is for compiling the split pieces, which include the preamble
-    // and not the original source -- it must not be applied here.
-    //
-    // libclang's own preamble caching is a different mechanism and is safe: it caches the
-    // prefix of *this* file, so it cannot redefine anything.
-    std::vector<std::string> parse_flags_vec = all_flags;
-
-    auto it = g_tu_cache.find(abs_path);
-    bool cache_hit = false;
-    CXTranslationUnit tu = nullptr;
-
-    if (it != g_tu_cache.end()) {
-        auto cur_mtime = fs::last_write_time(abs_path);
-        if (it->second.flags == parse_flags_vec) {
-            if (cur_mtime == it->second.source_mtime) {
-                tu = it->second.tu;
-                cache_hit = true;
-                if (verbose) out << "[server] reusing cached TU (unchanged): " << abs_path << "\n";
-            } else {
-                if (verbose) out << "[server] reparsing (source changed): " << abs_path << "\n";
-                int reparse_err = clang_reparseTranslationUnit(
-                    it->second.tu, 0, nullptr, clang_defaultReparseOptions(it->second.tu));
-                if (reparse_err == 0) {
-                    tu = it->second.tu;
-                    it->second.source_mtime = cur_mtime;
-                    cache_hit = true;
-                } else {
-                    if (verbose) std::cerr << "[server] reparse failed, will parse fresh\n";
-                    g_tu_cache.erase(it);
-                }
-            }
-        } else {
-            if (verbose) out << "[server] flags changed, reparsing fresh: " << abs_path << "\n";
-            g_tu_cache.erase(it);
-        }
-    }
-
-    if (!cache_hit) {
-        CXIndex index = clang_createIndex(0, 0);
-        if (!index) {
-            if (verbose) std::cerr << "Error: failed to create clang index\n";
-            return result;
-        }
-
-        std::vector<const char*> args;
-        for (const auto& f : parse_flags_vec) args.push_back(f.c_str());
-
-        unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
-                             | CXTranslationUnit_CreatePreambleOnFirstParse;
-        CXErrorCode err = clang_parseTranslationUnit2(
-            index, abs_path.c_str(), args.data(),
-            static_cast<int>(args.size()), nullptr, 0, parse_flags, &tu);
-
-        if (err != CXError_Success || !tu) {
-            if (verbose) std::cerr << "Error: failed to parse translation unit (code: " << err << ")\n";
-            clang_disposeIndex(index);
-            return result;
-        }
-
-        CachedTU cached;
-        cached.index = index;
-        cached.tu = tu;
-        cached.flags = parse_flags_vec;
-        cached.source_mtime = fs::last_write_time(abs_path);
-        g_tu_cache[abs_path] = std::move(cached);
-
-        if (verbose) out << "[server] parsed and cached: " << abs_path << "\n";
-    }
-
-    const unsigned parse_errors = check_diagnostics(tu, verbose);
-
-    // A header that will not parse standalone is skipped outright: no split pieces, no
-    // rewritten copy, no manifest entry. Proceeding from a partial AST used to emit both,
-    // and the rewritten copy then shadowed the real header for every consumer.
-    if (input_is_header && parse_errors > 0) {
-        if (verbose)
-            out << "Skipping " << input_path << ": not parseable standalone ("
-                << parse_errors << " parse error(s))\n";
-        write_skipped_header_manifest(unit_dir, preamble_filename, abs_path,
-                                      "not parseable standalone");
-        result.success = true;
-        return result;
-    }
-
-    if (parse_errors > 0 && verbose) {
-        // Not a header, so splitting continues; say so plainly rather than leaving the
-        // reader to guess whether the output can be trusted.
-        out << "Warning: " << parse_errors << " parse error(s) in " << input_path
-            << "; splitting anyway, and no stale output will be pruned\n";
-    }
-
-    g_unit_source_dir = fs::absolute(abs_path).parent_path().lexically_normal().string();
-
-    // One walk of this translation unit yields the inventory for the file itself and for
-    // every header it should split, each seen in the context its includer establishes.
-    // Deciding the header set first keeps the walk from recording functions nobody wants.
-    const std::vector<std::string> candidates =
-        input_is_header ? std::vector<std::string>()
-                        : header_split_candidates(tu, abs_path, output_dir, extra_flags,
-                                                  verbose, out);
-
-    std::set<std::string> wanted(candidates.begin(), candidates.end());
-    wanted.insert(abs_path);
-
-    HarvestMap harvest;
-    VisitorData vd{tu, &wanted, &harvest};
-    CXCursor root = clang_getTranslationUnitCursor(tu);
-    clang_visitChildren(root, visitor, &vd);
-
-    std::vector<FunctionInfo> functions;
-    {
-        auto hit = harvest.find(abs_path);
-        if (hit != harvest.end()) functions = hit->second;
-    }
-
-    std::set<std::string> referenced;
-    collect_emitted(tu, abs_path, referenced);
-
-    result = split_unit(tu, abs_path, input_path, source, functions, referenced,
-                        input_is_header, output_dir,
-                        all_flags, extra_flags, std::string(), parse_errors == 0,
-                        verbose, out);
-
-    if (!input_is_header) {
-        // Split pieces of this unit's headers include this preamble first, so they compile
-        // in the context the header was harvested in.
-        const std::string tu_preamble = fs::path(abs_path).stem().string() + "_preamble.h";
-        resolve_header_deps(tu, harvest, referenced, candidates, tu_preamble, result, output_dir,
-                            all_flags, extra_flags, parse_errors == 0, verbose, out);
-    }
-
-    return result;
-}
 
 static SplitResult do_split(const std::string& input_path,
                             const std::string& output_dir,
@@ -3356,16 +2887,7 @@ static int run_as_launcher(int argc, char* argv[]) {
       split_flags = std::vector<std::string>(split_flags.begin()+1, split_flags.end());
     }
     
-    SplitResult sr;
-    {
-        const char* no_server = std::getenv("CPP_SPLITTER_NO_SERVER");
-        if (!no_server || std::string(no_server) != "1") {
-            sr = try_server_split(input_file, split_dir, split_flags, verbose, std::cout);
-        } else {
-          std::cerr << "[cpp-splitter] server unavailable, splitting locally\n";
-          sr = do_split(input_file, split_dir, split_flags, verbose);
-        }
-    }
+    SplitResult sr = do_split(input_file, split_dir, split_flags, verbose);
 
 
     auto build_passthrough_cmd = [&]() {
@@ -3610,32 +3132,19 @@ static void print_usage(const char* prog) {
               << "\n"
               << "Mode 2 - Compiler Launcher (CMAKE_CXX_COMPILER_LAUNCHER):\n"
               << "  When the first argument is not a source file, acts as a\n"
-              << "  compiler wrapper. Splits the source via the server, compiles\n"
+              << "  compiler wrapper. Splits the source, compiles\n"
               << "  each piece, and combines them into a single .o via relocatable\n"
-              << "  linking. Requires the server to be running.\n"
+              << "  linking.\n"
               << "\n"
               << "  Non-compilation commands are passed through transparently.\n"
               << "\n"
               << "  CMake usage:\n"
-              << "    " << prog << " --server &\n"
               << "    cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/" << prog << " ..\n"
-              << "\n"
-              << "Mode 3 - Server (persistent TU cache):\n"
-              << "  Starts a background server that keeps parsed translation units\n"
-              << "  in memory for faster re-splitting on subsequent invocations.\n"
-              << "\n"
-              << "  " << prog << " --server [--socket <path>]\n"
-              << "\n"
-              << "  The server listens on a Unix domain socket (default:\n"
-              << "  /tmp/cpp-splitter-<uid>.sock). Clients connect automatically.\n"
-              << "  Set CPP_SPLITTER_SOCKET to override the socket path.\n"
-              << "  Set CPP_SPLITTER_NO_SERVER=1 to disable client connections.\n"
               << "\n"
               << "Examples:\n"
               << "  " << prog << " src/app.cpp output                          # split only\n"
               << "  " << prog << " src/app.cpp output --compile -o myapp       # split + compile + link\n"
-              << "  " << prog << " g++ -std=c++17 -c -o foo.o foo.cpp          # launcher mode\n"
-              << "  " << prog << " --server                                    # start TU cache server\n";
+              << "  " << prog << " g++ -std=c++17 -c -o foo.o foo.cpp          # launcher mode\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -3645,20 +3154,6 @@ int main(int argc, char* argv[]) {
     }
 
     std::string first_arg = argv[1];
-
-    if (first_arg == "--server") {
-        std::string sock_path = default_socket_path();
-        for (int i = 2; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--socket" && i + 1 < argc) {
-                sock_path = argv[++i];
-            } else {
-                std::cerr << "Unknown server option: " << arg << "\n";
-                return 1;
-            }
-        }
-        return run_server(sock_path);
-    }
 
     if (!first_arg.empty() && first_arg[0] != '-' && !is_splittable_file(first_arg)) {
         return run_as_launcher(argc, argv);
@@ -3711,16 +3206,7 @@ int main(int argc, char* argv[]) {
 
     load_header_manifests(output_dir);
 
-    SplitResult sr;
-    {
-        const char* no_server = std::getenv("CPP_SPLITTER_NO_SERVER");
-        if (!no_server || std::string(no_server) != "1") {
-            sr = try_server_split(input_path, output_dir, extra_flags, true, std::cout);
-        }
-        if (!sr.success) {
-            sr = do_split(input_path, output_dir, extra_flags, true);
-        }
-    }
+    SplitResult sr = do_split(input_path, output_dir, extra_flags, true);
 
     if (!sr.success) {
         std::cerr << "Warning: splitting failed, falling back to normal compilation\n";
