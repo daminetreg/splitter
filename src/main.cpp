@@ -102,6 +102,8 @@ struct FunctionInfo {
     bool in_unnamed_ns = false;       // an unnamed namespace encloses it at any depth
     bool in_class_template = false;   // member of a class template: cannot go out-of-line
     bool in_anonymous_class = false;  // no class name to qualify a definition with
+    // Member of a class-template specialization whose name libclang cannot spell.
+    bool in_specialization_without_name = false;
     bool keep_in_header = false;      // definition has to stay in the preamble
     // Another definition reports the same extent: the mark of a macro that expands to more
     // than one declaration, whose extent is the invocation rather than any one declarator.
@@ -444,6 +446,26 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
                     info.in_class_template = true;
                 if (pname.empty())
                     info.in_anonymous_class = true;
+
+                // A full explicit specialization is reported as a plain StructDecl, and its
+                // spelling is the template's name with the arguments dropped. Qualifying a
+                // definition with that gives `builtin_clz_dispatch::call` for a member of
+                // `builtin_clz_dispatch<unsigned long>`, which names nothing. Unlike a class
+                // template, a full specialization *can* have its members defined out of line
+                // with no template header, so the definition is movable -- only the name was
+                // wrong. The display name carries the arguments.
+                if (!clang_Cursor_isNull(clang_getSpecializedCursorTemplate(parent_cursor))) {
+                    const std::string display =
+                        cx_to_string(clang_getCursorDisplayName(parent_cursor));
+                    if (display.find('<') != std::string::npos &&
+                        display.find("(anonymous") == std::string::npos &&
+                        display.find("(lambda") == std::string::npos) {
+                        pname = display;
+                    } else {
+                        // A name that cannot be written cannot qualify anything.
+                        info.in_specialization_without_name = true;
+                    }
+                }
             }
             if (pname.empty()) {
                 // An unnamed namespace contributes no name to qualify with, but the split
@@ -517,6 +539,8 @@ static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_template)         return "function template";
     if (fn.in_class_template)   return "member of a class template";
     if (fn.in_anonymous_class)  return "member of an unnamed class";
+    if (fn.in_specialization_without_name)
+        return "member of a specialization whose name cannot be written";
     if (fn.is_specialization)   return "explicit specialization";
     if (fn.is_virtual)          return "virtual member function";
     if (fn.in_unnamed_ns)       return "enclosed by an unnamed namespace";
@@ -1377,6 +1401,7 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         }
 
         if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
+            fn.in_specialization_without_name ||
             fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns ||
             (fn.is_ctor_or_dtor && is_included_file(fn.file))) {
             fn.keep_in_header = true;

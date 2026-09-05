@@ -112,10 +112,11 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   ipp_ctor_main       a constructor defined in an implementation include
 #   multiline_conditional_main  a definition under a condition continued across lines
 #   trailing_comment_main  a declarator whose last line is a `//` comment
+#   specialization_member_main  a member of a full class-template specialization
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
                 always_inline_main impl_include_main preamble_linkage macro_members_main
                 retracted_macro_main ipp_ctor_main multiline_conditional_main
-                trailing_comment_main)
+                trailing_comment_main specialization_member_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -181,6 +182,7 @@ set_tests_properties(
   split.member_functions split.ctx_main split.always_inline_main split.impl_include_main
   split.preamble_linkage split.macro_members_main split.retracted_macro_main
   split.ipp_ctor_main split.multiline_conditional_main split.trailing_comment_main
+  split.specialization_member_main
   launcher.shared_inline_header launcher.depfile_names_originals
   launcher.explicit_specialization launcher.default_standard
   PROPERTIES TIMEOUT 300)
