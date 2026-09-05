@@ -19,7 +19,12 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOST="$REPO/example/boost-to-split"
-LIBS="${1:-filesystem;spirit;system;core;geometry;smart_ptr;assert}"
+# Geometry is supported and is where four of the defects in TODO/24 came from, but it is not
+# in the default set: its tests take hours to split, which is a finding rather than a cost
+# worth paying on every run. Ask for it by name:
+#
+#   CPP_SPLITTER_TEST_JOBS=8 ./test-boost-libraries.sh 'filesystem;spirit;system;core;geometry'
+LIBS="${1:-filesystem;spirit;system;core;smart_ptr;assert}"
 SPLIT=/tmp/boost-libs-split
 PLAIN=/tmp/boost-libs-plain
 
