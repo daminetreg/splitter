@@ -3,6 +3,9 @@
 **Severity:** High. Costs a whole translation unit on the Boost example, and the failure is
 a duplicate-symbol error at `ld -r` rather than anything pointing at the cause.
 
+**Status: implemented.** The Boost example now splits all 12 of 12 translation units with no
+fallbacks. See "Outcome" at the end.
+
 ## Motivation
 
 Every split piece begins by including the translation unit's preamble, which is the source
@@ -162,3 +165,52 @@ originally proposed:
 - Regression fixtures in `test/`, registered with `add_test`: one covering a class with a
   virtual destructor defined non-inline in a `.cpp` alongside several free functions, and one
   covering namespace-scope variables in the same position.
+
+## Outcome
+
+Implemented as the layered preamble, for functions.
+
+- `FunctionInfo` records `is_inlined` (`clang_Cursor_isFunctionInlined`, true for anything
+  defined in-class as well as anything marked `inline`) and `external_linkage`.
+  `has_vague_linkage()` combines them with the template and unnamed-namespace cases.
+- `generate_preamble()` takes an optional `definitions` output. A kept definition without
+  vague linkage goes there instead of into the preamble, wrapped in the namespaces it was
+  lifted out of, and the preamble keeps a declaration in its place -- nothing for a member,
+  which its class already declares, and a forward declaration for a free function.
+- `split_unit()` writes that to `<tag>_definitions.h`, which includes the preamble itself,
+  and `emit_split_files()` includes it from exactly one piece: the first compilable one.
+
+Verified:
+
+| check | before | after |
+|---|---|---|
+| reproduction in this file | 21 `multiple definition`, falls back | **0, links, returns 13** |
+| Boost translation units linking from split objects | 10 of 12 | **12 of 12** |
+| Boost fallbacks | 2 | **0** |
+| `multiple definition` anywhere in the Boost build | present | **0** |
+| program linked against the split library | 9/9, 0 undefined | **9/9, 0 undefined** |
+| `typeinfo for filesystem_error` copies in the archive | -- | **3, same as an unsplit build** |
+| tests | 9 | **10** |
+
+`test/preamble_linkage.cpp` is the regression fixture: a virtual destructor and a virtual
+member defined non-inline beside three free functions, so that more than one piece includes
+the preamble.
+
+This also unblocked `utf8_codecvt_facet.cpp`, which TODO 11 had left failing here for the
+same reason, so both remaining translation units were fixed by this one change.
+
+### Not done: namespace-scope variables
+
+Step 1 covers variables as well as functions, and that half is not implemented. A
+namespace-scope variable with external linkage left in the preamble is still emitted by
+every piece. It does not arise in the Boost example -- hence 12 of 12 -- but the three-line
+test case in the plan above still reproduces it, and an anonymous-namespace variable is
+still duplicated silently, one copy per object.
+
+Doing it needs the harvest to record `CXCursor_VarDecl` at namespace scope with its extent,
+which the visitor currently ignores entirely; the tier-two machinery it would feed into now
+exists. The declaration left behind is `extern`.
+
+Steps 4 and 5 of the plan are also untouched and have not been needed: no two tier-two
+definitions have yet had to reference each other, and one definitions header per unit has
+not disturbed staleness tracking or the PCH naming.

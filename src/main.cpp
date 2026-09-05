@@ -88,6 +88,11 @@ struct FunctionInfo {
     bool is_specialization = false;   // explicit specialization: `template< > void f<T>()`
     bool is_virtual = false;          // virtual member function
     bool is_ctor_or_dtor = false;     // constructor or destructor
+    // Whether a definition may legally appear in many translation units. Everything the
+    // preamble carries is included by every piece, so only a vague-linkage definition can
+    // be left in it; anything else has to appear exactly once.
+    bool is_inlined = false;          // inline, explicitly or by being defined in-class
+    bool external_linkage = false;
     // Source ranges of always_inline attributes on this definition, as file offsets. An
     // always-inline function is given available_externally linkage and never emitted out
     // of line, so nothing can ever link against it; wherever such a definition is
@@ -353,6 +358,8 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     info.name = cx_to_string(clang_getCursorSpelling(cursor));
     info.is_template = (kind == CXCursor_FunctionTemplate);
     info.is_ctor_or_dtor = (kind == CXCursor_Constructor || kind == CXCursor_Destructor);
+    info.is_inlined = clang_Cursor_isFunctionInlined(cursor) != 0;
+    info.external_linkage = (clang_getCursorLinkage(cursor) == CXLinkage_External);
     info.is_static = (clang_getCursorLinkage(cursor) == CXLinkage_Internal);
 
     // A definition already written out-of-line (`void C::f() { ... }`) needs no rewriting
@@ -496,6 +503,12 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
 // list stays stable, but it is not compiled -- and the reader of that file deserves to know
 // which of the many keep rules applied rather than being told every one of them is
 // "template", which is what this used to say.
+// A definition that may appear in every object that includes it: inline, a template, or
+// anything without external linkage. Only these are safe to leave in the shared preamble.
+static bool has_vague_linkage(const FunctionInfo& fn) {
+    return fn.is_inlined || fn.is_template || fn.in_class_template || !fn.external_linkage;
+}
+
 static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_template)         return "function template";
     if (fn.in_class_template)   return "member of a class template";
@@ -1334,11 +1347,27 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
     }
 }
 
+// Builds the preamble, and separates out the definitions that must not be repeated.
+//
+// The preamble is included by every split piece, so everything it carries is compiled once
+// per piece. That is harmless for declarations, and for definitions with vague linkage,
+// which is what the language provides for exactly this. It is not harmless for an ordinary
+// definition with external linkage: each piece emits a strong symbol and `ld -r` rejects
+// the result.
+//
+// Such definitions are collected into `definitions` instead, which the caller writes to a
+// second header included by exactly one piece. Splitting the preamble this way makes "safe
+// to include many times" a property of how it is built, rather than something every keep
+// rule has to get right on its own.
+static std::string wrap_in_namespaces(const std::string& body,
+                                      const std::vector<ScopeEntry>& scope_chain);
+
 static std::string generate_preamble(const std::string& source,
                                      const std::vector<FunctionInfo>& functions,
                                      const std::string& stem,
                                      const std::string& source_path,
-                                     const StaticRenameMap& renames) {
+                                     const StaticRenameMap& renames,
+                                     std::string* definitions = nullptr) {
     struct Range {
         unsigned start, end;
         bool keep;
@@ -1386,11 +1415,26 @@ static std::string generate_preamble(const std::string& source,
             unsigned keep_line = offset_to_line(line_offsets, r.start);
             //preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
             // A retained template body can call a split-out static function too.
-            preamble += apply_static_renames(
+            std::string text = apply_static_renames(
                 strip_always_inline(source.substr(r.start, r.end - r.start), r.start,
                                     r.fn ? r.fn->always_inline_ranges
                                          : std::vector<std::pair<unsigned, unsigned>>()),
                 renames);
+
+            if (definitions && r.fn && !has_vague_linkage(*r.fn)) {
+                // Kept, but it may exist in only one object. Out of the shared preamble it
+                // goes; a member is already declared by its class, and a free function gets
+                // a declaration left where its body was. The text is lifted out of whatever
+                // namespaces enclosed it, so they have to be reopened around it.
+                *definitions += wrap_in_namespaces(text, r.fn->scope_chain);
+                *definitions += "\n";
+                if (r.fn->member_decl.empty()) {
+                    std::string decl = generate_forward_decl_inplace(*r.fn, stem);
+                    if (!decl.empty()) preamble += decl + "\n";
+                }
+            } else {
+                preamble += text;
+            }
         } else if (r.fn) {
             // The definition moved to a split file, so a declaration has to take its
             // place: inside the class for a member, otherwise right here, where the
@@ -2112,6 +2156,7 @@ static void emit_split_files(CXTranslationUnit tu,
                              const std::string& unit_tag,
                              const std::string& preamble_filename,
                              const std::string& preamble_path,
+                             const std::string& definitions_filename,
                              const std::vector<std::string>& all_flags,
                              const std::vector<std::string>& extra_flags,
                              const std::string& context_preamble,
@@ -2254,8 +2299,9 @@ static SplitResult split_unit(CXTranslationUnit tu,
 
     result.preamble_filename = preamble_path;
     const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
+    std::string definitions;
     const std::string preamble =
-        generate_preamble(source, functions, unit_tag, abs_path, static_renames);
+        generate_preamble(source, functions, unit_tag, abs_path, static_renames, &definitions);
 
     std::string existing_preamble;
     if (fs::exists(preamble_path))
@@ -2273,6 +2319,28 @@ static SplitResult split_unit(CXTranslationUnit tu,
         if (verbose) out << "Preamble unchanged: " << preamble_path << "\n";
     }
 
+    // Definitions that may exist in only one object go to a second header, included by
+    // exactly one piece. The preamble keeps a declaration in their place.
+    std::string definitions_filename;
+    if (!definitions.empty()) {
+        definitions_filename = unit_tag + "_definitions.h";
+        const std::string definitions_path =
+            (fs::path(unit_dir) / definitions_filename).string();
+        const std::string body =
+            "#pragma once\n#include \"" + preamble_filename + "\"\n\n" + definitions;
+        if (!fs::exists(definitions_path) || read_file(definitions_path) != body) {
+            std::ofstream ofs(definitions_path);
+            if (!ofs.is_open()) {
+                std::cerr << "Error: cannot write definitions to " << definitions_path << "\n";
+                return result;
+            }
+            ofs << body;
+            ofs.close();
+            if (verbose)
+                out << "Generated definitions header: " << definitions_path << "\n";
+        }
+    }
+
     if (nothing_of_its_own) {
         result.success = true;
         return result;
@@ -2280,7 +2348,8 @@ static SplitResult split_unit(CXTranslationUnit tu,
 
     emit_split_files(tu, functions, input_path, abs_path, unit_dir,
                      split_include_root(output_dir), unit_tag,
-                     preamble_filename, preamble_path, all_flags, extra_flags,
+                     preamble_filename, preamble_path, definitions_filename,
+                     all_flags, extra_flags,
                      context_preamble, input_is_header, parse_clean, verbose, out, result);
     result.success = true;
     return result;
@@ -2566,6 +2635,7 @@ static void emit_split_files(CXTranslationUnit tu,
                              const std::string& unit_tag,
                              const std::string& preamble_filename,
                              const std::string& preamble_path,
+                             const std::string& definitions_filename,
                              const std::vector<std::string>& all_flags,
                              const std::vector<std::string>& extra_flags,
                              const std::string& context_preamble,
@@ -2580,6 +2650,7 @@ static void emit_split_files(CXTranslationUnit tu,
 
     const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
 
+    bool definitions_emitted = false;
     std::vector<std::string> current_files;
     int file_counter = 0;
     int written_count = 0;
@@ -2610,7 +2681,14 @@ static void emit_split_files(CXTranslationUnit tu,
         // first replays the include prefix the header was actually seen behind.
         if (!context_preamble.empty())
             content << "#include \"" << context_preamble << "\"\n";
-        content << "#include \"" << preamble_filename << "\"\n\n";
+        content << "#include \"" << preamble_filename << "\"\n";
+        // The definitions header carries what may exist in only one object, so exactly one
+        // piece includes it. Which one does not matter; the first compilable one will do.
+        if (!definitions_filename.empty() && !definitions_emitted && !should_keep_in_header(fn)) {
+            content << "#include \"" << definitions_filename << "\"\n";
+            definitions_emitted = true;
+        }
+        content << "\n";
 
         // Members are emitted in their out-of-line form; everything else as written. An
         // out-of-line form was rebuilt from the declarator and no longer carries the
