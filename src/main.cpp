@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <cassert>
 #include <map>
 #include <mutex>
 #include <set>
@@ -1327,15 +1328,38 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
     const std::set<std::string> undeffed = undefined_macros(source);
 
     // One extent, several definitions: the mark of a macro that expands to more than one
-    // declaration. generate_preamble() collapses such extents so the macro is not written
-    // out once per definition it produced, which means splitting any one of them would
-    // silently take the rest with it.
+    // declaration. generate_preamble() folds such extents into one so the macro is not
+    // written out once per definition it produced, which means splitting any one of them
+    // would silently take the rest with it.
+    //
+    // The extents need not be *identical*, only overlapping. A macro argument is spelled in
+    // the invocation, not in the macro body, so a definition whose first token comes from an
+    // argument -- `D& assign(...)` in BOOST_STRONG_TYPEDEF -- has its extent start mapped to
+    // where the argument was written, inside the invocation rather than at its beginning.
+    // One macro then produces extents [invocation, end] and [argument, end], which overlap
+    // and compare unequal.
     {
-        std::map<std::pair<unsigned, unsigned>, unsigned> extent_uses;
-        for (const auto& fn : functions)
-            ++extent_uses[{fn.start_offset, fn.end_offset}];
-        for (auto& fn : functions)
-            fn.shares_extent = extent_uses[{fn.start_offset, fn.end_offset}] > 1;
+        std::vector<FunctionInfo*> by_extent;
+        by_extent.reserve(functions.size());
+        for (auto& fn : functions) by_extent.push_back(&fn);
+        std::sort(by_extent.begin(), by_extent.end(),
+                  [](const FunctionInfo* a, const FunctionInfo* b) {
+                      if (a->start_offset != b->start_offset)
+                          return a->start_offset < b->start_offset;
+                      return a->end_offset < b->end_offset;
+                  });
+        size_t i = 0;
+        while (i < by_extent.size()) {
+            size_t j = i + 1;
+            unsigned run_end = by_extent[i]->end_offset;
+            while (j < by_extent.size() && by_extent[j]->start_offset < run_end) {
+                run_end = std::max(run_end, by_extent[j]->end_offset);
+                ++j;
+            }
+            if (j - i > 1)
+                for (size_t k = i; k < j; ++k) by_extent[k]->shares_extent = true;
+            i = j;
+        }
     }
 
     for (auto& fn : functions) {
@@ -1569,15 +1593,42 @@ static std::string generate_preamble(const std::string& source,
                   return a.keep && !b.keep;   // a kept entry represents the group
               });
 
-    // Several functions can share one source extent: a macro such as BOOST_BITMASK
-    // expands to a whole set of operators, and every one of them reports the macro
-    // invocation as its extent. Emitting the retained text once per function would repeat
-    // the macro and redefine everything it declares, so collapse identical extents.
-    ranges.erase(std::unique(ranges.begin(), ranges.end(),
-                             [](const Range& a, const Range& b) {
-                                 return a.start == b.start && a.end == b.end;
-                             }),
-                 ranges.end());
+    // Several functions can share one source extent: a macro such as BOOST_BITMASK expands
+    // to a whole set of operators, and every one of them reports the macro invocation as its
+    // extent. Emitting the retained text once per function would repeat the macro and
+    // redefine everything it declares.
+    //
+    // Overlapping is enough; identical is not required. When a definition's first token
+    // comes from a macro *argument*, libclang maps its extent start into the invocation
+    // rather than to its beginning, so one macro yields extents that overlap and compare
+    // unequal. Collapsing only the identical ones left the emit loop re-emitting the tail:
+    //
+    //     BOOST_STRONG_TYPEDEF(unsigned int, version_type)
+    //     version_type)
+    //
+    // A run of overlapping extents is by construction unsplittable -- no one declarator
+    // covers it, so there is no declaration to leave behind and nothing to move. Emitting
+    // the union verbatim reproduces the source exactly, which is what the identical-extent
+    // collapse achieved for the easy case.
+    {
+        std::vector<Range> merged;
+        for (const auto& r : ranges) {
+            if (!merged.empty() && r.start < merged.back().end) {
+                Range& prev = merged.back();
+                if (r.end > prev.end) prev.end = r.end;
+                prev.keep = true;
+                prev.fn = nullptr;
+                continue;
+            }
+            merged.push_back(r);
+        }
+        ranges.swap(merged);
+    }
+
+    // The emit loop's correctness depends on this and nothing else states it: the ranges
+    // must be strictly increasing and non-overlapping, or text is duplicated or dropped.
+    for (size_t i = 1; i < ranges.size(); ++i)
+        assert(ranges[i].start >= ranges[i - 1].end && "preamble ranges must not overlap");
 
     auto line_offsets = build_line_offsets(source);
 
