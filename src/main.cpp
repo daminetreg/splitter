@@ -544,6 +544,7 @@ static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_specialization)   return "explicit specialization";
     if (fn.is_virtual)          return "virtual member function";
     if (fn.in_unnamed_ns)       return "enclosed by an unnamed namespace";
+    if (fn.is_static)           return "internal linkage in a header";
     if (fn.is_ctor_or_dtor)     return "constructor or destructor in a header";
     if (!fn.always_inline_ranges.empty()) return "always-inline";
     return "not emitted by this translation unit, or not movable out of the header";
@@ -1396,6 +1397,24 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         // anyway, and leaving it beside them costs little.
         // Only split what this translation unit actually emits; see collect_emitted().
         if (input_is_header && !fn.usr.empty() && referenced.find(fn.usr) == referenced.end()) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        // Internal linkage in a header is not the same problem as internal linkage in a
+        // .cpp, and the rename only solves the second. A split-out definition with internal
+        // linkage has to become external, or no other piece can call it, and it has to be
+        // renamed, or objects from different translation units collide when `ld -r` merges
+        // them. build_static_rename_map() does that per split unit -- and a translation
+        // unit is split into many units, one per header. So a `static` function defined in
+        // one header and called from another is renamed in its own preamble and nowhere
+        // else, and the caller's header is left calling a name that no longer exists.
+        //
+        // Keeping it costs a copy per piece, which internal linkage makes harmless: every
+        // translation unit that includes the header already had its own copy. This is the
+        // argument the unnamed-namespace rule below already makes, and an unnamed namespace
+        // is in fact a special case of it -- both report CXLinkage_Internal.
+        if (fn.is_static && is_included_file(fn.file)) {
             fn.keep_in_header = true;
             continue;
         }
