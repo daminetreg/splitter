@@ -103,6 +103,10 @@ struct FunctionInfo {
     bool in_unnamed_ns = false;       // an unnamed namespace encloses it at any depth
     bool in_class_template = false;   // member of a class template: cannot go out-of-line
     bool in_anonymous_class = false;  // no class name to qualify a definition with
+    // The function's type, kept so that the linkage of the types in its signature can be
+    // examined later. Valid only while the translation unit it came from is alive, which is
+    // exactly as long as prepare_functions() runs.
+    CXType fn_type{CXType_Invalid, {nullptr, nullptr}};
     // A type in the signature has no linkage, so the definition cannot leave this unit.
     bool signature_lacks_linkage = false;
     // Member of a class-template specialization whose name libclang cannot spell.
@@ -456,7 +460,7 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
 // Every Boost.Geometry test includes the framework in header-only mode, so every one of them
 // hit it. Note that the function's own linkage says nothing here: libclang reports
 // log_entry_start as external, because it is the *type* that is unique to the unit.
-static bool type_lacks_linkage(CXType type, int depth = 0) {
+static bool type_lacks_linkage(CXType type, int depth) {
     if (depth > 4) return false;                 // template arguments can nest arbitrarily
     CXType t = clang_getCanonicalType(type);
 
@@ -483,7 +487,8 @@ static bool type_lacks_linkage(CXType type, int depth = 0) {
 
     // The offending type can be a template argument rather than the type itself:
     // std::vector<T> has external linkage while T does not.
-    const int args = clang_Type_getNumTemplateArguments(t);
+    int args = clang_Type_getNumTemplateArguments(t);
+    if (args > 16) args = 16;                    // bounded: these lists can be enormous
     for (int i = 0; i < args; ++i) {
         CXType arg = clang_Type_getTemplateArgumentAsType(t, i);
         if (arg.kind != CXType_Invalid && type_lacks_linkage(arg, depth + 1)) return true;
@@ -574,13 +579,12 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     // the ones where moving a definition is most delicate.
     info.is_virtual = clang_CXXMethod_isVirtual(cursor) != 0;
 
-    {
-        const CXType fn_type = clang_getCursorType(cursor);
-        info.signature_lacks_linkage = type_lacks_linkage(clang_getResultType(fn_type));
-        const int nargs = clang_getNumArgTypes(fn_type);
-        for (int i = 0; i < nargs && !info.signature_lacks_linkage; ++i)
-            info.signature_lacks_linkage = type_lacks_linkage(clang_getArgType(fn_type, i));
-    }
+    // Deliberately not evaluated here. Walking canonical types and their template arguments
+    // is expensive -- on Boost.Geometry, doing it for every harvested function took a
+    // translation unit from about a minute to over half an hour -- and almost every function
+    // is kept for some cheaper reason first. prepare_functions() asks only about the ones
+    // that would otherwise be split.
+    info.fn_type = clang_getCursorType(cursor);
 
     // An explicit specialization is introduced by a `template< >` prefix that sits outside
     // the cursor's extent. Moving the definition out would strand that prefix in the
@@ -1524,6 +1528,7 @@ static void dump_keep_decisions(const std::vector<FunctionInfo>& functions) {
 }
 
 static bool extent_is_a_definition(const FunctionInfo& fn, const std::string& text);
+static bool type_lacks_linkage(CXType type, int depth);
 
 // Widen a macro-invocation fragment to the whole invocation.
 //
@@ -1734,11 +1739,25 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         }
 
         if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
-            fn.in_specialization_without_name || fn.signature_lacks_linkage ||
+            fn.in_specialization_without_name ||
             fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns ||
             (fn.is_ctor_or_dtor && is_included_file(fn.file))) {
             fn.keep_in_header = true;
             continue;
+        }
+
+        // Only now, with the cheap rules exhausted, is it worth walking the signature's
+        // types. See the note in visitor().
+        if (fn.fn_type.kind != CXType_Invalid) {
+            bool lacks = type_lacks_linkage(clang_getResultType(fn.fn_type), 0);
+            const int nargs = clang_getNumArgTypes(fn.fn_type);
+            for (int i = 0; i < nargs && !lacks; ++i)
+                lacks = type_lacks_linkage(clang_getArgType(fn.fn_type, i), 0);
+            if (lacks) {
+                fn.signature_lacks_linkage = true;
+                fn.keep_in_header = true;
+                continue;
+            }
         }
 
         const std::string blanked = blank_code_noise(fn.body);
