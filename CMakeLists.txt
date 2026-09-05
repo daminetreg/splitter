@@ -109,9 +109,10 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   preamble_linkage    a virtual definition kept in the preamble, which may exist once only
 #   macro_members_main  a class whose members are produced by one macro expansion
 #   retracted_macro_main  a header that retracts the macros its own conditionals test
+#   ipp_ctor_main       a constructor defined in an implementation include
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
                 always_inline_main impl_include_main preamble_linkage macro_members_main
-                retracted_macro_main)
+                retracted_macro_main ipp_ctor_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -135,6 +136,19 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunDepfileTest.cmake)
 
+# An explicit specialization of a member of a class template, in a source that defines
+# nothing else. Two translation units, because the caller has to be a separate object for
+# the specialization to be needed as a symbol rather than inlined.
+add_test(
+  NAME launcher.explicit_specialization
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          "-DSOURCES=${cpp_splitter_test_dir}/spec_member_impl.cpp;${cpp_splitter_test_dir}/spec_member_main.cpp"
+          -DINCLUDE_DIR=${cpp_splitter_test_dir}
+          -DWORKDIR=${cpp_splitter_test_output}/explicit_specialization
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunLauncherTest.cmake)
+
 # One header split separately by two translation units: both objects carry a copy of its
 # functions, so the final link has to merge them instead of rejecting them as duplicates.
 add_test(
@@ -151,5 +165,6 @@ set_tests_properties(
   split.sample split.use_mylib split.static_specifier split.static_renames
   split.member_functions split.ctx_main split.always_inline_main split.impl_include_main
   split.preamble_linkage split.macro_members_main split.retracted_macro_main
-  launcher.shared_inline_header launcher.depfile_names_originals
+  split.ipp_ctor_main launcher.shared_inline_header launcher.depfile_names_originals
+  launcher.explicit_specialization
   PROPERTIES TIMEOUT 300)

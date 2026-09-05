@@ -186,3 +186,52 @@ not survive being checked. It was inferred from the shape of the error, `undefin
 to an inline function in a header`, without looking at the object that was supposed to
 define it. That object existed and was empty, for a reason that has nothing to do with
 reachability. The original narrow-roots argument in `collect_emitted()` stands unchanged.
+
+### Two more causes behind the same symptom
+
+Clearing the first two left one failing link, and it turned out to be two more defects with
+nothing in common but their symptom -- which is the point worth keeping: `undefined
+reference to <a function that is plainly defined>` is not a diagnosis, it is a category.
+
+* **A constructor defined in an implementation include.** A constructor is a family of
+  symbols -- C1 complete-object, C2 base-object -- and splitting one writes it `inline` with
+  `__attribute__((used))`, which forces exactly one of them into existence: the piece emits
+  C2 while every caller asks for C1. Constructors in headers are kept in the preamble for
+  that reason, but `.ipp` did not count as a header, and Boost writes the whole of
+  `utf8_codecvt_facet` in one. `is_included_file()` now covers `.ipp`, `.inl`, `.inc` and
+  `.tcc`.
+
+* **A definitions header no piece included.** Definitions that may exist in only one object
+  go to a second header, which exactly one split piece includes -- the first compilable one.
+  `boost/archive/../xml_grammar.cpp` is a translation unit whose only definition is an
+  explicit specialization, so every definition was kept and there was no compilable piece to
+  carry it. The definitions header is now given a piece of its own when that happens.
+
+  Making it compile then needed one more thing: an explicit specialization is not declared by
+  its class body -- what is written there is the primary template's member -- so moving the
+  definition into the definitions header put it after every use that instantiates it, and the
+  compiler rejected it outright. A declaration now stays behind in its place.
+
+Fixtures: `test/ipp_ctor_header.hpp`, and `launcher.explicit_specialization`, which needs two
+translation units because the specialization has to be *needed* from another object rather
+than inlined.
+
+### Where it stands
+
+| | plain | split | was |
+|---|---:|---:|---:|
+| objects built | 457 | 457 | 457 |
+| **failed edges** | **0** | **0** | 40 |
+| translation units split | — | 373 | 373 |
+| fallbacks to plain compilation | — | 62 | 62 |
+
+| Spirit consumer | time | result |
+|---|---:|---|
+| plain | 4.1s | compiles |
+| split | 32.2s | 4525 pieces, **no fallback**, links and runs with identical output |
+
+The filesystem example still splits 12 of 12 with no fallbacks and scores 9/9; the test
+suite is 15 tests, four of them new.
+
+The 62 fallbacks are unchanged and unexplained -- they are not link failures, so this run
+does not say what they are. That is the next thing to look at.

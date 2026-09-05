@@ -708,10 +708,15 @@ static bool token_at(const std::string& blanked, size_t pos, size_t len);
 // otherwise refer to a name that has not been declared yet.
 static std::string generate_forward_decl_inplace(const FunctionInfo& fn,
                                                  const std::string& stem) {
-    // Members keep their declaration inside the class body instead.
-    for (const auto& entry : fn.scope_chain)
-        if (entry.kind == ScopeKind::Class)
-            return "";
+    // Members keep their declaration inside the class body instead -- except an explicit
+    // specialization, which the class body does not declare: what is written there is the
+    // primary template's member. A specialization must be declared before the first use
+    // that would instantiate it, and moving its definition into the definitions header
+    // puts it after every such use, so the declaration has to stay behind in its place.
+    if (!fn.is_specialization)
+        for (const auto& entry : fn.scope_chain)
+            if (entry.kind == ScopeKind::Class)
+                return "";
 
     const size_t decl_end = definition_decl_end(blank_code_noise(fn.body));
     if (decl_end == std::string::npos)
@@ -1213,6 +1218,7 @@ static std::set<std::string> undefined_macros(const std::string& source) {
 // header, and for class members the declaration left behind in the class plus the
 // out-of-line definition written into the split file.
 static bool is_header_file(const std::string& path);
+static bool is_included_file(const std::string& path);
 
 static void dump_keep_decisions(const std::vector<FunctionInfo>& functions) {
     const char* dump = std::getenv("CPP_SPLITTER_DUMP_HARVEST");
@@ -1312,7 +1318,7 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
 
         if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
             fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns ||
-            (fn.is_ctor_or_dtor && is_header_file(fn.file))) {
+            (fn.is_ctor_or_dtor && is_included_file(fn.file))) {
             fn.keep_in_header = true;
             continue;
         }
@@ -1707,6 +1713,21 @@ static bool is_source_file(const std::string& path) {
 
 static bool is_header_file(const std::string& path) {
     static const char* exts[] = {".h", ".hpp", ".hxx", ".H", ".h++", ".hh"};
+    for (const char* ext : exts) {
+        size_t elen = std::strlen(ext);
+        if (path.size() >= elen && path.compare(path.size() - elen, elen, ext) == 0)
+            return true;
+    }
+    return false;
+}
+
+// A file that is included into a translation unit rather than compiled as one. Boost puts
+// real definitions in implementation includes -- boost/detail/utf8_codecvt_facet.ipp holds
+// the whole of utf8_codecvt_facet, and three libraries include it into a source of their
+// own -- so for every rule that turns on "is this definition in a header", a .ipp is one.
+static bool is_included_file(const std::string& path) {
+    if (is_header_file(path)) return true;
+    static const char* exts[] = {".ipp", ".inl", ".inc", ".tcc"};
     for (const char* ext : exts) {
         size_t elen = std::strlen(ext);
         if (path.size() >= elen && path.compare(path.size() - elen, elen, ext) == 0)
@@ -2633,6 +2654,34 @@ static void emit_split_files(CXTranslationUnit tu,
             out << "      Lines " << fn.start_line << "-" << fn.end_line
                 << " -> " << out_path << "\n";
         }
+    }
+
+    // Every definition was kept in the preamble, so no piece was there to include the
+    // definitions header -- and what it holds is precisely what may exist in only one
+    // object, which would then be no object at all. Give it a piece of its own.
+    // Boost.Serialization's xml_grammar.cpp is a whole translation unit whose only
+    // definition is one explicit specialization: nothing was compiled, and every archive
+    // that linked against it was left without basic_xml_grammar<char>::init_chset().
+    if (!definitions_filename.empty() && !definitions_emitted) {
+        const std::string out_filename = unit_tag + "_0_definitions.cpp";
+        const std::string out_path = (fs::path(output_dir) / out_filename).string();
+        std::ostringstream content;
+        content << "// Definitions kept out of the preamble because they may exist in only\n"
+                << "// one object. No split piece was compiled to carry them.\n";
+        content << "// Source: " << input_path << "\n";
+        content << "// ---\n\n";
+        if (!context_preamble.empty())
+            content << "#include \"" << context_preamble << "\"\n";
+        content << "#include \"" << definitions_filename << "\"\n";
+        const std::string new_content = content.str();
+        if (!fs::exists(out_path) || read_file(out_path) != new_content) {
+            std::ofstream ofs(out_path);
+            if (ofs.is_open()) ofs << new_content;
+        }
+        current_files.push_back(out_path);
+        result.compilable_files.push_back(out_path);
+        if (verbose)
+            out << "  [definitions] -> " << out_path << "\n";
     }
 
     // Pruning removes outputs that the current run did not produce. After a parse that
