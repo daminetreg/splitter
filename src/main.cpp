@@ -2516,9 +2516,77 @@ static const std::vector<std::string>& cached_system_includes() {
     return includes;
 }
 
+// The language standard the *driver* would use for this compile, as a flag to hand libclang.
+//
+// When the command line carries no -std, the driver and libclang each fall back to their own
+// default, and they need not agree: clang 13's driver defaults to gnu++14 while libclang,
+// given the same arguments, parses at C++17. The splitter then decides what to split by
+// reading one program and compiles a different one -- every #if in the source is evaluated
+// twice against two macro environments. It surfaced as five unrelated-looking failures: two
+// redefinitions of main, a missing std::pmr, an undeclared identifier and three multiple
+// definitions.
+//
+// The driver's answer is the reference: it is what the build system asked for, and it is
+// what compiles the pieces and the fallback object. So ask it.
+static std::string probe_driver_standard(const std::string& compiler) {
+    std::string cmd = shell_quote(compiler) + " -x c++ -E -dM /dev/null 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+
+    char buf[4096];
+    std::string output;
+    while (fgets(buf, sizeof(buf), pipe)) output += buf;
+    pclose(pipe);
+
+    std::string value;
+    bool strict_ansi = false;
+    std::istringstream iss(output);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.rfind("#define __cplusplus ", 0) == 0)
+            value = trim_ws(line.substr(std::strlen("#define __cplusplus ")));
+        else if (line.rfind("#define __STRICT_ANSI__", 0) == 0)
+            strict_ansi = true;
+    }
+    while (!value.empty() && (value.back() == 'L' || value.back() == 'l')) value.pop_back();
+
+    // The GNU dialects differ from the ISO ones in more than __cplusplus, so keep whichever
+    // family the driver is in rather than normalising to -std=c++NN.
+    const std::string dialect = strict_ansi ? "c++" : "gnu++";
+    static const std::pair<const char*, const char*> known[] = {
+        {"199711", "98"}, {"201103", "11"}, {"201402", "14"},
+        {"201703", "17"}, {"202002", "20"}, {"202302", "23"},
+    };
+    for (const auto& k : known)
+        if (value == k.first) return "-std=" + dialect + k.second;
+    return "";
+}
+
+// The compiler the launcher was asked to wrap. Empty when cpp-splitter is driven directly,
+// in which case the standard probe has nothing to ask and adds nothing.
+static std::string g_compiler;
+
+static const std::string& cached_driver_standard() {
+    static const std::string std_flag =
+        g_compiler.empty() ? std::string() : probe_driver_standard(g_compiler);
+    return std_flag;
+}
+
 static std::vector<std::string> build_clang_flags(const std::vector<std::string>& extra_flags,
                                                    bool force_cxx = false) {
-    std::vector<std::string> all_flags = {"-std=c++17", "-fsyntax-only", "-Wno-everything"};
+    // The command line wins: if it names a standard, both sides already agree.
+    bool have_std = false;
+    for (const auto& f : extra_flags)
+        if (f.rfind("-std=", 0) == 0 || f == "--std") { have_std = true; break; }
+
+    std::string std_flag = have_std ? std::string() : cached_driver_standard();
+    // Nothing to probe, or the driver said something unrecognised. Falling back to a fixed
+    // standard is what this used to do unconditionally, and it is better than leaving
+    // libclang to a default that varies with how libclang itself was built.
+    if (!have_std && std_flag.empty()) std_flag = "-std=c++17";
+
+    std::vector<std::string> all_flags = {"-fsyntax-only", "-Wno-everything"};
+    if (!std_flag.empty()) all_flags.insert(all_flags.begin(), std_flag);
     if (force_cxx)
         all_flags.insert(all_flags.begin(), {"-x", "c++-header"});
     const auto& sys_includes = cached_system_includes();
@@ -3176,6 +3244,8 @@ static std::string relocatable_linker() {
 static int run_as_launcher(int argc, char* argv[]) {
     bool verbose = launcher_verbose();
     std::string compiler = argv[1];
+    // Probed lazily, once, the first time flags are built for a parse.
+    g_compiler = compiler;
 
     std::string input_file;
     std::string output_file;
@@ -3231,6 +3301,9 @@ static int run_as_launcher(int argc, char* argv[]) {
         std::cerr << "[cpp-splitter] flags (" << other_flags.size() << "):";
         for (const auto& f : other_flags) std::cerr << " " << f;
         std::cerr << "\n";
+        const std::string& probed = cached_driver_standard();
+        if (!probed.empty())
+            std::cerr << "[cpp-splitter] parse standard: " << probed << " (probed)\n";
     }
 
     std::string split_dir;

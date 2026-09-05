@@ -139,6 +139,18 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunDepfileTest.cmake)
 
+# What language standard libclang parses at when the command line names none. Its own driver
+# is needed because the check is that split and plain agree, and because no -std may appear
+# on the command line -- which is exactly what the other fixtures' driver passes.
+add_test(
+  NAME launcher.default_standard
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/default_standard_main.cpp
+          -DWORKDIR=${cpp_splitter_test_output}/default_standard
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunLauncherStdTest.cmake)
+
 # An explicit specialization of a member of a class template, in a source that defines
 # nothing else. Two translation units, because the caller has to be a separate object for
 # the specialization to be needed as a symbol rather than inlined.
@@ -170,5 +182,5 @@ set_tests_properties(
   split.preamble_linkage split.macro_members_main split.retracted_macro_main
   split.ipp_ctor_main split.multiline_conditional_main split.trailing_comment_main
   launcher.shared_inline_header launcher.depfile_names_originals
-  launcher.explicit_specialization
+  launcher.explicit_specialization launcher.default_standard
   PROPERTIES TIMEOUT 300)
