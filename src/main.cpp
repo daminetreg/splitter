@@ -103,6 +103,8 @@ struct FunctionInfo {
     bool in_unnamed_ns = false;       // an unnamed namespace encloses it at any depth
     bool in_class_template = false;   // member of a class template: cannot go out-of-line
     bool in_anonymous_class = false;  // no class name to qualify a definition with
+    // A type in the signature has no linkage, so the definition cannot leave this unit.
+    bool signature_lacks_linkage = false;
     // Member of a class-template specialization whose name libclang cannot spell.
     bool in_specialization_without_name = false;
     bool keep_in_header = false;      // definition has to stay in the preamble
@@ -436,6 +438,59 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
     (*vd->variables)[file].push_back(std::move(info));
 }
 
+// Whether a type stops a function from being defined in another translation unit.
+//
+// A type declared in an unnamed namespace, or a local class, has no linkage of its own -- or,
+// in clang's terms, unique-external linkage. A function whose signature mentions one can only
+// be defined in the translation unit that declares the type. Boost.Test writes exactly that:
+//
+//     namespace { struct unit_test_log_data_helper_impl { ... }; }
+//     bool log_entry_start( unit_test_log_data_helper_impl& current_logger_data ) { ... }
+//
+// and moving the definition into a piece of its own produces
+//
+//     error: function 'boost::unit_test::log_entry_start' is used but not defined in this
+//            translation unit, and cannot be defined in any other translation unit because
+//            its type does not have linkage
+//
+// Every Boost.Geometry test includes the framework in header-only mode, so every one of them
+// hit it. Note that the function's own linkage says nothing here: libclang reports
+// log_entry_start as external, because it is the *type* that is unique to the unit.
+static bool type_lacks_linkage(CXType type, int depth = 0) {
+    if (depth > 4) return false;                 // template arguments can nest arbitrarily
+    CXType t = clang_getCanonicalType(type);
+
+    // Strip pointers, references and arrays until a declared type is left.
+    for (;;) {
+        CXType pointee = clang_getPointeeType(t);
+        if (pointee.kind != CXType_Invalid) { t = clang_getCanonicalType(pointee); continue; }
+        CXType element = clang_getArrayElementType(t);
+        if (element.kind != CXType_Invalid) { t = clang_getCanonicalType(element); continue; }
+        break;
+    }
+
+    CXCursor decl = clang_getTypeDeclaration(t);
+    if (!clang_Cursor_isNull(decl)) {
+        switch (clang_getCursorLinkage(decl)) {
+            case CXLinkage_NoLinkage:
+            case CXLinkage_Internal:
+            case CXLinkage_UniqueExternal:
+                return true;
+            default:
+                break;
+        }
+    }
+
+    // The offending type can be a template argument rather than the type itself:
+    // std::vector<T> has external linkage while T does not.
+    const int args = clang_Type_getNumTemplateArguments(t);
+    for (int i = 0; i < args; ++i) {
+        CXType arg = clang_Type_getTemplateArgumentAsType(t, i);
+        if (arg.kind != CXType_Invalid && type_lacks_linkage(arg, depth + 1)) return true;
+    }
+    return false;
+}
+
 static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClientData data) {
     auto* vd = static_cast<VisitorData*>(data);
 
@@ -518,6 +573,14 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     // declarator, leave virtual members in the header: they are a small set, and they are
     // the ones where moving a definition is most delicate.
     info.is_virtual = clang_CXXMethod_isVirtual(cursor) != 0;
+
+    {
+        const CXType fn_type = clang_getCursorType(cursor);
+        info.signature_lacks_linkage = type_lacks_linkage(clang_getResultType(fn_type));
+        const int nargs = clang_getNumArgTypes(fn_type);
+        for (int i = 0; i < nargs && !info.signature_lacks_linkage; ++i)
+            info.signature_lacks_linkage = type_lacks_linkage(clang_getArgType(fn_type, i));
+    }
 
     // An explicit specialization is introduced by a `template< >` prefix that sits outside
     // the cursor's extent. Moving the definition out would strand that prefix in the
@@ -676,6 +739,8 @@ static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_template)         return "function template";
     if (fn.in_class_template)   return "member of a class template";
     if (fn.in_anonymous_class)  return "member of an unnamed class";
+    if (fn.signature_lacks_linkage)
+        return "a type in its signature has no linkage";
     if (fn.in_specialization_without_name)
         return "member of a specialization whose name cannot be written";
     if (fn.is_specialization)   return "explicit specialization";
@@ -1669,7 +1734,7 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         }
 
         if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
-            fn.in_specialization_without_name ||
+            fn.in_specialization_without_name || fn.signature_lacks_linkage ||
             fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns ||
             (fn.is_ctor_or_dtor && is_included_file(fn.file))) {
             fn.keep_in_header = true;
@@ -3136,8 +3201,9 @@ static void load_header_manifests(const std::string& output_dir) {
 }
 
 
-// The compiler the launcher was asked to wrap. Empty when cpp-splitter is driven directly,
-// in which case the probes below have nothing to ask and fall back to a default.
+// The compiler this run will hand the split pieces to: the one the launcher was asked to
+// wrap, or the one `--cxx` names. Empty only when neither said, in which case the probes
+// below fall back to a default.
 static std::string g_compiler;
 
 // The system include directories to hand libclang.
@@ -3203,6 +3269,12 @@ static std::string probe_driver_standard(const std::string& compiler) {
     return "";
 }
 
+// The standard to parse at when the caller has already fixed one for the compile. The
+// command-line driver compiles its pieces with -std=c++17 written into the command it
+// builds, so probing the driver's *default* would make the parse disagree with the compile
+// -- which is the bug TODO/19 was about, mirrored.
+static std::string g_forced_standard;
+
 static const std::string& cached_driver_standard() {
     static const std::string std_flag =
         g_compiler.empty() ? std::string() : probe_driver_standard(g_compiler);
@@ -3216,7 +3288,9 @@ static std::vector<std::string> build_clang_flags(const std::vector<std::string>
     for (const auto& f : extra_flags)
         if (f.rfind("-std=", 0) == 0 || f == "--std") { have_std = true; break; }
 
-    std::string std_flag = have_std ? std::string() : cached_driver_standard();
+    std::string std_flag;
+    if (!have_std)
+        std_flag = g_forced_standard.empty() ? cached_driver_standard() : g_forced_standard;
     // Nothing to probe, or the driver said something unrecognised. Falling back to a fixed
     // standard is what this used to do unconditionally, and it is better than leaving
     // libclang to a default that varies with how libclang itself was built.
@@ -4256,6 +4330,10 @@ int main(int argc, char* argv[]) {
         return run_as_launcher(argc, argv);
     }
 
+    // Everything this driver compiles it compiles with -std=c++17, so the parse has to use
+    // the same one rather than whatever the compiler defaults to.
+    g_forced_standard = "-std=c++17";
+
     std::string input_path = argv[1];
     std::string output_dir = "output";
     std::vector<std::string> extra_flags;
@@ -4284,7 +4362,12 @@ int main(int argc, char* argv[]) {
             i += 2;
         } else if (arg == "--cxx" && i + 1 < argc) {
             cxx_compiler = argv[i + 1];
+            // The parse has to see this compiler's system headers, not some other one's:
+            // GCC's and clang's are not interchangeable, and the pieces are compiled with
+            // this one.
+            g_compiler = cxx_compiler;
             i += 2;
+
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             print_usage(argv[0]);
