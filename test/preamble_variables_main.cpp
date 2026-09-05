@@ -23,6 +23,14 @@
 //   * `pair_a`/`pair_b` share one declaration, which the source text gives no per-name
 //     declaration for. It moves whole -- half of it moving would be worse than none -- and
 //     the preamble gets an `extern` for each name, rebuilt from its type.
+//   * `Pool<M>::slots_` is defined out of line with a `template<...>` prefix that sits
+//     outside the cursor's extent. Moving it would strand the prefix in the preamble.
+//   * `inline_type` is declared by `struct Inline { ... } inline_type;`, one declaration of
+//     a type and a variable. The type has to stay -- every piece needs it, and a member
+//     function defined in it is a definition of its own -- while the variable has to go, so
+//     only the declarator moves.
+//   * `arr` is an array: its type is spelled around its name, so the `extern` for it can
+//     only come from the source text, never from the type.
 #include <iostream>
 
 namespace demo {
@@ -41,6 +49,22 @@ struct Counter {
 
 int Counter::live = 0;              // external linkage, but the class declares it
 
+int arr[3] = {1, 2, 3};             // the type is spelled around the name
+
+template <int M>
+struct Pool {
+    static int slots_[2];
+    static int total() { return slots_[0] + slots_[1]; }
+};
+// The `template<...>` prefix is outside the definition's extent.
+template <int M> int Pool<M>::slots_[2] = {1, 1};
+
+struct Inline {
+    int v;
+    Inline() : v(4) {}
+    int half() const { return v / 2; }
+} inline_type;                      // a type and a variable in one declaration
+
 }  // namespace demo
 
 int bump() {
@@ -58,8 +82,10 @@ int main() {
     bump();
     bump();
     int d = drain();
-    int n = demo::counter + demo::Counter::live + d + demo::pair_a + demo::pair_b;
+    int n = demo::counter + demo::Counter::live + d + demo::pair_a + demo::pair_b
+            + demo::arr[0] + demo::arr[1] + demo::arr[2]
+            + demo::Pool<0>::total() + demo::inline_type.half();
     std::cout << n << "\n";
-    // counter 1, live 4, d = 2 + 5 + 7 = 14, pair_a 1, pair_b 2
-    return n == 22 ? 0 : 1;
+    // counter 1, live 4, d = 2 + 5 + 7 = 14, pair_a 1, pair_b 2, arr 6, Pool 2, half 2
+    return n == 32 ? 0 : 1;
 }

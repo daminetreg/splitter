@@ -198,6 +198,7 @@ struct VariableInfo {
     unsigned end_offset = 0;
     unsigned start_line = 0;
     std::string type_spelling;        // for the declaration left behind, when the text cannot give one
+    unsigned name_offset = 0;         // where the declarator's name is written
     std::vector<ScopeEntry> scope_chain;
     bool is_member = false;           // out-of-class static data member: the class declares it
     bool move_out = false;            // may exist in only one object
@@ -385,6 +386,9 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
     info.end_offset = e_off;
     info.start_line = line;
     info.type_spelling = cx_to_string(clang_getTypeSpelling(clang_getCursorType(cursor)));
+    unsigned name_off = 0;
+    clang_getFileLocation(clang_getCursorLocation(cursor), nullptr, nullptr, nullptr, &name_off);
+    info.name_offset = name_off;
 
     // Enclosing namespaces, so a moved definition can be reopened in its own scope. The
     // walk stops at a class for the same reason it does for functions: what is inside one
@@ -1693,6 +1697,38 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
 // left where it was -- less moving, nothing broken.
 static std::string variable_declaration_head(const std::string& text);
 
+// Whether a `template<...>` prefix precedes `start`.
+//
+// The prefix sits outside the cursor's extent -- the same thing that makes an explicit
+// specialization's `template< >` invisible to the harvest. An out-of-line definition of a
+// static data member of a class template is written that way:
+//
+//     template< int M > spinlock spinlock_pool< M >::pool_[ 41 ] = { ... };
+//
+// Moving the definition would leave `template< int M >` stranded in the preamble in front of
+// whatever came next, and carry a definition into the definitions header that no longer has
+// the template header it needs.
+static bool has_template_prefix(const std::string& blanked, unsigned start) {
+    size_t i = start;
+    while (i > 0 && std::isspace(static_cast<unsigned char>(blanked[i - 1]))) --i;
+    if (i == 0 || blanked[i - 1] != '>') return false;
+
+    int depth = 0;
+    while (i > 0) {
+        const char c = blanked[--i];
+        if (c == '>') ++depth;
+        else if (c == '<' && --depth == 0) break;
+    }
+    if (depth != 0) return false;
+
+    while (i > 0 && std::isspace(static_cast<unsigned char>(blanked[i - 1]))) --i;
+    static const std::string kw = "template";
+    if (i < kw.size()) return false;
+    if (blanked.compare(i - kw.size(), kw.size(), kw) != 0) return false;
+    return i == kw.size() ||
+           !is_ident_char(static_cast<unsigned char>(blanked[i - kw.size() - 1]));
+}
+
 // A type that can be written in front of a name to declare it. Arrays and function pointers
 // spell their declarator around the name (`int [3]`, `void (*)(int)`), so `extern <type>
 // <name>;` does not work for them and the source text has to provide the declaration
@@ -1703,7 +1739,9 @@ static bool type_spelling_is_simple(const std::string& type) {
            type.find('(') == std::string::npos;
 }
 
-static void prepare_variables(std::vector<VariableInfo>& variables, const std::string& source) {
+static void prepare_variables(std::vector<VariableInfo>& variables,
+                              const std::vector<FunctionInfo>& functions,
+                              const std::string& source) {
     const std::string blanked = blank_code_noise(source);
 
     // Extend every extent through its terminating semicolon. libclang stops at the
@@ -1713,6 +1751,7 @@ static void prepare_variables(std::vector<VariableInfo>& variables, const std::s
     for (auto& var : variables) {
         if (!var.move_out) continue;
         if (var.end_offset > source.size() || var.start_offset >= var.end_offset) continue;
+        if (has_template_prefix(blanked, var.start_offset)) continue;
         unsigned end = var.end_offset;
         if (!extend_through_semicolon(blanked, end)) continue;
         var.end_offset = end;
@@ -1752,11 +1791,38 @@ static void prepare_variables(std::vector<VariableInfo>& variables, const std::s
 
         bool usable_group = true;
         if (j - i == 1) {
-            // One declarator: the source text spells the type exactly as written, arrays
-            // and function pointers included.
+            // `struct foo { ... } f;` defines a type and a variable in one declaration. The
+            // type has to stay in the preamble -- every piece needs it -- while the variable
+            // has to leave, so the declaration is cut at the declarator's name: the type
+            // definition and its `;` stay, an `extern` follows, and the definitions header
+            // gets the variable rebuilt from its type.
+            const bool defines_a_type =
+                group.name_offset > group.start_offset &&
+                group.name_offset < group.end_offset &&
+                blank_code_noise(source.substr(group.start_offset,
+                                               group.name_offset - group.start_offset))
+                        .find('{') != std::string::npos;
+
             if (group.is_member) {
                 group.replacement.clear();          // the class already declares it
+            } else if (defines_a_type) {
+                // Take only the declarator. The type definition in front of it is left as
+                // ordinary text -- which matters for more than tidiness: a member function
+                // defined in that type is a definition of its own, and a range covering it
+                // would swallow the declaration the splitter left in its place.
+                if (type_spelling_is_simple(group.type_spelling)) {
+                    group.start_offset = group.name_offset;
+                    group.text = group.type_spelling + " " +
+                                 source.substr(group.name_offset,
+                                               group.end_offset - group.name_offset);
+                    group.replacement = ";\nextern " + group.type_spelling + " " +
+                                        group.name + ";";
+                } else {
+                    usable_group = false;
+                }
             } else if (!head.empty()) {
+                // The source text spells the type exactly as written, arrays and function
+                // pointers included.
                 group.replacement = terminate_declaration("extern " + head);
             } else if (type_spelling_is_simple(group.type_spelling)) {
                 group.replacement = "extern " + group.type_spelling + " " + group.name + ";";
@@ -1786,7 +1852,23 @@ static void prepare_variables(std::vector<VariableInfo>& variables, const std::s
         if (usable_group) kept.push_back(std::move(group));
         i = j;
     }
-    variables.swap(kept);
+
+    // A variable's range must not contain a function's. generate_preamble() folds
+    // overlapping ranges and emits the union verbatim, which would put back a definition
+    // that prepare_functions() decided to split -- and the piece for it is compiled either
+    // way, so the definition would exist twice.
+    std::vector<VariableInfo> disjoint;
+    for (auto& var : kept) {
+        bool overlaps = false;
+        for (const auto& fn : functions) {
+            if (fn.start_offset < var.end_offset && var.start_offset < fn.end_offset) {
+                overlaps = true;
+                break;
+            }
+        }
+        if (!overlaps) disjoint.push_back(std::move(var));
+    }
+    variables.swap(disjoint);
 }
 
 // The declarator part of a variable definition: everything before the initialiser, in
@@ -2694,7 +2776,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
     prepare_functions(functions, source, referenced, input_is_header);
-    prepare_variables(variables, source);
+    prepare_variables(variables, functions, source);
     dump_keep_decisions(functions);
 
     // A translation unit with nothing of its own to split still needs its preamble on disk:
