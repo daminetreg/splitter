@@ -700,6 +700,24 @@ static size_t find_declarator(const std::string& blanked, const std::string& nam
 static std::string trim_ws(const std::string& s);
 static bool token_at(const std::string& blanked, size_t pos, size_t len);
 
+// Terminate a declaration built from source text.
+//
+// The text runs up to the body's opening brace, and what precedes that brace may be a
+// trailing `//` comment -- Boost.Chrono writes a two-line comment between `tick_factor()`
+// and its `{`. A semicolon appended to such text lands inside the comment, and the
+// declaration is left with no terminator at all. Putting it on a line of its own costs a
+// newline and is always correct.
+static std::string terminate_declaration(const std::string& decl) {
+    const std::string blanked = blank_code_noise(decl);
+    const size_t nl = decl.rfind('\n');
+    const size_t from = (nl == std::string::npos) ? 0 : nl + 1;
+    // blank_code_noise() preserves offsets and newlines, so the two last lines line up. If
+    // they differ the line ends inside a comment that nothing closed.
+    if (decl.compare(from, std::string::npos, blanked, from, std::string::npos) != 0)
+        return decl + "\n;";
+    return decl + ";";
+}
+
 // Declaration left in place of a removed free-function definition. It is emitted at the
 // position the definition occupied, so it inherits the surrounding namespaces and any #if
 // context and needs no wrapping of its own. Emitting it here rather than appending it to
@@ -734,7 +752,7 @@ static std::string generate_forward_decl_inplace(const FunctionInfo& fn,
             return "";
         sig.replace(name_pos, fn.name.size(), make_static_mangled_name(stem, fn.name));
     }
-    return sig + ";";
+    return terminate_declaration(sig);
 }
 
 // Declaration appended at the end of the preamble, wrapped in its namespaces. Used for
@@ -794,7 +812,7 @@ static std::string generate_forward_decl_wrapped(const FunctionInfo& fn,
     std::string decl;
     for (const auto& ns : ns_names)
         decl += "namespace " + ns + " { ";
-    decl += sig + ";";
+    decl += terminate_declaration(sig);
     for (size_t i = 0; i < ns_names.size(); ++i)
         decl += " }";
 
@@ -1564,7 +1582,8 @@ static std::string generate_preamble(const std::string& source,
             // definition used to be.
             ensure_newline();
             if (!r.fn->member_decl.empty())
-                preamble += apply_static_renames(r.fn->member_decl, renames) + ";";
+                preamble += terminate_declaration(
+                    apply_static_renames(r.fn->member_decl, renames));
             else {
                 // Only a renamed function needs its declaration here. Its name changed, so
                 // a use in a namespace-scope initialiser retained in the preamble -- the
