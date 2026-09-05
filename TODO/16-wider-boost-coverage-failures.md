@@ -233,5 +233,24 @@ than inlined.
 The filesystem example still splits 12 of 12 with no fallbacks and scores 9/9; the test
 suite is 15 tests, four of them new.
 
-The 62 fallbacks are unchanged and unexplained -- they are not link failures, so this run
-does not say what they are. That is the next thing to look at.
+The 62 fallbacks are unchanged. They are not link failures, so nothing above says what they
+are; they are now classified in TODO 17 to 23, one file per cause:
+
+| | TUs | cause |
+|---|---:|---|
+| TODO 17 | 31 | a variable defined in the source is copied into every split piece |
+| TODO 18 | 18 | two definitions from one macro report overlapping, unequal extents |
+| TODO 19 | 7 | libclang parses at a different `-std` than the compiler compiles at |
+| TODO 20 | 2 | a member of an explicit class-template specialization loses its arguments |
+| TODO 21 | 2 | a `#if` condition spread over several lines is replayed truncated |
+| TODO 22 | 1 | a trailing `//` comment on the declarator swallows the semicolon |
+| TODO 23 | 1 | a `static` function in a header is renamed only in its own file |
+
+The script groups by symptom, so its buckets are not quite these counts: TODO 19's seven
+appear as four different messages plus three inside TODO 17's, which is the point that file
+makes -- one cause wearing five faces.
+
+Measuring this needs `./classify-fallbacks.sh` rather than the build log: the build runs at
+`-j32` and the diagnostics of thirty-two translation units interleave, so attributing an
+error to the unit that produced it by reading the log is guesswork. The script replays each
+fallback on its own.
