@@ -122,3 +122,67 @@ The script reports both, and names the targets that fail only under the splitter
 - Two regression fixtures in `test/`: a class whose members come from a macro expansion, and
   a translation unit whose split pieces call an inline function the unsplit source would have
   inlined away.
+
+## Outcome
+
+Both defects are fixed, and both turned out to have a different cause than the analysis
+above gave them. What follows records what they actually were; the sections above are left
+as written so the difference between a plausible mechanism and a verified one stays visible.
+
+### Defect 1 — the split decision was never the problem
+
+The functions in `struct transform` were already kept in the header, and always had been: a
+macro invocation contains no `{`, so `definition_decl_end()` finds no body to move and the
+keep rule fires. Nothing was ever split out of that class.
+
+What destroyed it was the always-inline strip. A definition produced by a macro has the
+invocation as its extent -- and so does every attribute on it, for the same reason: that is
+where the tokens entered the file. The attribute's range and the definition's range are
+therefore the same range, and `strip_always_inline()` erased it, then prepended the `inline `
+it adds whenever the text it returns no longer says `inline`. That single `inline` is the
+whole of what was left.
+
+The fix is one condition: an attribute range that spans the entire extent is left alone,
+because it cannot have come from the text it would be cut out of. Definitions that share one
+extent are now also kept in the header by an explicit rule rather than by the accident of
+having no brace, since `generate_preamble()` collapses such extents and splitting one of
+them would silently take its siblings with it.
+
+Fixture: `test/macro_members_header.hpp`.
+
+### Defect 2 — the reachability analysis was right; the conditional replay was wrong
+
+`collect_emitted()` had nothing to do with these link failures. Every one of them was a
+definition the splitter *did* split out, into a piece that compiled to an **empty object**.
+
+A definition written inside `#if C` is written into its split file inside the same `#if C`,
+so that a body the real build never sees is not compiled. But the piece replays that
+condition *after* including the whole header, and that is a different point in the
+preprocessor's life. Two headers here make the replayed condition false:
+
+* `boost/core/demangle.hpp` defines `BOOST_CORE_HAS_CXXABI_H`, writes `demangle`,
+  `demangle_alloc` and `demangle_free` under `#if defined(BOOST_CORE_HAS_CXXABI_H)`, and
+  `#undef`s it on its last line. This is the same trap `undefined_macros()` already guarded
+  the *body* against; the conditionals were simply not being checked too. 39 of the 40
+  failures were this one header.
+
+* `boost/spirit/home/support/char_encoding/ascii.hpp` spells its include guard
+  `#if !defined(BOOST_SPIRIT_ASCII_APRIL_26_2006_1106PM)` rather than `#ifndef`.
+  `active_conditionals()` recognised only the `#ifndef` spelling, so the guard was replayed
+  as an ordinary condition -- and a guard replayed after its own header has been included is
+  always false. This is what made the Spirit consumer fall back.
+
+Neither failure is visible when it happens. The piece compiles, the object is written, the
+link merges it, and the only symptom is an undefined reference to a function whose
+definition is plainly there in the source.
+
+Fixture: `test/retracted_macro_header.hpp`, which carries both spellings.
+
+### The correction
+
+The claim above that "**that reasoning was wrong**" -- that the reachability roots were kept
+too narrow, and that a missed root can leave a function emitted by no object at all -- does
+not survive being checked. It was inferred from the shape of the error, `undefined reference
+to an inline function in a header`, without looking at the object that was supposed to
+define it. That object existed and was empty, for a reason that has nothing to do with
+reachability. The original narrow-roots argument in `collect_emitted()` stands unchanged.

@@ -106,6 +106,7 @@ struct FunctionInfo {
     // Another definition reports the same extent: the mark of a macro that expands to more
     // than one declaration, whose extent is the invocation rather than any one declarator.
     bool shares_extent = false;
+    bool uses_undefined_macro = false;  // body or conditionals need a macro the file #undefs
     std::string member_decl;          // in-class declaration left behind (members only)
     std::string outlined_body;        // `T Class::name(args) { ... }` (members only)
 };
@@ -512,6 +513,7 @@ static bool has_vague_linkage(const FunctionInfo& fn) {
 
 static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.shares_extent)       return "shares its source extent with another definition";
+    if (fn.uses_undefined_macro) return "needs a macro the file undefines";
     if (fn.is_template)         return "function template";
     if (fn.in_class_template)   return "member of a class template";
     if (fn.in_anonymous_class)  return "member of an unnamed class";
@@ -1092,6 +1094,31 @@ static std::string trim_ws(const std::string& s) {
     return s.substr(b, e - b);
 }
 
+// The identifier of a `!defined(X)` condition, or empty if the expression is anything else.
+// An include guard is as often written `#if !defined(BOOST_FOO_HPP)` as `#ifndef
+// BOOST_FOO_HPP`, and the two have to be recognised alike: a guard replayed in a split
+// piece is always false, because the header it guards has just been included.
+static std::string negated_defined_operand(const std::string& expr) {
+    std::string s = trim_ws(expr);
+    if (s.empty() || s[0] != '!') return "";
+    s = trim_ws(s.substr(1));
+    const std::string kw = "defined";
+    if (s.compare(0, kw.size(), kw) != 0) return "";
+    s = trim_ws(s.substr(kw.size()));
+    const bool paren = !s.empty() && s[0] == '(';
+    if (paren) s = trim_ws(s.substr(1));
+    size_t n = 0;
+    while (n < s.size() && is_ident_char(static_cast<unsigned char>(s[n]))) ++n;
+    const std::string ident = s.substr(0, n);
+    std::string tail = trim_ws(s.substr(n));
+    if (paren) {
+        if (tail.empty() || tail[0] != ')') return "";
+        tail = trim_ws(tail.substr(1));
+    }
+    // Anything left over makes this a compound condition, not a bare guard.
+    return tail.empty() ? ident : std::string();
+}
+
 // The preprocessor conditionals active at `offset`, outermost first, with the file's own
 // include guard left out. A definition written inside `#if X` must be emitted inside the
 // same `#if X` in its split file: otherwise it is compiled unconditionally, and a
@@ -1122,10 +1149,15 @@ static std::vector<std::string> active_conditionals(const std::string& source,
         ls >> directive >> ident;
 
         if (directive == "if" || directive == "ifdef" || directive == "ifndef") {
+            std::string guard = (directive == "ifndef")
+                                    ? ident
+                                    : (directive == "if"
+                                           ? negated_defined_operand(trim_ws(rest.substr(2)))
+                                           : std::string());
             // The include guard wraps the whole file and its macro is already defined by
             // the time a split piece is compiled, so replaying it would delete the body.
-            if (!guard_skipped && stack.empty() && directive == "ifndef" && !ident.empty()) {
-                pending_guard = ident;
+            if (!guard_skipped && stack.empty() && !guard.empty()) {
+                pending_guard = guard;
                 guard_skipped = true;
                 stack.push_back(std::string());   // placeholder, emitted as nothing
                 continue;
@@ -1224,12 +1256,28 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         }
 
         if (!undeffed.empty()) {
-            const std::string body_blanked = blank_code_noise(fn.body);
             bool uses_undeffed = false;
+            const std::string body_blanked = blank_code_noise(fn.body);
             for (const auto& m : undeffed) {
                 if (contains_decl_token(body_blanked, m)) { uses_undeffed = true; break; }
             }
+            // The same trap one level up. A split piece replays the conditionals the
+            // definition was written under, but it replays them *after* including the whole
+            // header -- so a condition testing a macro the header undefines at the end of
+            // itself is false by then, the definition is preprocessed away, and the piece
+            // compiles to an empty object. Boost.Core's demangle.hpp does exactly this:
+            // it defines BOOST_CORE_HAS_CXXABI_H, writes demangle() under
+            // `#if defined(BOOST_CORE_HAS_CXXABI_H)`, and undefines it again on the last
+            // line. Nothing complains -- the object is simply empty and every caller is
+            // left with an undefined reference.
+            for (const auto& c : fn.conditionals) {
+                if (uses_undeffed) break;
+                const std::string cond_blanked = blank_code_noise(c);
+                for (const auto& m : undeffed)
+                    if (contains_decl_token(cond_blanked, m)) { uses_undeffed = true; break; }
+            }
             if (uses_undeffed) {
+                fn.uses_undefined_macro = true;
                 fn.keep_in_header = true;
                 continue;
             }
