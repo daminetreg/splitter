@@ -1703,6 +1703,51 @@ static bool build_pch(const std::string& preamble_file,
     return true;
 }
 
+// The source's include prefix: everything up to the first construct that is not a
+// preprocessor directive, comment or blank line.
+//
+// This is where a parse spends its time. A Boost translation unit is a few hundred lines of
+// its own behind tens of thousands of lines of headers, and every launcher invocation
+// re-reads all of them. Precompiling the prefix and feeding it back turns that into a load.
+//
+// It is specifically the *prefix*, not the preamble: the preamble is the source with its
+// function bodies carved out, so it declares everything the source declares, and feeding its
+// precompiled form back into a parse of that same source redefined all of it -- which is why
+// TODO 08 had to stop doing exactly that. A prefix declares nothing of the source's own, so
+// including it is only what the compiler was going to do anyway, already parsed.
+static std::string include_prefix_of(const std::string& source) {
+    const std::string blanked = blank_code_noise(source);
+    size_t pos = 0, cut = 0;
+    int conditional_depth = 0;
+
+    while (pos < blanked.size()) {
+        size_t eol = blanked.find('\n', pos);
+        if (eol == std::string::npos) eol = blanked.size();
+        const std::string line = trim_ws(blanked.substr(pos, eol - pos));
+
+        if (!line.empty()) {
+            if (line[0] == '#') {
+                std::istringstream ls(trim_ws(line.substr(1)));
+                std::string directive;
+                ls >> directive;
+                if (directive == "if" || directive == "ifdef" || directive == "ifndef")
+                    ++conditional_depth;
+                else if (directive == "endif" && conditional_depth > 0)
+                    --conditional_depth;
+            } else {
+                // Real code. Stop here, and if it is inside a conditional stop before that
+                // conditional opened rather than cutting the block in half.
+                break;
+            }
+            // Only cut at a point where every conditional that was opened has been closed,
+            // so the prefix is always balanced.
+            if (conditional_depth == 0) cut = eol < blanked.size() ? eol + 1 : eol;
+        }
+        pos = eol + 1;
+    }
+    return source.substr(0, cut);
+}
+
 static std::string build_libclang_pch(const std::string& preamble_file,
                                        const std::vector<std::string>& clang_flags,
                                        bool verbose,
@@ -2367,7 +2412,10 @@ static void emit_split_files(CXTranslationUnit tu,
                              bool verbose,
                              std::ostream& out,
                              SplitResult& result) {
-    build_libclang_pch(preamble_path, all_flags, verbose, out);
+    // The preamble is no longer precompiled. Its PCH had no consumer -- TODO 08 removed the
+    // one use of it, because feeding a preamble's precompiled form back into a parse of the
+    // source it was derived from redefines everything the source declares. The include
+    // prefix is precompiled instead, which is where the parse time actually is.
 
     if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
@@ -2616,6 +2664,28 @@ static SplitResult do_split(const std::string& input_path,
     // prefix of *this* file, so it cannot redefine anything.
     std::vector<std::string> parse_flags_vec = all_flags;
 
+    // Precompile the include prefix and hand it back, so the include graph is parsed once
+    // per distinct prefix rather than once per split.
+    {
+        const std::string prefix = include_prefix_of(source);
+        if (!prefix.empty()) {
+            std::error_code ec;
+            fs::create_directories(unit_dir, ec);
+            const std::string prefix_path =
+                (fs::path(unit_dir) / (unit_tag + "_prefix.h")).string();
+            if (!fs::exists(prefix_path) || read_file(prefix_path) != prefix) {
+                std::ofstream ofs(prefix_path);
+                if (ofs.is_open()) ofs << prefix;
+            }
+            const std::string prefix_pch =
+                build_libclang_pch(prefix_path, all_flags, verbose, out);
+            if (!prefix_pch.empty()) {
+                parse_flags_vec.push_back("-include-pch");
+                parse_flags_vec.push_back(prefix_pch);
+            }
+        }
+    }
+
     std::vector<const char*> args;
     for (const auto& f : parse_flags_vec)
         args.push_back(f.c_str());
@@ -2814,6 +2884,96 @@ static void rewrite_depfile(const std::string& dep_path,
                   << original_of.size() << " generated header(s) mapped back\n";
 }
 
+// Skip the split when nothing it depends on has changed.
+//
+// The split of a translation unit is a pure function of the source, the flags, and the
+// contents of every file it includes. That last list is already written beside the pieces
+// as `depfile.cache`, for the build system's benefit. Hashing those contents and storing
+// the result next to the output turns re-splitting into a comparison.
+//
+// This matters because a build system re-runs the launcher whenever a prerequisite's
+// timestamp moves, whether or not its contents did. Touching a header, checking out the
+// same commit again, or a generator rewriting a file identically all re-ran a full libclang
+// parse of every affected translation unit; the pieces then came out byte-for-byte
+// identical and nothing was recompiled. The parse was the entire cost.
+static std::string split_inputs_hash(const std::string& split_dir,
+                                     const std::string& input_file,
+                                     const std::vector<std::string>& flags) {
+    const std::string dep_cache = (fs::path(split_dir) / "depfile.cache").string();
+    if (!fs::exists(dep_cache)) return "";
+
+    std::string material = file_content_hash(input_file);
+    if (material.empty()) return "";
+    for (const auto& f : flags) material += "\0" + f;
+
+    // Every prerequisite recorded for this unit, in the order the file lists them.
+    const std::string deps = read_file(dep_cache);
+    const size_t colon = deps.find(':');
+    if (colon == std::string::npos) return "";
+    std::istringstream tokens(deps.substr(colon + 1));
+    std::string token;
+    while (tokens >> token) {
+        if (token == "\\") continue;
+        // A prerequisite that has since vanished must not hash the same as one that is
+        // present and empty, so absence gets its own marker.
+        const std::string h = file_content_hash(token);
+        material += "\0" + token + "\0" + (h.empty() ? "<absent>" : h);
+    }
+
+    size_t combined = std::hash<std::string>{}(material);
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016zx", combined);
+    return std::string(buf);
+}
+
+static void write_split_cache(const std::string& split_dir, const std::string& hash,
+                              const SplitResult& sr) {
+    if (hash.empty()) return;
+    std::ofstream ofs((fs::path(split_dir) / "split.cache").string());
+    if (!ofs.is_open()) return;
+    ofs << hash << "\n" << sr.preamble_filename << "\n";
+    ofs << sr.compilable_files.size() << "\n";
+    for (const auto& f : sr.compilable_files) ofs << f << "\n";
+    ofs << sr.header_obj_dirs.size() << "\n";
+    for (const auto& d : sr.header_obj_dirs) ofs << d << "\n";
+    ofs << sr.header_obj_files.size() << "\n";
+    for (const auto& f : sr.header_obj_files) ofs << f << "\n";
+}
+
+static bool read_split_cache(const std::string& split_dir, const std::string& hash,
+                             SplitResult& sr) {
+    if (hash.empty()) return false;
+    std::ifstream ifs((fs::path(split_dir) / "split.cache").string());
+    if (!ifs.is_open()) return false;
+
+    std::string stored;
+    if (!std::getline(ifs, stored) || stored != hash) return false;
+    if (!std::getline(ifs, sr.preamble_filename)) return false;
+
+    auto read_list = [&](std::vector<std::string>& out) {
+        std::string count_line;
+        if (!std::getline(ifs, count_line)) return false;
+        int count = 0;
+        try { count = std::stoi(count_line); } catch (...) { return false; }
+        for (int i = 0; i < count; ++i) {
+            std::string entry;
+            if (!std::getline(ifs, entry)) return false;
+            // Refuse the cache if anything it names has gone missing.
+            if (!fs::exists(entry) && entry.size() > 2 &&
+                entry.compare(entry.size() - 2, 2, ".o") != 0)
+                return false;
+            out.push_back(entry);
+        }
+        return true;
+    };
+
+    if (!read_list(sr.compilable_files)) return false;
+    if (!read_list(sr.header_obj_dirs)) return false;
+    if (!read_list(sr.header_obj_files)) return false;
+    sr.success = true;
+    return true;
+}
+
 static int run_as_launcher(int argc, char* argv[]) {
     bool verbose = launcher_verbose();
     std::string compiler = argv[1];
@@ -2887,7 +3047,17 @@ static int run_as_launcher(int argc, char* argv[]) {
       split_flags = std::vector<std::string>(split_flags.begin()+1, split_flags.end());
     }
     
-    SplitResult sr = do_split(input_file, split_dir, split_flags, verbose);
+    const std::string inputs_hash = split_inputs_hash(split_dir, input_file, split_flags);
+
+    SplitResult sr;
+    bool reused = read_split_cache(split_dir, inputs_hash, sr);
+    if (reused) {
+        if (verbose)
+            std::cerr << "[cpp-splitter] inputs unchanged, reusing the existing split\n";
+        for (const auto& hdr : sr.header_obj_dirs) (void)hdr;
+    } else {
+        sr = do_split(input_file, split_dir, split_flags, verbose);
+    }
 
 
     auto build_passthrough_cmd = [&]() {
@@ -3063,8 +3233,12 @@ static int run_as_launcher(int argc, char* argv[]) {
         }
     }
 
-    if (!split_build_failed)
+    if (!split_build_failed) {
         rewrite_depfile(mf_path, split_dir, input_file, verbose);
+        if (!reused)
+            write_split_cache(split_dir,
+                              split_inputs_hash(split_dir, input_file, split_flags), sr);
+    }
 
     if (!split_build_failed) {
         bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file);

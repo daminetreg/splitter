@@ -4,6 +4,9 @@
 rebuild, and today it makes every edit more expensive. This is the item that decides whether
 the approach pays for itself.
 
+**Status: implemented.** Editing a source or a header is now faster with the splitter than
+without. Editing a function *body* in a header is still slower. See "Outcome" at the end.
+
 ## Motivation
 
 `./benchmark-boost-split.sh` compares Boost.Filesystem built through the splitter against
@@ -101,3 +104,55 @@ real edit-build loop.
   consumer or it is gone.
 - The library produced is byte-identical to one produced without any caching, checked by
   building twice with the cache cleared in between.
+
+## Outcome
+
+Both proposals implemented, plus the removal the first one made obvious.
+
+**Skip the split when no input changed.** `split_inputs_hash()` hashes the source, the
+flags, and the contents of every prerequisite recorded in `depfile.cache`; `split.cache`
+stores that hash beside the split result. On a match the parse is skipped entirely and the
+existing pieces are reused. A prerequisite that has since vanished hashes distinctly from
+one that is present and empty, and the cache is refused if anything it names has gone
+missing.
+
+This is what a build system re-running the launcher on a *timestamp* change needs: touching
+a header, re-checking-out the same commit, or a generator rewriting a file identically all
+used to trigger a full parse whose output came out byte-for-byte identical.
+
+**Precompile the include prefix.** `include_prefix_of()` takes the source up to the first
+construct that is not a preprocessor directive, cutting only where every conditional it
+opened has been closed, so the prefix is always balanced. That is precompiled and fed back
+with `-include-pch`. Unlike the preamble it declares nothing the source declares, so the
+redefinition problem that forced TODO 08 to remove the previous PCH does not arise.
+
+**Stop precompiling the preamble.** With the prefix PCH doing the work, the preamble's PCH
+was left with no consumer at all -- it had had none since TODO 08 -- and it was expensive:
+removing it halved the full build and cut the build tree by a factor of six.
+
+| scenario | plain | before | after | verdict |
+|---|---:|---:|---:|---|
+| full | 0.7s | 16.3s | **7.4s** | 24.2x -> 11.2x |
+| no-op | 0.2s | 0.2s | 0.2s | parity |
+| one source | 0.4s | 1.0s | **0.2s** | 2.1x slower -> **2.0x faster** |
+| one header | 0.7s | 1.7s | **0.3s** | 2.5x slower -> **2.5x faster** |
+| one function body | 0.7s | 2.5s | **1.8s** | 3.6x -> 2.7x slower |
+
+The build tree went from 1.7G to 269M, and the library from 22M to 12M.
+
+Verified on a clean build: 12 of 12 translation units split with no fallbacks, the library
+links with no undefined references and passes its nine filesystem assertions, and a second
+build reports no work. The eleven tests pass.
+
+### Not met
+
+The acceptance criterion that matters most is still unmet: **editing one function body in a
+header remains slower with the splitter than without**, 1.8s against 0.7s.
+
+Three translation units genuinely have to be re-split there, and their cost is no longer
+dominated by parsing -- the prefix PCH took that from 2.7s to 2.3s, and removing the
+preamble PCH to 1.8s. What is left is the rest of the split: walking the AST twice, once to
+harvest and once for `collect_emitted()`, and writing several hundred output files per unit
+whose contents usually turn out to be unchanged. Making that row win needs the per-piece
+work to be skipped for pieces whose text cannot have changed, which is a finer-grained
+version of the caching added here rather than a new mechanism.
