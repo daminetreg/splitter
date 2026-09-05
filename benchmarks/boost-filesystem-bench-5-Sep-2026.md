@@ -40,9 +40,17 @@ Two runs, to show the spread:
 | no-op | 0.2s | 0.2s | 0.2s | parity |
 | one source | 0.5s | 0.2s | 0.2s | **2.0x faster** |
 | one header | 0.7s | 0.3s | 0.3s | **2.5x faster** |
-| one function body | 0.7s | 1.8s | 1.8s | 2.7x slower |
+| one function body | 0.7s | 1.8s | 1.8s | 2.7x slower [*] |
 
 Run-to-run variation is under 2% on every row.
+
+[*] **Corrected 6 September 2026.** This row was measuring two fallbacks. The prefix PCH was
+named after a hash of the include directives alone, which do not change when one of the
+headers they name is edited, so 2 of the 12 units were handed a stale PCH, failed to parse and
+compiled whole — silently, because that message was gated on `CPP_SPLITTER_VERBOSE`. Every
+other row is unaffected: they either parse nothing or start from a clean tree. Re-measured
+with the PCH fix in place the row is 0.7s against 1.9s, 2.8x slower. See
+`boost-spirit-bench-6-Sep-2026.md`.
 
 | artefact | plain | split |
 |---|---|---|
