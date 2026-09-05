@@ -2360,6 +2360,40 @@ static std::string include_prefix_of(const std::string& source) {
     return source.substr(0, cut);
 }
 
+static void inclusion_visitor(CXFile included_file, CXSourceLocation* stack,
+                              unsigned include_len, CXClientData client_data);
+
+// Whether a precompiled header is still good for the files it was built from.
+//
+// The PCH is named after a hash of the prefix file -- the include directives at the top of
+// the source. That text does not change when one of the headers it names is edited, so the
+// name alone says nothing about whether the PCH still matches what is on disk. Feeding a
+// stale one back to libclang does not degrade gracefully: the parse fails outright with
+// CXError_ASTReadError, the unit falls back to compiling whole, and the fallback is silent
+// unless someone is reading the verbose log. It made every header edit in the Spirit
+// benchmark measure a fallback rather than a split.
+//
+// So the PCH records what it was built from, and is rebuilt when any of that is newer.
+static bool pch_is_current(const std::string& pch_file) {
+    const std::string deps_file = pch_file + ".deps";
+    if (!fs::exists(deps_file)) return false;   // built before this check existed
+
+    std::error_code ec;
+    const auto pch_time = fs::last_write_time(pch_file, ec);
+    if (ec) return false;
+
+    std::ifstream ifs(deps_file);
+    if (!ifs.is_open()) return false;
+    std::string dep;
+    while (std::getline(ifs, dep)) {
+        if (dep.empty()) continue;
+        const auto dep_time = fs::last_write_time(dep, ec);
+        if (ec) return false;                   // vanished: rebuild and find out
+        if (dep_time > pch_time) return false;
+    }
+    return true;
+}
+
 static std::string build_libclang_pch(const std::string& preamble_file,
                                        const std::vector<std::string>& clang_flags,
                                        bool verbose,
@@ -2373,8 +2407,11 @@ static std::string build_libclang_pch(const std::string& preamble_file,
     std::string pch_file = pch_dir + "/" + hash + ".pch";
 
     if (fs::exists(pch_file)) {
-        if (verbose) out << "  libclang PCH up-to-date: " << pch_file << "\n";
-        return pch_file;
+        if (pch_is_current(pch_file)) {
+            if (verbose) out << "  libclang PCH up-to-date: " << pch_file << "\n";
+            return pch_file;
+        }
+        if (verbose) out << "  libclang PCH stale, rebuilding: " << pch_file << "\n";
     }
 
     if (fs::exists(pch_dir)) {
@@ -2415,6 +2452,19 @@ static std::string build_libclang_pch(const std::string& preamble_file,
     }
 
     int save_err = clang_saveTranslationUnit(tu, pch_file.c_str(), clang_defaultSaveOptions(tu));
+
+    // What this PCH is only valid for. Written before the translation unit is disposed,
+    // because that is the only place the include closure is known.
+    if (save_err == CXSaveError_None) {
+        std::vector<std::string> includes;
+        clang_getInclusions(tu, inclusion_visitor, &includes);
+        std::ofstream deps(pch_file + ".deps");
+        if (deps.is_open()) {
+            deps << preamble_file << "\n";
+            for (const auto& inc : includes) deps << inc << "\n";
+        }
+    }
+
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);
 
@@ -3810,7 +3860,11 @@ static int run_as_launcher(int argc, char* argv[]) {
     };
 
     if (!sr.success) {
-        if (verbose) std::cerr << "[cpp-splitter] splitting failed, falling back to normal compilation\n";
+        // Not gated on verbose. A fallback means the tool did nothing it exists to do, and
+        // the build succeeds either way -- so a silent one is a silent regression. The
+        // failure that motivated this said so: a stale prefix PCH made every header edit
+        // fall back, and the only trace was in a log nobody was reading.
+        std::cerr << "[cpp-splitter] splitting failed, falling back to normal compilation\n";
         std::string cmd = build_passthrough_cmd();
         if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
         return run_command_quiet(cmd);

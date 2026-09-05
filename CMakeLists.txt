@@ -144,6 +144,18 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunDepfileTest.cmake)
 
+# A header edited behind the prefix PCH. Needs a driver of its own because the test is what
+# the *second* split does, which no single-shot driver can express.
+add_test(
+  NAME launcher.header_edit_behind_pch
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/header_edit_main.cpp
+          -DHEADER=${cpp_splitter_test_dir}/header_edit_header.hpp
+          -DWORKDIR=${cpp_splitter_test_output}/header_edit
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunHeaderEditTest.cmake)
+
 # What language standard libclang parses at when the command line names none. Its own driver
 # is needed because the check is that split and plain agree, and because no -std may appear
 # on the command line -- which is exactly what the other fixtures' driver passes.
@@ -190,4 +202,5 @@ set_tests_properties(
   split.macro_argument_extent_main split.preamble_variables_main
   launcher.shared_inline_header launcher.depfile_names_originals
   launcher.explicit_specialization launcher.default_standard
+  launcher.header_edit_behind_pch
   PROPERTIES TIMEOUT 300)
