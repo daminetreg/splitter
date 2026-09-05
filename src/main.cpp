@@ -1124,6 +1124,55 @@ static std::string negated_defined_operand(const std::string& expr) {
     return tail.empty() ? ident : std::string();
 }
 
+// The source split into *logical* lines: a line ending in a backslash is joined with the
+// one after it, which is what the preprocessor sees. A directive scanner that works on
+// physical lines stores half of a continued condition, and a `#if A && \` replayed in a
+// split piece splices whatever follows it -- the `#line` directive -- into the condition.
+//
+// Each entry carries the offset the logical line started at, because active_conditionals()
+// compares that against a definition's start offset, and getting it wrong changes which
+// conditionals a definition is reported to be inside. The backslash and its newline are
+// replaced by a single space so that tokens either side of the splice stay separate.
+struct LogicalLine {
+    std::string text;
+    unsigned start;    // offset of the first physical line
+    unsigned end;      // offset just past the last physical line's newline
+};
+
+static std::vector<LogicalLine> logical_lines(const std::string& source) {
+    std::vector<LogicalLine> out;
+    const size_t n = source.size();
+    size_t i = 0;
+    while (i < n) {
+        LogicalLine ll;
+        ll.start = static_cast<unsigned>(i);
+        while (i < n) {
+            size_t eol = source.find('\n', i);
+            const size_t stop = (eol == std::string::npos) ? n : eol;
+            std::string piece = source.substr(i, stop - i);
+            i = (eol == std::string::npos) ? n : eol + 1;
+
+            // A splice is a backslash immediately before the newline, ignoring the \r of a
+            // CRLF file. Trailing blanks after it are not a splice, and neither compiler
+            // treats them as one without a warning.
+            if (!piece.empty() && piece.back() == '\r') piece.pop_back();
+            const bool spliced = !piece.empty() && piece.back() == '\\';
+            if (spliced) {
+                piece.pop_back();
+                ll.text += piece;
+                ll.text += ' ';
+                if (i < n) continue;
+            } else {
+                ll.text += piece;
+            }
+            break;
+        }
+        ll.end = static_cast<unsigned>(i);
+        out.push_back(std::move(ll));
+    }
+    return out;
+}
+
 // The preprocessor conditionals active at `offset`, outermost first, with the file's own
 // include guard left out. A definition written inside `#if X` must be emitted inside the
 // same `#if X` in its split file: otherwise it is compiled unconditionally, and a
@@ -1132,18 +1181,13 @@ static std::string negated_defined_operand(const std::string& expr) {
 static std::vector<std::string> active_conditionals(const std::string& source,
                                                     unsigned offset) {
     std::vector<std::string> stack;
-    std::istringstream iss(source);
-    std::string line;
-    unsigned pos = 0;
     bool guard_skipped = false;
     std::string pending_guard;
 
-    while (std::getline(iss, line)) {
-        const unsigned line_start = pos;
-        pos += static_cast<unsigned>(line.size()) + 1;
-        if (line_start >= offset) break;
+    for (const auto& ll : logical_lines(source)) {
+        if (ll.start >= offset) break;
 
-        std::string t = trim_ws(line);
+        std::string t = trim_ws(ll.text);
         if (t.empty() || t[0] != '#') {
             pending_guard.clear();
             continue;
@@ -1201,10 +1245,8 @@ static std::vector<std::string> active_conditionals(const std::string& source,
 // lines later.
 static std::set<std::string> undefined_macros(const std::string& source) {
     std::set<std::string> names;
-    std::istringstream iss(source);
-    std::string line;
-    while (std::getline(iss, line)) {
-        std::string t = trim_ws(line);
+    for (const auto& ll : logical_lines(source)) {
+        std::string t = trim_ws(ll.text);
         if (t.empty() || t[0] != '#') continue;
         std::istringstream ls(trim_ws(t.substr(1)));
         std::string directive, ident;
