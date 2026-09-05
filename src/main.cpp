@@ -3183,6 +3183,106 @@ static bool launcher_verbose() {
     return false;
 }
 
+// Rewrite the dependency file so it names the files an edit to which should trigger a
+// rebuild.
+//
+// Split pieces include the rewritten copies of headers, never the originals, so that is what
+// the compiler records. Those copies live in the build directory and are regenerated only
+// when the splitter runs, which happens only once the build system has already decided the
+// object is stale -- a loop that never starts. The result is that editing a header rebuilds
+// nothing that includes it, and the build reports success while linking stale objects.
+//
+// The originals are recovered from the `.split` manifests, whose first line is the absolute
+// path of the header the copy was generated from. Generated paths are kept as well as the
+// originals rather than replaced: a stale copy should also force a rebuild, and a
+// prerequisite that no longer exists makes the target dirty, which is the safe direction.
+//
+// The dependency file also has to be produced on every invocation, not only when something
+// recompiled. Only the first piece is given -MD, so an incremental run in which that piece
+// is already up to date writes no dependency file at all, and a build system that records
+// dependencies itself -- ninja does -- takes the absence as "no dependencies" and discards
+// everything it knew. The rewritten file is therefore kept beside the pieces and restored
+// when no compilation regenerated it.
+static void rewrite_depfile(const std::string& dep_path,
+                            const std::string& split_dir,
+                            const std::string& input_file,
+                            bool verbose) {
+    if (dep_path.empty()) return;
+
+    const std::string cache_path = (fs::path(split_dir) / "depfile.cache").string();
+
+    if (!fs::exists(dep_path)) {
+        std::error_code copy_ec;
+        if (fs::exists(cache_path)) {
+            fs::copy_file(cache_path, dep_path,
+                          fs::copy_options::overwrite_existing, copy_ec);
+            if (verbose && !copy_ec)
+                std::cerr << "[cpp-splitter] depfile: restored from cache, nothing"
+                             " recompiled\n";
+        }
+        return;
+    }
+
+    // Mirrored header copy -> the original it was generated from.
+    std::map<std::string, std::string> original_of;
+    std::error_code ec;
+    const std::string include_root = split_include_root(split_dir);
+    if (fs::exists(include_root)) {
+        for (fs::recursive_directory_iterator it(include_root, ec), end; it != end && !ec;
+             it.increment(ec)) {
+            if (!it->is_regular_file()) continue;
+            const std::string path = it->path().string();
+            if (path.size() < 6 || path.compare(path.size() - 6, 6, ".split") != 0) continue;
+            std::ifstream manifest(path);
+            std::string original;
+            if (!manifest.is_open() || !std::getline(manifest, original) || original.empty())
+                continue;
+            original_of[path.substr(0, path.size() - 6)] = original;
+        }
+    }
+
+    const std::string contents = read_file(dep_path);
+    const size_t colon = contents.find(':');
+    if (colon == std::string::npos) return;
+
+    std::vector<std::string> deps;
+    std::set<std::string> seen;
+    auto add = [&](const std::string& d) {
+        if (!d.empty() && seen.insert(d).second) deps.push_back(d);
+    };
+
+    // Anything the build system should watch: the source itself, then each recorded
+    // prerequisite, plus the original behind any generated copy.
+    add(fs::absolute(input_file).lexically_normal().string());
+
+    std::istringstream tokens(contents.substr(colon + 1));
+    std::string token;
+    while (tokens >> token) {
+        if (token == "\\") continue;
+        add(token);
+        auto it = original_of.find(token);
+        if (it != original_of.end()) add(it->second);
+    }
+
+    std::ostringstream rewritten;
+    rewritten << contents.substr(0, colon) << ":";
+    for (const auto& d : deps) rewritten << " \\\n  " << d;
+    rewritten << "\n";
+
+    {
+        std::ofstream ofs(dep_path);
+        if (!ofs.is_open()) return;
+        ofs << rewritten.str();
+    }
+    {
+        std::ofstream cache(cache_path);
+        if (cache.is_open()) cache << rewritten.str();
+    }
+    if (verbose)
+        std::cerr << "[cpp-splitter] depfile: " << deps.size() << " prerequisite(s), "
+                  << original_of.size() << " generated header(s) mapped back\n";
+}
+
 static int run_as_launcher(int argc, char* argv[]) {
     bool verbose = launcher_verbose();
     std::string compiler = argv[1];
@@ -3423,6 +3523,9 @@ static int run_as_launcher(int argc, char* argv[]) {
             }
         }
     }
+
+    if (!split_build_failed)
+        rewrite_depfile(mf_path, split_dir, input_file, verbose);
 
     if (!split_build_failed) {
         bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file);

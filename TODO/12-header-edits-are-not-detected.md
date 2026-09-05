@@ -5,6 +5,8 @@ build reports success while linking objects compiled against the previous versio
 header. Every other item in this list costs performance or fails loudly; this one hands back
 a stale binary.
 
+**Status: implemented.** See "Outcome" at the end.
+
 ## Motivation
 
 The splitter rewrites each header it splits into a copy under
@@ -97,3 +99,43 @@ object is out of date, and ninja decides that from the depfile above.
   an edit. See TODO 13: that is not currently true even without an edit.
 - Regression fixture in `test/`, registered with `add_test`, that splits a source including
   a header, edits the header's observable behaviour, rebuilds, and asserts the new result.
+
+## Outcome
+
+Two defects, not one. The second was invisible until the first was fixed, and on its own it
+would have made the fix useless.
+
+**The dependency file named generated files.** `rewrite_depfile()` now rewrites it after the
+pieces are compiled. The original behind each rewritten header comes from the `.split`
+manifests, whose first line is the absolute path the copy was generated from, and the
+original source is added explicitly -- it was missing too. Generated paths are kept as well
+as the originals: a stale copy should also force a rebuild, and a prerequisite that no
+longer exists makes the target dirty, which is the safe direction.
+
+**The dependency file was written only when something recompiled.** Only the first piece is
+given `-MD`, so an incremental run in which that piece is already up to date produced no
+dependency file at all. ninja records dependencies in its own database and takes a missing
+file as "no dependencies", so the second build of a settled tree discarded everything the
+first had learned -- `#deps 667` became `#deps 0`. Any edit after that was invisible again.
+The rewritten file is now kept beside the pieces as `depfile.cache` and restored when
+nothing regenerated it.
+
+Verified on the Boost example:
+
+| check | before | after |
+|---|---|---|
+| dependencies recorded for `path.cpp.o` | 620 | **667** |
+| the original `boost/filesystem/path.hpp` among them | 0 | **1** |
+| dependencies surviving a second build | 0 | **667** |
+| objects rebuilt after editing `path.hpp` | **0** | **7** |
+| objects rebuilt by a build without the launcher | 7 | 7 |
+
+The last two rows are the point: the split build and the unsplit build now rebuild the same
+seven translation units.
+
+`test/depfile_main.cpp` with `test/depfile_header.hpp` and
+`test/cmake/RunDepfileTest.cmake` is the regression test, registered as
+`launcher.depfile_names_originals`. It asserts on the dependency file itself, which is the
+contract with the build system, rather than on a simulated incremental build -- and it
+first checks that the header really was split, so it cannot quietly stop covering the case
+it was written for. Confirmed to fail against the previous binary and pass against this one.

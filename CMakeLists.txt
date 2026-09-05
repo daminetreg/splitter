@@ -119,6 +119,19 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
             -P ${cpp_splitter_test_dir}/cmake/RunSplitTest.cmake)
 endforeach()
 
+# What the launcher tells the build system a split object depends on. The pieces include
+# rewritten copies of the headers, so without help the depfile names only those and an edit
+# to the real header rebuilds nothing.
+add_test(
+  NAME launcher.depfile_names_originals
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/depfile_main.cpp
+          -DHEADER=${cpp_splitter_test_dir}/depfile_header.hpp
+          -DWORKDIR=${cpp_splitter_test_output}/depfile
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunDepfileTest.cmake)
+
 # One header split separately by two translation units: both objects carry a copy of its
 # functions, so the final link has to merge them instead of rejecting them as duplicates.
 add_test(
@@ -134,5 +147,5 @@ add_test(
 set_tests_properties(
   split.sample split.use_mylib split.static_specifier split.static_renames
   split.member_functions split.ctx_main split.always_inline_main split.impl_include_main
-  split.preamble_linkage launcher.shared_inline_header
+  split.preamble_linkage launcher.shared_inline_header launcher.depfile_names_originals
   PROPERTIES TIMEOUT 300)
