@@ -248,6 +248,10 @@ struct VariableInfo {
     // Only from C++17, where inline variables exist.
     bool inline_in_place = false;
     bool internal_linkage = false;    // `static`, or enclosed by an unnamed namespace
+    // const or constexpr, asked of the type rather than read off the text. The keyword is
+    // routinely a macro -- Boost.Filesystem writes BOOST_CONSTEXPR_OR_CONST -- and such a
+    // variable has to stay where its users can see it as a constant expression.
+    bool is_const = false;
     bool in_unnamed_ns = false;
     // Moved out and renamed, the way a `static` function in a .cpp already is. Only for the
     // translation unit's own source: see TODO 26.
@@ -474,6 +478,8 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
     // `inline` is read from the pretty-printed declaration rather than the source text
     // because, like constexpr on a function, it is routinely spelled as a macro.
     info.internal_linkage = clang_getCursorLinkage(cursor) != CXLinkage_External;
+    info.is_const =
+        clang_isConstQualifiedType(clang_getCanonicalType(clang_getCursorType(cursor))) != 0;
     info.move_out = clang_getCursorLinkage(cursor) == CXLinkage_External && !in_template;
     if (info.move_out) {
         const std::string pretty = cx_to_string(clang_getCursorPrettyPrinted(cursor, nullptr));
@@ -2084,8 +2090,13 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
         // namespace: hoisting the definition out changes the scope its name is looked up in,
         // and any declaration the source already wrote inside stays behind -- the same reason
         // prepare_functions() keeps unnamed-namespace functions.
-        if (!var.move_out && var.internal_linkage && !input_is_header && !var.in_unnamed_ns &&
-            !var.is_member && !var.name.empty()) {
+        // `is_const` is what keeps a compile-time constant in place. Moving one leaves an
+        // `extern` declaration where its users need a constant expression, and every use in
+        // an array bound, a template argument or another constexpr initialiser stops
+        // compiling. Boost.Filesystem's dir_itr_imp_extra_data_alignment is one, spelled
+        // BOOST_CONSTEXPR_OR_CONST, which is why the text cannot be trusted to find them.
+        if (!var.move_out && var.internal_linkage && !var.is_const && !input_is_header &&
+            !var.in_unnamed_ns && !var.is_member && !var.name.empty()) {
             var.rename_and_move = true;
             var.move_out = true;
         }
@@ -3654,6 +3665,10 @@ static void emit_split_files(CXTranslationUnit tu,
 
     bool definitions_emitted = false;
     std::vector<std::string> current_files;
+
+    // Why each definition that could not be split was kept. One file per unit rather than a
+    // note at the top of eleven thousand pieces that are never compiled.
+    std::ostringstream keeps;
     int file_counter = 0;
     int written_count = 0;
     int skipped_count = 0;
@@ -3756,6 +3771,30 @@ static void emit_split_files(CXTranslationUnit tu,
             content << "#endif\n";
 
         std::string new_content = content.str();
+        const bool kept = should_keep_in_header(fn);
+
+        // A kept definition's piece is never compiled -- there is no object to be had from a
+        // function template, and nothing to gain from one. Writing it anyway cost 97.6% of
+        // the files this produces on Boost.Geometry: 11515 written against 273 compiled for
+        // one translation unit, 12 MB of .cpp that nothing reads. TODO 27.
+        //
+        // The counter still advances, so the names of the pieces that *are* compiled do not
+        // move and an incremental build does not see everything change. The reason the
+        // definition was kept is recorded once per unit in <tag>.keeps instead of once per
+        // definition in a file of its own, and CPP_SPLITTER_DUMP_HARVEST brings the old
+        // per-file form back when that is what the question needs.
+        if (kept && !std::getenv("CPP_SPLITTER_DUMP_HARVEST")) {
+            keeps << file_counter << "\t" << fn.start_line << "\t" << keep_reason(fn)
+                  << "\t" << fn.signature << "\n";
+            current_files.pop_back();   // not written, so not ours to keep from the pruner
+            if (verbose) {
+                out << "  [" << file_counter << "] " << fn.signature << "  (header-only)\n";
+                out << "      Lines " << fn.start_line << "-" << fn.end_line
+                    << " -> kept in the preamble, no piece written\n";
+            }
+            continue;
+        }
+
         bool needs_write = true;
         if (fs::exists(out_path)) {
             std::string existing = read_file(out_path);
@@ -3776,7 +3815,6 @@ static void emit_split_files(CXTranslationUnit tu,
             ++skipped_count;
         }
 
-        bool kept = should_keep_in_header(fn);
         if (!kept)
             result.compilable_files.push_back(out_path);
 
@@ -3787,6 +3825,18 @@ static void emit_split_files(CXTranslationUnit tu,
             out << "\n";
             out << "      Lines " << fn.start_line << "-" << fn.end_line
                 << " -> " << out_path << "\n";
+        }
+    }
+
+    {
+        const std::string keeps_path = (fs::path(output_dir) / (unit_tag + ".keeps")).string();
+        const std::string keeps_text = keeps.str();
+        if (keeps_text.empty()) {
+            std::error_code ec;
+            fs::remove(keeps_path, ec);
+        } else if (!fs::exists(keeps_path) || read_file(keeps_path) != keeps_text) {
+            std::ofstream ofs(keeps_path);
+            if (ofs.is_open()) ofs << keeps_text;
         }
     }
 
