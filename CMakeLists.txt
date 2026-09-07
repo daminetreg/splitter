@@ -185,6 +185,19 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunLauncherTest.cmake)
 
+# An explicit function-template specialization whose `inline` arrives through the same macro
+# as its always-inline attribute. Two translation units, because the copies have to reach one
+# link before the linker can reject them.
+add_test(
+  NAME launcher.specialization_inline
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          "-DSOURCES=${cpp_splitter_test_dir}/specialization_inline_main.cpp;${cpp_splitter_test_dir}/specialization_inline_other.cpp"
+          -DINCLUDE_DIR=${cpp_splitter_test_dir}
+          -DWORKDIR=${cpp_splitter_test_output}/specialization_inline
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunLauncherTest.cmake)
+
 # One header split separately by two translation units: both objects carry a copy of its
 # functions, so the final link has to merge them instead of rejecting them as duplicates.
 add_test(
@@ -206,6 +219,6 @@ set_tests_properties(
   split.macro_argument_extent_main split.preamble_variables_main
   split.macro_definition_main split.main_in_header_main split.no_linkage_type_main
   launcher.shared_inline_header launcher.depfile_names_originals
-  launcher.explicit_specialization launcher.default_standard
+  launcher.explicit_specialization launcher.default_standard launcher.specialization_inline
   launcher.header_edit_behind_pch
   PROPERTIES TIMEOUT 300)

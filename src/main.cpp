@@ -1067,6 +1067,45 @@ static bool opens_with_template(const std::string& blanked) {
            (i + 8 >= blanked.size() || !is_ident_char(static_cast<unsigned char>(blanked[i + 8])));
 }
 
+// Where to insert `inline` in a definition that has lost it, or npos when it must not be
+// inserted at all.
+//
+// A template definition needs no `inline` and may not take one in front of its parameter
+// list. An explicit specialization is not a template, though: `template <>` introduces a
+// plain function, which needs `inline` exactly as much as any other -- and the keyword has to
+// go *after* the prefix, because `inline template <>` is not a declaration.
+//
+// Boost.QVM is where this matters:
+//
+//     template <> BOOST_QVM_INLINE_TRIVIAL long double floor<long double>( long double )
+//
+// The macro carries an always-inline attribute and the `inline`, so stripping the attribute
+// took both. Judged a template and left alone, what remained was a strong definition in a
+// header every piece includes, and `ld -r` rejected the copies.
+static size_t inline_insertion_point(const std::string& blanked) {
+    size_t i = 0;
+    while (i < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[i]))) ++i;
+    if (!opens_with_template(blanked)) return 0;
+
+    size_t j = i + 8;
+    while (j < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[j]))) ++j;
+    if (j >= blanked.size() || blanked[j] != '<') return std::string::npos;
+
+    const size_t open = j;
+    int depth = 0;
+    for (; j < blanked.size(); ++j) {
+        if (blanked[j] == '<') ++depth;
+        else if (blanked[j] == '>' && --depth == 0) break;
+    }
+    if (j >= blanked.size()) return std::string::npos;
+
+    // Only an *empty* parameter list makes this a specialization rather than a template.
+    for (size_t k = open + 1; k < j; ++k)
+        if (!std::isspace(static_cast<unsigned char>(blanked[k]))) return std::string::npos;
+
+    return j + 1;
+}
+
 static std::string strip_always_inline(const std::string& text, unsigned base,
                                        const std::vector<std::pair<unsigned, unsigned>>& ranges) {
     if (ranges.empty()) return text;
@@ -1096,9 +1135,10 @@ static std::string strip_always_inline(const std::string& text, unsigned base,
         out.erase(r.first, r.second - r.first);
 
     const std::string blanked = blank_code_noise(out);
-    if (!opens_with_template(blanked) &&
+    const size_t at = inline_insertion_point(blanked);
+    if (at != std::string::npos &&
         !contains_decl_token(blanked.substr(0, decl_prefix_end(blanked)), "inline"))
-        out = "inline " + out;
+        out.insert(at, at == 0 ? "inline " : " inline");
     return out;
 }
 
@@ -3454,9 +3494,10 @@ static void emit_split_files(CXTranslationUnit tu,
             // Say `inline` explicitly whenever the text does not already. This has to run
             // before the #line directive is prepended, or it lands in front of it.
             const std::string blanked = blank_code_noise(body);
-            if (!opens_with_template(blanked) &&
+            const size_t at = inline_insertion_point(blanked);
+            if (at != std::string::npos &&
                 !contains_decl_token(blanked.substr(0, decl_prefix_end(blanked)), "inline"))
-                body = "inline " + body;
+                body.insert(at, at == 0 ? "inline " : " inline");
         }
 
         body = apply_static_renames(body, static_renames);
