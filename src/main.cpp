@@ -525,6 +525,9 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     CXCursorKind kind = clang_getCursorKind(cursor);
 
     bool is_function_def = false;
+    // ON, on this branch. See example/conversion-operator/ and TODO/25 defect 3.
+    //
+    // The paragraph below is what main says, kept so the two can be compared:
     // CXCursor_ConversionFunction is deliberately absent, and its absence is a known hole
     // rather than an oversight: an unharvested definition is never moved out of the preamble,
     // so `context_frame::operator bool()` in Boost.Test's test_tools.ipp -- an out-of-line
@@ -541,7 +544,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     // See TODO/25.
     if (kind == CXCursor_FunctionDecl || kind == CXCursor_CXXMethod ||
         kind == CXCursor_Constructor || kind == CXCursor_Destructor ||
-        kind == CXCursor_FunctionTemplate) {
+        kind == CXCursor_ConversionFunction || kind == CXCursor_FunctionTemplate) {
         is_function_def = clang_isCursorDefinition(cursor);
     }
 
