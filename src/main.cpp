@@ -3838,6 +3838,32 @@ static bool launcher_verbose() {
 // dependencies itself -- ninja does -- takes the absence as "no dependencies" and discards
 // everything it knew. The rewritten file is therefore kept beside the pieces and restored
 // when no compilation regenerated it.
+// Keep a copy of a depfile the compiler just wrote, so a later run that recompiles nothing
+// can put it back.
+//
+// The build system consumes the depfile and deletes it, so its absence means "already read",
+// not "no dependencies" -- but ninja does not keep what it read if the edge runs again and
+// produces nothing. An edge that runs and writes no depfile is recorded with *zero*
+// dependencies, and the object then survives every later edit to every header it includes.
+//
+// The split path caches the depfile it rewrites. The fallback path compiled the original
+// source with the original -MF, so its depfile is already correct and only needs keeping:
+// without this, a unit that fell back once and then split with nothing to recompile lost its
+// dependencies entirely. Boost.Geometry's tests do exactly that, and the symptom is a build
+// that reports 0.2s where the plain one takes 13s because it has quietly stopped rebuilding.
+static void cache_passthrough_depfile(const std::string& dep_path,
+                                      const std::string& split_dir,
+                                      bool verbose) {
+    if (dep_path.empty() || split_dir.empty()) return;
+    std::error_code ec;
+    if (!fs::exists(dep_path, ec)) return;
+    fs::create_directories(split_dir, ec);
+    const std::string cache_path = (fs::path(split_dir) / "depfile.cache").string();
+    fs::copy_file(dep_path, cache_path, fs::copy_options::overwrite_existing, ec);
+    if (verbose && !ec)
+        std::cerr << "[cpp-splitter] depfile: cached the fallback's own dependencies\n";
+}
+
 static void rewrite_depfile(const std::string& dep_path,
                             const std::string& split_dir,
                             const std::string& input_file,
@@ -4128,7 +4154,9 @@ static int run_as_launcher(int argc, char* argv[]) {
         std::cerr << "[cpp-splitter] splitting failed, falling back to normal compilation\n";
         std::string cmd = build_passthrough_cmd();
         if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
-        return run_command_quiet(cmd);
+        const int rc = run_command_quiet(cmd);
+        if (rc == 0) cache_passthrough_depfile(mf_path, split_dir, verbose);
+        return rc;
     }
 
     // A translation unit can have nothing of its own to split and still be worth splitting:
@@ -4137,7 +4165,9 @@ static int run_as_launcher(int argc, char* argv[]) {
     if (sr.compilable_files.empty() && sr.header_obj_files.empty()) {
         std::string cmd = build_passthrough_cmd();
         if (verbose) std::cerr << "[cpp-splitter] nothing to split, passthrough: " << cmd << "\n";
-        return run_command_quiet(cmd);
+        const int rc = run_command_quiet(cmd);
+        if (rc == 0) cache_passthrough_depfile(mf_path, split_dir, verbose);
+        return rc;
     }
 
     if (compiler == "tipi-compiler-driver") {
@@ -4336,7 +4366,9 @@ static int run_as_launcher(int argc, char* argv[]) {
         std::cerr << "[cpp-splitter] split build failed, falling back to normal compilation\n";
         std::string cmd = build_passthrough_cmd();
         if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
-        return run_command_quiet(cmd);
+        const int rc = run_command_quiet(cmd);
+        if (rc == 0) cache_passthrough_depfile(mf_path, split_dir, verbose);
+        return rc;
     }
 
     if (verbose) std::cerr << "[cpp-splitter] done: " << output_file << "\n";
