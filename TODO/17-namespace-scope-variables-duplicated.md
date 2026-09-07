@@ -145,9 +145,26 @@ Boost run caught rather than the fixture:
   here.
 
 The silent half is unchanged: internal-linkage variables still get a copy per piece, so a
-`static int calls = 0;` shared by two functions still counts in two objects. Moving them
-needs the rename that TODO 23 declined to generalise, and nothing observable in this corpus
-depends on it.
+`static int calls = 0;` shared by two functions still counts in two objects.
+
+**Both halves of the sentence that used to follow were wrong, and are corrected here.** It
+said moving them "needs the rename that TODO 23 declined to generalise, and nothing observable
+in this corpus depends on it".
+
+TODO 23 declined a rename map shared *between* translation units, which is a problem only for
+a definition in a **header**: two units split the same header separately and would have to
+agree on the mangled name. A `static` variable in the unit's own source has no such problem --
+`build_static_rename_map()` is already per-unit and already sufficient. The `.cpp` case was
+never blocked by TODO 23; it was deferred by step 5 of this file's own spec, which says the
+rename "can follow separately".
+
+And something observable does depend on it. `example/static-init-order/` is three files and no
+Boost: the registrar it declares `static` is copied into every piece, so the registry it fills
+ends up with one entry per piece instead of one. That was written after this outcome was, and
+it falsifies it.
+
+The `.cpp` half is now TODO 26. Variables in headers stay out of scope, because those really do
+need what TODO 23 declined.
 
 Fixture: `test/preamble_variables_main.cpp`, which carries all nine kinds -- moved,
 `const`, `constexpr`, `inline`, `static`, a static data member, a multi-declarator

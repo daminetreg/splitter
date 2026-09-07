@@ -148,6 +148,18 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunDepfileTest.cmake)
 
+# A `static` variable in the unit's own source: one copy per piece unless it is renamed and
+# moved. Two translation units, because the mangle is only load-bearing when both define one.
+add_test(
+  NAME launcher.static_variable
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          "-DSOURCES=${cpp_splitter_test_dir}/static_variable_main.cpp;${cpp_splitter_test_dir}/static_variable_other.cpp"
+          -DINCLUDE_DIR=${cpp_splitter_test_dir}
+          -DWORKDIR=${cpp_splitter_test_output}/static_variable
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunLauncherTest.cmake)
+
 # Where a variable that may exist in only one object is put, at C++17 and below it.
 add_test(
   NAME launcher.inline_variable_placement
@@ -231,4 +243,5 @@ set_tests_properties(
   launcher.shared_inline_header launcher.depfile_names_originals
   launcher.explicit_specialization launcher.default_standard launcher.specialization_inline
   launcher.header_edit_behind_pch launcher.inline_variable_placement
+  launcher.static_variable
   PROPERTIES TIMEOUT 300)

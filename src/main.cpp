@@ -247,6 +247,11 @@ struct VariableInfo {
     // Kept where it is and marked `inline`, rather than moved to the definitions header.
     // Only from C++17, where inline variables exist.
     bool inline_in_place = false;
+    bool internal_linkage = false;    // `static`, or enclosed by an unnamed namespace
+    bool in_unnamed_ns = false;
+    // Moved out and renamed, the way a `static` function in a .cpp already is. Only for the
+    // translation unit's own source: see TODO 26.
+    bool rename_and_move = false;
     std::string replacement;          // what the preamble gets in place of the definition
 };
 
@@ -453,9 +458,12 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
         if (uk == CXCursor_ClassTemplate || uk == CXCursor_ClassTemplatePartialSpecialization)
             in_template = true;
         const std::string uname = cx_to_string(clang_getCursorSpelling(up));
-        if (!uname.empty())
+        if (uname.empty()) {
+            if (uk == CXCursor_Namespace) info.in_unnamed_ns = true;
+        } else {
             scope_parts.push_back(
                 {uname, uk == CXCursor_Namespace ? ScopeKind::Namespace : ScopeKind::Class});
+        }
         up = clang_getCursorSemanticParent(up);
     }
     std::reverse(scope_parts.begin(), scope_parts.end());
@@ -465,6 +473,7 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
     // or internal linkage may appear in every piece, which is what the preamble does.
     // `inline` is read from the pretty-printed declaration rather than the source text
     // because, like constexpr on a function, it is routinely spelled as a macro.
+    info.internal_linkage = clang_getCursorLinkage(cursor) != CXLinkage_External;
     info.move_out = clang_getCursorLinkage(cursor) == CXLinkage_External && !in_template;
     if (info.move_out) {
         const std::string pretty = cx_to_string(clang_getCursorPrettyPrinted(cursor, nullptr));
@@ -1209,9 +1218,21 @@ static std::string strip_always_inline(const std::string& text, unsigned base,
 using StaticRenameMap = std::vector<std::pair<std::string, std::string>>;
 
 static StaticRenameMap build_static_rename_map(const std::vector<FunctionInfo>& functions,
+                                               const std::vector<VariableInfo>& variables,
                                                const std::string& unit_tag) {
     StaticRenameMap renames;
     std::set<std::string> seen;
+
+    // Variables that are being moved out of the preamble and renamed. Entering them here is
+    // what rewrites every *use* of the name -- in the retained preamble text, in the split
+    // bodies, and in the moved definition itself -- which is the part a hand-rolled rename
+    // would get wrong.
+    for (const auto& var : variables) {
+        if (!var.rename_and_move) continue;
+        if (seen.insert(var.name).second)
+            renames.emplace_back(var.name, make_static_mangled_name(unit_tag, var.name));
+    }
+
     for (const auto& fn : functions) {
         // Only free functions are renamed. A member's name is part of its class, and
         // renaming one breaks every use of it -- an override stops overriding, and callers
@@ -2043,7 +2064,9 @@ static void warn_pre_cxx17_variable_move(const VariableInfo& var) {
 
 static void prepare_variables(std::vector<VariableInfo>& variables,
                               const std::vector<FunctionInfo>& functions,
-                              const std::string& source) {
+                              const std::string& source,
+                              const std::string& unit_tag,
+                              bool input_is_header) {
     const std::string blanked = blank_code_noise(source);
 
     // Extend every extent through its terminating semicolon. libclang stops at the
@@ -2051,6 +2074,21 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
     // does not parse and the `;` left behind dangles after the declaration replacing it.
     std::vector<VariableInfo> usable;
     for (auto& var : variables) {
+        // A `static` variable in the unit's own source is one object per *piece* if it stays
+        // in the preamble, because every piece includes it -- not one per translation unit as
+        // the language rule suggests. It is moved out and renamed, exactly as a `static`
+        // function in a .cpp already is. TODO 26.
+        //
+        // Not from a header: two units splitting the same header separately would have to
+        // agree on the mangled name, which is what TODO 23 declined. Not from an unnamed
+        // namespace: hoisting the definition out changes the scope its name is looked up in,
+        // and any declaration the source already wrote inside stays behind -- the same reason
+        // prepare_functions() keeps unnamed-namespace functions.
+        if (!var.move_out && var.internal_linkage && !input_is_header && !var.in_unnamed_ns &&
+            !var.is_member && !var.name.empty()) {
+            var.rename_and_move = true;
+            var.move_out = true;
+        }
         if (!var.move_out) continue;
         if (var.end_offset > source.size() || var.start_offset >= var.end_offset) continue;
         if (has_template_prefix(blanked, var.start_offset)) continue;
@@ -2109,7 +2147,9 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
                                            group.name_offset - group.start_offset))
                     .find('{') != std::string::npos;
 
-        if (g_cxx_standard >= 201703 && !defines_a_type_here) {
+        // `inline` gives vague linkage, which is the opposite of what a variable with
+        // internal linkage must have, so the rename path is checked first.
+        if (g_cxx_standard >= 201703 && !defines_a_type_here && !group.rename_and_move) {
             group.inline_in_place = true;
             group.replacement.clear();
             kept.push_back(std::move(group));
@@ -2117,7 +2157,12 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
             continue;
         }
 
-        warn_pre_cxx17_variable_move(group);
+        // Only when the move is forced by the standard. A variable with internal linkage is
+        // renamed and moved whatever the standard, because that is the correct treatment for
+        // it rather than a compromise -- `inline` would give it vague linkage, which is the
+        // opposite of what it must have.
+        if (!group.rename_and_move && g_cxx_standard > 0 && g_cxx_standard < 201703)
+            warn_pre_cxx17_variable_move(group);
 
         bool usable_group = true;
         if (j - i == 1) {
@@ -2150,6 +2195,21 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
                 } else {
                     usable_group = false;
                 }
+            } else if (group.rename_and_move) {
+                // Renamed like a static function: `static` comes off so the other pieces can
+                // refer to it, and the name is mangled because it now has external linkage
+                // and could collide with another unit that spells it the same way. The
+                // definition itself is rewritten by apply_static_renames(); only the
+                // declaration left behind has to name the mangled form directly, because
+                // `replacement` goes into the preamble verbatim.
+                if (type_spelling_is_simple(group.type_spelling)) {
+                    group.text = strip_decl_specifier(group.text, "static");
+                    group.replacement =
+                        "extern " + group.type_spelling + " " +
+                        make_static_mangled_name(unit_tag, group.name) + ";";
+                } else {
+                    usable_group = false;
+                }
             } else if (!head.empty()) {
                 // The source text spells the type exactly as written, arrays and function
                 // pointers included.
@@ -2165,7 +2225,8 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
             // takes the whole declaration out of the running -- it moves whole or not at
             // all, and half of it moving would be worse than none.
             for (size_t k = i; k < j && usable_group; ++k) {
-                if (usable[k].is_member || !type_spelling_is_simple(usable[k].type_spelling))
+                if (usable[k].is_member || usable[k].rename_and_move ||
+                    !type_spelling_is_simple(usable[k].type_spelling))
                     usable_group = false;
             }
             if (usable_group) {
@@ -3072,6 +3133,7 @@ static void write_skipped_header_manifest(const std::string& unit_dir,
 
 static void emit_split_files(CXTranslationUnit tu,
                              const std::vector<FunctionInfo>& functions,
+                             const std::vector<VariableInfo>& variables,
                              const std::string& input_path,
                              const std::string& abs_path,
                              const std::string& output_dir,
@@ -3217,7 +3279,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
     prepare_functions(functions, source, referenced, input_is_header);
-    prepare_variables(variables, functions, source);
+    prepare_variables(variables, functions, source, unit_tag, input_is_header);
     dump_keep_decisions(functions);
 
     // A translation unit with nothing of its own to split still needs its preamble on disk:
@@ -3239,7 +3301,8 @@ static SplitResult split_unit(CXTranslationUnit tu,
     fs::create_directories(unit_dir);
 
     result.preamble_filename = preamble_path;
-    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
+    const StaticRenameMap static_renames =
+        build_static_rename_map(functions, variables, unit_tag);
     std::string definitions;
     const std::string preamble =
         generate_preamble(source, functions, variables, unit_tag, abs_path, static_renames,
@@ -3288,7 +3351,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
         return result;
     }
 
-    emit_split_files(tu, functions, input_path, abs_path, unit_dir,
+    emit_split_files(tu, functions, variables, input_path, abs_path, unit_dir,
                      split_include_root(output_dir), unit_tag,
                      preamble_filename, preamble_path, definitions_filename,
                      all_flags, extra_flags,
@@ -3560,6 +3623,7 @@ static unsigned check_diagnostics(CXTranslationUnit tu, bool verbose) {
 // place is what stops the two paths from drifting apart.
 static void emit_split_files(CXTranslationUnit tu,
                              const std::vector<FunctionInfo>& functions,
+                             const std::vector<VariableInfo>& variables,
                              const std::string& input_path,
                              const std::string& abs_path,
                              const std::string& output_dir,
@@ -3583,7 +3647,10 @@ static void emit_split_files(CXTranslationUnit tu,
 
     if (verbose) out << "Found " << functions.size() << " function(s) in " << input_path << ":\n\n";
 
-    const StaticRenameMap static_renames = build_static_rename_map(functions, unit_tag);
+    // The same map generate_preamble() used. It has to be the same, or a piece refers to a
+    // name the preamble no longer declares.
+    const StaticRenameMap static_renames =
+        build_static_rename_map(functions, variables, unit_tag);
 
     bool definitions_emitted = false;
     std::vector<std::string> current_files;

@@ -49,9 +49,10 @@ Two separate things have gone wrong, and the repro shows both at once.
 
 The first registration wins in the sense that matters, and it sees an empty string.
 
-## Why this is the Boost.Test failure too, probably
+## It is not the Boost.Test failure — that was tested and it is not
 
-Boost.Test writes exactly this shape in `boost/test/impl/unit_test_parameters.ipp`:
+The reason this file exists is that Boost.Test writes the same shape in
+`boost/test/impl/unit_test_parameters.ipp`:
 
 ```cpp
 namespace runtime_config {
@@ -67,11 +68,28 @@ and the split Boost.Geometry test fails with
 Test setup error: There is no argument provided for parameter color_output
 ```
 
-which is what a parameter registered under an empty name looks like from the outside.
+which is what a parameter registered under an empty name looks like from the outside. That
+made initialisation order the obvious suspect. **It is the wrong suspect.** Building the same
+target at C++17, where the splitter now leaves those variables in place as `inline` variables
+and moves nothing:
 
-**"Probably" is doing real work in that sentence.** The shapes match and the symptom matches;
-I have not traced Boost.Test's initialisation to prove it is the same instance of the problem.
-Treat it as the strongest available hypothesis, not as established.
+```
+cold: exit=0   fallbacks=0   warnings=0
+Test setup error: There is no argument provided for parameter color_output
+program exit=200
+```
+
+Zero warnings means no variable was moved at all, so no initialiser changed object, so
+initialisation order is not what breaks it. Same failure, same message.
+
+The earlier revision of this file called it "the strongest available hypothesis, not
+established". It was honest about being unproven and it was still wrong, which is the useful
+part: the shapes matching and the symptom matching was never evidence, and one experiment that
+could have falsified it was worth more than the argument for it.
+
+What is still true is that the Boost.Geometry failure appears only with this branch's
+conversion-operator harvest, and that keeping those definitions in the header while merely
+*relocating* them reproduces it. That is where to look next, and it is not here.
 
 ## What this is not
 
