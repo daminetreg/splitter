@@ -1,11 +1,11 @@
-#include "registry.hpp"
-#include <iostream>
+// Function: int main()
+// Source: /home/daminetreg/workspace/cpp-splitter/example/static-init-order/main.cpp (lines 9-29)
+// Note: kept in the preamble, not compiled -- the program's entry point
+// ---
 
-int helper_one();
-int helper_two();
-int helper_three();
-int helper_four();
+#include "main_preamble.h"
 
+#line 9 "/home/daminetreg/workspace/cpp-splitter/example/static-init-order/main.cpp"
 int main() {
     const int sum = helper_one() + helper_two() + helper_three() + helper_four();
 

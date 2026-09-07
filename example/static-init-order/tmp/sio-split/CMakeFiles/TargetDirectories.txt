@@ -1,0 +1,3 @@
+/home/daminetreg/workspace/cpp-splitter/example/static-init-order/tmp/sio-split/CMakeFiles/static_init_order.dir
+/home/daminetreg/workspace/cpp-splitter/example/static-init-order/tmp/sio-split/CMakeFiles/edit_cache.dir
+/home/daminetreg/workspace/cpp-splitter/example/static-init-order/tmp/sio-split/CMakeFiles/rebuild_cache.dir

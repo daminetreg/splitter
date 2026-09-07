@@ -148,6 +148,16 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunDepfileTest.cmake)
 
+# Where a variable that may exist in only one object is put, at C++17 and below it.
+add_test(
+  NAME launcher.inline_variable_placement
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/inline_variable_main.cpp
+          -DWORKDIR=${cpp_splitter_test_output}/inline_variable
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunInlineVariableTest.cmake)
+
 # A header edited behind the prefix PCH. Needs a driver of its own because the test is what
 # the *second* split does, which no single-shot driver can express.
 add_test(
@@ -220,5 +230,5 @@ set_tests_properties(
   split.macro_definition_main split.main_in_header_main split.no_linkage_type_main
   launcher.shared_inline_header launcher.depfile_names_originals
   launcher.explicit_specialization launcher.default_standard launcher.specialization_inline
-  launcher.header_edit_behind_pch
+  launcher.header_edit_behind_pch launcher.inline_variable_placement
   PROPERTIES TIMEOUT 300)

@@ -7,14 +7,14 @@ that is what led to it, but **it fails on `main` too** — see "What this is not
 ## Run it
 
 ```sh
-cmake -GNinja -S example/static-init-order -B /tmp/sio \
-      -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake
-ninja -C /tmp/sio && /tmp/sio/static_init_order          # registered: 'color_output'  exit 0
+cmake -GNinja -S example/static-init-order -B example/static-init-order/tmp/sio \
+      -DCMAKE_TOOLCHAIN_FILE=$PWD/environments/monolithic.cmake
+ninja -C example/static-init-order/tmp/sio && example/static-init-order/tmp/sio/static_init_order          # registered: 'color_output'  exit 0
 
-cmake -GNinja -S example/static-init-order -B /tmp/sio-split \
-      -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake \
+cmake -GNinja -S example/static-init-order -B example/static-init-order/tmp/sio-split \
+      -DCMAKE_TOOLCHAIN_FILE=$PWD/environments/monolithic.cmake \
       -DCMAKE_CXX_COMPILER_LAUNCHER=$PWD/build/cpp-splitter
-ninja -C /tmp/sio-split && /tmp/sio-split/static_init_order   # registered: ''  exit 1
+ninja -C example/static-init-order/tmp/sio-split && example/static-init-order/tmp/sio-split/static_init_order   # registered: ''  exit 1
 ```
 
 Same source, same compiler, different answer. Nothing falls back and nothing fails to build:
@@ -92,6 +92,36 @@ That reframes the branch: turning the harvest on does not introduce a bug, it pe
 existing one. Which is worth knowing before spending time on the conversion operators, because
 fixing them will not make the Geometry test pass while the initialisation order is still
 whatever the linker felt like.
+
+## What the branch now does about it
+
+The branch carries a fix for the ordering half: **from C++17 the definition stays where it
+is, marked `inline`**, so the linker merges the copies and it is still initialised in source
+order relative to its neighbours. Below C++17 inline variables do not exist, so it still moves
+-- and the splitter now says so, once per translation unit and only when it actually moves
+something:
+
+```
+[cpp-splitter] warning: registry.cpp: 'param_name' moved to another object
+    (C++14; needs C++17 to stay put); its initialiser now runs in link order
+    -- see example/static-init-order/
+```
+
+Measured on this example:
+
+| standard | placement | first registration | exit |
+|---|---|---|---:|
+| C++14 | moved to the definitions header, warned | `''` | 1 |
+| C++17 | `inline` in the preamble, silent | `'color_output'` | 0 |
+
+The duplicate registrations your loop prints are *not* fixed by this. `s_registrar` has
+internal linkage, so every piece still gets its own copy -- `TODO/17`'s recorded residual.
+`inline` addresses where the variable lives, not how many registrars run.
+
+`launcher.inline_variable_placement` pins both halves down. It asserts on the *placement* and
+on the warning rather than on the program's answer, deliberately: a link whose order happens
+to be favourable produces a correct program from wrong placement, so a runtime assertion here
+passes with and without the fix -- which is exactly what the first version of that test did.
 
 ## What the branch itself does
 

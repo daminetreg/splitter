@@ -1,10 +1,5 @@
-#include "registry.hpp"
-#include <iostream>
-
-int helper_one();
-int helper_two();
-int helper_three();
-int helper_four();
+#pragma once
+#include "main_preamble.h"
 
 int main() {
     const int sum = helper_one() + helper_two() + helper_three() + helper_four();

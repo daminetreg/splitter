@@ -1,0 +1,6 @@
+# ninja log v6
+134	171	1788783875452639606	static_init_order	843dc25e2d3d8a52
+0	133	1788783875316641018	CMakeFiles/static_init_order.dir/main.cpp.o	9e0779224f7405fb
+0	103	1788783875316641018	CMakeFiles/static_init_order.dir/registry.cpp.o	9537f1bf940a2a01
+1	136	1788784043418882331	CMakeFiles/static_init_order.dir/main.cpp.o	9e0779224f7405fb
+136	172	1788784043554880899	static_init_order	843dc25e2d3d8a52

@@ -1,0 +1,7 @@
+# ninja log v6
+647	691	1788783882728564029	static_init_order	843dc25e2d3d8a52
+1	647	1788783882084570721	CMakeFiles/static_init_order.dir/main.cpp.o	fd84747ed12b8ede
+1	574	1788783882084570721	CMakeFiles/static_init_order.dir/registry.cpp.o	30a48c515fb401c7
+1	16	1788784043602880392	CMakeFiles/static_init_order.dir/registry.cpp.o	30a48c515fb401c7
+1	152	1788784043602880392	CMakeFiles/static_init_order.dir/main.cpp.o	fd84747ed12b8ede
+152	191	1788784043754878792	static_init_order	843dc25e2d3d8a52

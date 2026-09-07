@@ -59,6 +59,30 @@ static std::vector<std::string> detect_system_includes(const std::string& compil
     return includes;
 }
 
+// The C++ standard this unit is being compiled at, as the __cplusplus value, or 0 when it
+// could not be determined. Set once per split from the same flags libclang is given, so the
+// splitter's decisions and the compiler's rules cannot disagree.
+static int g_cxx_standard = 0;
+
+// "-std=gnu++17" -> 201703. Returns 0 for anything unrecognised, which callers treat as
+// "assume the older behaviour", because guessing high is the unsafe direction.
+static int standard_from_flag(const std::string& flag) {
+    const size_t plus = flag.rfind("++");
+    if (plus == std::string::npos) return 0;
+    const std::string ver = flag.substr(plus + 2);
+    static const std::pair<const char*, int> known[] = {
+        {"98", 199711}, {"03", 199711},
+        {"11", 201103}, {"0x", 201103},
+        {"14", 201402}, {"1y", 201402},
+        {"17", 201703}, {"1z", 201703},
+        {"20", 202002}, {"2a", 202002},
+        {"23", 202302}, {"2b", 202302},
+    };
+    for (const auto& k : known)
+        if (ver == k.first) return k.second;
+    return 0;
+}
+
 enum class ScopeKind { Namespace, Class };
 
 struct ScopeEntry {
@@ -220,6 +244,9 @@ struct VariableInfo {
     std::vector<ScopeEntry> scope_chain;
     bool is_member = false;           // out-of-class static data member: the class declares it
     bool move_out = false;            // may exist in only one object
+    // Kept where it is and marked `inline`, rather than moved to the definitions header.
+    // Only from C++17, where inline variables exist.
+    bool inline_in_place = false;
     std::string replacement;          // what the preamble gets in place of the definition
 };
 
@@ -1995,6 +2022,25 @@ static bool type_spelling_is_simple(const std::string& type) {
            type.find('(') == std::string::npos;
 }
 
+// Said once per run, and only when a variable is actually moved. A definition that leaves
+// the preamble is initialised in whichever object it lands in, and the order between objects
+// is link order -- so anything reading it during static initialisation may see it empty.
+// From C++17 the splitter avoids this by marking such definitions `inline` and leaving them
+// where they are; before that, inline variables do not exist and there is nowhere else to put
+// a definition that may exist only once.
+static void warn_pre_cxx17_variable_move(const VariableInfo& var) {
+    static bool said = false;
+    if (said) return;
+    said = true;
+    // One line per translation unit, because that is how often this can fire on a large
+    // build. Everything else is in the file it points at.
+    std::cerr << "[cpp-splitter] warning: " << var.file << ": '" << var.name
+              << "' moved to another object";
+    if (g_cxx_standard > 0)
+        std::cerr << " (C++" << (g_cxx_standard / 100) % 100 << "; needs C++17 to stay put)";
+    std::cerr << "; its initialiser now runs in link order -- see example/static-init-order/\n";
+}
+
 static void prepare_variables(std::vector<VariableInfo>& variables,
                               const std::vector<FunctionInfo>& functions,
                               const std::string& source) {
@@ -2044,6 +2090,34 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
             i = j;
             continue;
         }
+
+        // From C++17 there is a better placement than the definitions header: leave the
+        // definition exactly where it is and mark it `inline`. The linker merges the copies
+        // into one object, and -- the point -- it is still initialised in source order
+        // relative to the code around it, because it never left. Moving it to another object
+        // puts its dynamic initialiser in link order relative to anything that reads it
+        // during static initialisation, which is a silently wrong program rather than a
+        // failed build. example/static-init-order/ is three files that show it.
+        //
+        // `struct foo { ... } f;` is excluded: `inline` in front of a declaration that also
+        // defines a type is not something to write, so that shape keeps the declarator-only
+        // treatment below.
+        const bool defines_a_type_here =
+            group.name_offset > group.start_offset &&
+            group.name_offset < group.end_offset &&
+            blank_code_noise(source.substr(group.start_offset,
+                                           group.name_offset - group.start_offset))
+                    .find('{') != std::string::npos;
+
+        if (g_cxx_standard >= 201703 && !defines_a_type_here) {
+            group.inline_in_place = true;
+            group.replacement.clear();
+            kept.push_back(std::move(group));
+            i = j;
+            continue;
+        }
+
+        warn_pre_cxx17_variable_move(group);
 
         bool usable_group = true;
         if (j - i == 1) {
@@ -2313,7 +2387,15 @@ static std::string generate_preamble(const std::string& source,
             // place -- at the position it occupied, so it precedes every use the file had.
             // An out-of-class static data member needs no declaration: its class has one.
             ensure_newline();
-            if (!definitions) {
+            if (r.var->inline_in_place) {
+                // C++17: it stays, marked `inline`, so the copies merge and the order
+                // relative to its neighbours is the order the source had.
+                std::string text = apply_static_renames(r.var->text, renames);
+                const std::string blanked = blank_code_noise(text);
+                if (!contains_decl_token(blanked, "inline"))
+                    text.insert(0, "inline ");
+                preamble += text;
+            } else if (!definitions) {
                 // No definitions header to move it to: leave it exactly where it was.
                 preamble += apply_static_renames(r.var->text, renames);
             } else {
@@ -3426,6 +3508,15 @@ static std::vector<std::string> build_clang_flags(const std::vector<std::string>
     std::string std_flag;
     if (!have_std)
         std_flag = g_forced_standard.empty() ? cached_driver_standard() : g_forced_standard;
+
+    // Whichever of the three won, that is the standard the pieces are compiled at, so it is
+    // the one the splitter's own decisions have to be made against.
+    if (have_std) {
+        for (const auto& f : extra_flags)
+            if (f.rfind("-std=", 0) == 0) { g_cxx_standard = standard_from_flag(f); break; }
+    } else {
+        g_cxx_standard = standard_from_flag(std_flag);
+    }
     // Nothing to probe, or the driver said something unrecognised. Falling back to a fixed
     // standard is what this used to do unconditionally, and it is better than leaving
     // libclang to a default that varies with how libclang itself was built.
