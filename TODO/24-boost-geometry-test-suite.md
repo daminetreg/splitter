@@ -4,7 +4,7 @@
 the harness covered before, and one measurement trap that manufactured two more that did not
 exist.
 
-**Status: four fixed, one structural limitation left.** See "Outcome".
+**Status: four fixed. The fifth was misdiagnosed as structural; it is TODO 25.**
 
 ## Motivation
 
@@ -179,7 +179,7 @@ rules, rather than in the visitor, brought that unit back to **51 seconds** with
 decisions. This is worth remembering as a shape: a check that is correct and cheap on the
 corpus you have can be quadratic on the corpus you add.
 
-### What is left, and why it is not a defect
+### What is left — and the claim this file made about it was wrong
 
 With all four fixed, `range.cpp` splits into 6347 pieces and then falls back on this:
 
@@ -193,15 +193,27 @@ defined out of line, so they may exist in only one object -- which means the def
 header -- and the definitions header includes the preamble first, by which point the macro is
 gone.
 
-There is no placement that works. In the preamble they are duplicated into every piece and
-`ld -r` rejects them; in the definitions header the macro they need no longer exists. The file
-is unsplittable under the current design, and falling back is the right answer rather than a
-bug to be forced. Recording it here so the next person does not rediscover it: the general
-shape is **a strong out-of-line definition that depends on transient macro state, in a header
-that every piece includes**.
+**An earlier revision of this file concluded from that "there is no placement that works" and
+called the file unsplittable under the current design. That was wrong, and it was wrong in a
+way worth keeping visible.** The reasoning was sound in isolation and was never tested: one
+cold build failed, and the conclusion was written from it. Building the same target twice
+disproves it in about a minute --
 
-Every Geometry test includes Boost.Test in header-only mode, so this currently costs the whole
-of that suite. It compiles and links correctly throughout -- it simply is not split.
+| run | fallbacks | units split |
+|---|---:|---:|
+| cold | **1** (`area.cpp` itself) | 50 |
+| warm, after `touch area.cpp` | **0** | 51 |
+
+-- the same unit that "cannot be split" splits on the second run. What that exposed is not one
+structural limit but two ordinary defects, now filed as **TODO 25**: a definition that needs a
+macro the file undefines is moved into the definitions header anyway, and a header split on a
+previous run contributes none of its pieces to the object. The second is why the warm build
+"succeeds": it silently drops them.
+
+The general shape is still worth recording, because it is what made the wrong conclusion
+plausible: **a strong out-of-line definition that depends on transient macro state, in a
+header that every piece includes**. It has a placement -- see TODO 25 -- it just was not the
+one being looked for.
 
 ### Geometry is not in the default library set
 

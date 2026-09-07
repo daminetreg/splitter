@@ -87,6 +87,7 @@ struct FunctionInfo {
     bool is_specialization = false;   // explicit specialization: `template< > void f<T>()`
     bool is_virtual = false;          // virtual member function
     bool is_ctor_or_dtor = false;     // constructor or destructor
+    bool is_conversion = false;       // `operator T()`: no return type to rebuild it from
     // Whether a definition may legally appear in many translation units. Everything the
     // preamble carries is included by every piece, so only a vague-linkage definition can
     // be left in it; anything else has to appear exactly once.
@@ -186,6 +187,14 @@ static std::string sanitize_filename(const std::string& name) {
         else
             result += c;
     }
+
+    // A function's name is not bounded. A conversion operator carries its whole target type --
+    // `operator typename base_type::value_type()` sanitises to well over three hundred
+    // characters, and Boost.Atomic has worse -- which overruns NAME_MAX and makes every later
+    // filesystem call on that path throw. The piece's filename already carries a counter that
+    // makes it unique, so the readable part can be cut without ambiguity.
+    static const size_t max_component = 96;
+    if (result.size() > max_component) result.resize(max_component);
     return result;
 }
 
@@ -516,6 +525,20 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     CXCursorKind kind = clang_getCursorKind(cursor);
 
     bool is_function_def = false;
+    // CXCursor_ConversionFunction is deliberately absent, and its absence is a known hole
+    // rather than an oversight: an unharvested definition is never moved out of the preamble,
+    // so `context_frame::operator bool()` in Boost.Test's test_tools.ipp -- an out-of-line
+    // member with external linkage -- is copied into every piece and `ld -r` rejects the
+    // copies. collect_emitted() has always counted conversion functions; only the harvest
+    // does not.
+    //
+    // Adding it here fixes that link failure and produces a program that compiles, links, and
+    // then fails at run time: Boost.Geometry's area test reports "no argument provided for
+    // parameter color_output" where the plain build passes. Keeping the definitions in the
+    // header rather than emitting pieces for them does not help, so it is the *relocation*
+    // into the definitions header that is wrong, not the piece. The cause is not understood,
+    // and a harvest that changes what a program does is worse than one with a hole in it.
+    // See TODO/25.
     if (kind == CXCursor_FunctionDecl || kind == CXCursor_CXXMethod ||
         kind == CXCursor_Constructor || kind == CXCursor_Destructor ||
         kind == CXCursor_FunctionTemplate) {
@@ -558,6 +581,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     info.name = cx_to_string(clang_getCursorSpelling(cursor));
     info.is_template = (kind == CXCursor_FunctionTemplate);
     info.is_ctor_or_dtor = (kind == CXCursor_Constructor || kind == CXCursor_Destructor);
+    info.is_conversion = (kind == CXCursor_ConversionFunction);
     info.is_inlined = clang_Cursor_isFunctionInlined(cursor) != 0;
     info.external_linkage = (clang_getCursorLinkage(cursor) == CXLinkage_External);
     info.is_static = (clang_getCursorLinkage(cursor) == CXLinkage_Internal);
@@ -753,6 +777,7 @@ static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_static)           return "internal linkage in a header";
     if (fn.name == "main" && fn.scope_chain.empty()) return "the program's entry point";
     if (fn.is_ctor_or_dtor)     return "constructor or destructor in a header";
+    if (fn.is_conversion)       return "conversion operator: no return type to rebuild it from";
     if (!fn.always_inline_ranges.empty()) return "always-inline";
     return "not emitted by this translation unit, or not movable out of the header";
 }
@@ -1778,6 +1803,16 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
             continue;
         }
 
+        // Harmless today, because the visitor does not harvest conversion operators at all
+        // (see there). It is here so that turning that on cannot also start emitting pieces
+        // for them: `operator T()` names its type where a return type would go, so the
+        // out-of-line form rebuilt from `return_type + qualified_name` comes out as
+        // `bool C::operator bool()`.
+        if (fn.is_conversion) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
         if (fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
             fn.in_specialization_without_name ||
             fn.is_specialization || fn.is_virtual || fn.in_unnamed_ns ||
@@ -2238,7 +2273,15 @@ static std::string generate_preamble(const std::string& source,
                                          : std::vector<std::pair<unsigned, unsigned>>()),
                 renames);
 
+            // A definition that needs a macro the file retracts cannot go to the
+            // definitions header: that file includes the preamble first, and the `#undef`
+            // has run by then. undefined_macros() already keeps such a definition out of a
+            // *piece* for the same reason (TODO/16); the rule simply never reached this
+            // second placement decision. It stays here instead, emitted `inline` so that the
+            // copy every piece gets merges rather than colliding -- which is the same
+            // treatment a definition split out of a header already receives.
             if (definitions && r.fn && !has_vague_linkage(*r.fn) &&
+                !r.fn->uses_undefined_macro &&
                 (r.fn->macro_invocation || extent_is_a_definition(*r.fn, text))) {
                 // Kept, but it may exist in only one object. Out of the shared preamble it
                 // goes; a member is already declared by its class, and a free function gets
@@ -2251,6 +2294,14 @@ static std::string generate_preamble(const std::string& source,
                     if (!decl.empty()) preamble += decl + "\n";
                 }
             } else {
+                if (r.fn && r.fn->uses_undefined_macro && !has_vague_linkage(*r.fn)) {
+                    const std::string blanked = blank_code_noise(text);
+                    const size_t at = inline_insertion_point(blanked);
+                    if (at != std::string::npos &&
+                        !contains_decl_token(blanked.substr(0, decl_prefix_end(blanked)),
+                                             "inline"))
+                        text.insert(at, at == 0 ? "inline " : " inline");
+                }
                 preamble += text;
             }
         } else if (r.var) {
@@ -2955,6 +3006,9 @@ static void emit_split_files(CXTranslationUnit tu,
 
 // Headers this translation unit should split. Decided before the AST walk so that the walk
 // records only functions that will actually be used.
+static void register_header_manifest(const fs::path& manifest_path,
+                                     const std::string& include_root);
+
 static std::vector<std::string> header_split_candidates(
         CXTranslationUnit tu,
         const std::string& main_file,
@@ -3002,7 +3056,20 @@ static std::vector<std::string> header_split_candidates(
             if (ec) continue;
             stale = (hdr_time > man_time);
         }
-        if (fs::exists(manifest) && !stale) continue;
+        if (fs::exists(manifest) && !stale) {
+            // Already split by an earlier run of this same object. There is nothing to
+            // re-split, but its pieces still have to be compiled into *this* object, and
+            // resolve_header_deps() finds them only through g_split_headers. Skipping
+            // without registering dropped every definition the header contributed, silently:
+            // the unit reported success and those symbols were in no object at all.
+            //
+            // This has to happen here rather than by pre-loading every manifest up front,
+            // because the g_split_headers test above runs before the staleness test -- a
+            // pre-loaded stale header would be skipped rather than re-split, and header edits
+            // would stop being detected.
+            register_header_manifest(manifest, include_root);
+            continue;
+        }
 
         // A file with no include guard read more than once is one half of a pair, and
         // rewriting half a pair is never correct. Read exactly once it is an implementation
@@ -3224,38 +3291,44 @@ static void write_header_manifest(const std::string& output_dir,
     for (const auto& f : compilable_files) ofs << f << "\n";
 }
 
+// One manifest: the header it was generated from, then the pieces it produced.
+static void register_header_manifest(const fs::path& manifest_path,
+                                     const std::string& include_root) {
+    const std::string fname = manifest_path.filename().string();
+    if (fname.size() < 6 || fname.substr(fname.size() - 6) != ".split") return;
+
+    std::ifstream ifs(manifest_path);
+    if (!ifs.is_open()) return;
+
+    std::string abs_path;
+    std::getline(ifs, abs_path);
+    std::string n;
+    std::getline(ifs, n);
+    int nfiles = 0;
+    try { nfiles = std::stoi(n); } catch (...) {}
+
+    SplitHeaderInfo info;
+    info.split_dir = include_root;
+    info.preamble_path =
+        (manifest_path.parent_path() / fname.substr(0, fname.size() - 6)).string();
+    for (int i = 0; i < nfiles; ++i) {
+        std::string f;
+        std::getline(ifs, f);
+        if (!f.empty()) info.compilable_files.push_back(f);
+    }
+
+    // An empty list is how a header that was examined and deliberately not split is recorded.
+    if (!abs_path.empty() && !info.compilable_files.empty())
+        g_split_headers[abs_path] = std::move(info);
+}
+
 static void load_header_manifests(const std::string& output_dir) {
     if (!fs::exists(output_dir)) return;
     const std::string include_root = split_include_root(output_dir);
     // Manifests are nested under the mirrored include tree, so this has to recurse.
     for (const auto& entry : fs::recursive_directory_iterator(output_dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string fname = entry.path().filename().string();
-        if (fname.size() < 6 || fname.substr(fname.size() - 6) != ".split") continue;
-
-        std::ifstream ifs(entry.path());
-        if (!ifs.is_open()) continue;
-
-        std::string abs_path;
-        std::getline(ifs, abs_path);
-        std::string n;
-        std::getline(ifs, n);
-        int nfiles = 0;
-        try { nfiles = std::stoi(n); } catch (...) {}
-
-        SplitHeaderInfo info;
-        info.split_dir = include_root;
-        info.preamble_path =
-            (entry.path().parent_path() / fname.substr(0, fname.size() - 6)).string();
-        for (int i = 0; i < nfiles; ++i) {
-            std::string f;
-            std::getline(ifs, f);
-            if (!f.empty()) info.compilable_files.push_back(f);
-        }
-
-        if (!abs_path.empty() && !info.compilable_files.empty()) {
-            g_split_headers[abs_path] = std::move(info);
-        }
+        if (entry.is_regular_file())
+            register_header_manifest(entry.path(), include_root);
     }
 }
 
