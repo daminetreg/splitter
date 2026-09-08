@@ -567,23 +567,20 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     CXCursorKind kind = clang_getCursorKind(cursor);
 
     bool is_function_def = false;
-    // ON, on this branch. See example/conversion-operator/ and TODO/25 defect 3.
+    // CXCursor_ConversionFunction is harvested, and it carries a known defect: see TODO/25
+    // defect 3 and example/conversion-operator/.
     //
-    // The paragraph below is what main says, kept so the two can be compared:
-    // CXCursor_ConversionFunction is deliberately absent, and its absence is a known hole
-    // rather than an oversight: an unharvested definition is never moved out of the preamble,
-    // so `context_frame::operator bool()` in Boost.Test's test_tools.ipp -- an out-of-line
-    // member with external linkage -- is copied into every piece and `ld -r` rejects the
-    // copies. collect_emitted() has always counted conversion functions; only the harvest
-    // does not.
+    // Leaving it out is a hole -- an unharvested definition is never moved out of the
+    // preamble, so `context_frame::operator bool()` in Boost.Test's test_tools.ipp, an
+    // out-of-line member with external linkage, is copied into every piece and `ld -r`
+    // rejects the copies. Boost.Geometry's whole test suite fell back on that alone.
     //
-    // Adding it here fixes that link failure and produces a program that compiles, links, and
+    // Harvesting it clears the link failure and produces a program that compiles, links, and
     // then fails at run time: Boost.Geometry's area test reports "no argument provided for
     // parameter color_output" where the plain build passes. Keeping the definitions in the
     // header rather than emitting pieces for them does not help, so it is the *relocation*
-    // into the definitions header that is wrong, not the piece. The cause is not understood,
-    // and a harvest that changes what a program does is worse than one with a hole in it.
-    // See TODO/25.
+    // into the definitions header that is wrong, not the piece. The cause is not understood.
+    // is_conversion forces keep_in_header so that no piece is ever emitted for one.
     if (kind == CXCursor_FunctionDecl || kind == CXCursor_CXXMethod ||
         kind == CXCursor_Constructor || kind == CXCursor_Destructor ||
         kind == CXCursor_ConversionFunction || kind == CXCursor_FunctionTemplate) {

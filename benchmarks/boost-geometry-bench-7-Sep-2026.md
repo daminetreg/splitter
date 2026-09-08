@@ -1,6 +1,9 @@
 # Boost.Geometry: split build vs plain build — 7 September 2026
 
-Measured at `a54b555`.
+**Re-measured 8 September at `6850486`**, after the conversion-operator harvest was merged and
+after `TODO/26` and `TODO/27` landed. The tables below are the new run; the previous one is
+kept beside them, because what changed between them is the interesting part. Originally
+measured at `a54b555`.
 
 Two measurements, because "compiling Boost.Geometry" means two different things and they give
 opposite answers. The first is a **consumer** of the library: code someone writes against it.
@@ -42,30 +45,38 @@ CMake 3.31.9, ninja 1.12.1; Debug; `ld` for the relocatable link.
 
 ## Consuming Boost.Geometry
 
-| scenario | plain | split | ratio |
-|---|---:|---:|---:|
-| full | 4.4s | 57.7s | 13.2x slower |
-| no-op | 0.2s | 0.2s | parity |
-| one source | 4.2s | 0.7s | **6.0x faster** |
-| one header | 4.5s | 0.7s | **6.4x faster** |
-| one body | 4.5s | 8.7s | 1.9x slower |
+| scenario | plain | split | ratio | 7 Sep |
+|---|---:|---:|---:|---:|
+| full | 5.0s | 59.0s | 11.8x slower | 13.2x |
+| no-op | 0.2s | 0.2s | parity | parity |
+| one source | 4.2s | 0.7s | **6.0x faster** | 6.0x |
+| one header | 4.7s | 0.7s | **6.7x faster** | 6.4x |
+| one body | 4.5s | 9.1s | 2.0x slower | 1.9x |
 
 No fallbacks, and the split binary prints exactly what the plain one prints.
 
-| artefact | plain | split |
-|---|---|---|
-| `geometry_bench` | 7.8M | 11M |
-| build tree | 21M | 1.2G |
-| generated pieces | — | 54622 |
+| artefact | plain | split | 7 Sep |
+|---|---|---|---|
+| `geometry_bench` | 7.8M | 15M | 11M |
+| build tree | 21M | 989M | 1.2G |
+| generated pieces | — | **245** | 54622 |
+
+The timings barely moved. The piece count fell by **99.6%** -- 54622 to 245 -- which is
+`TODO/27`: a piece used to be written for every definition including the ones that can never
+be compiled, and on this project 99.6% of them were templates and their members. Every piece
+written now is one that is compiled.
 
 ### The trend across three kinds of code
 
 | scenario | filesystem | spirit | geometry |
 |---|---:|---:|---:|
-| full | 10.2x slower | 11.6x slower | 13.2x slower |
+| full | 10.2x slower | 11.6x slower | 11.8x slower |
 | one source | 2.1x faster | 4.5x faster | **6.0x faster** |
-| one header | 2.4x faster | 5.1x faster | **6.4x faster** |
-| one body | 2.8x slower | 2.2x slower | **1.9x slower** |
+| one header | 2.4x faster | 5.1x faster | **6.7x faster** |
+| one body | 2.8x slower | 2.2x slower | **2.0x slower** |
+
+The filesystem and Spirit columns are their own benchmarks' numbers and have not been
+re-measured since; only the Geometry column is from today.
 
 Every column moves the same way, and that is the argument for this approach stated as a
 measurement rather than a hope. The two winning rows are the ones where nothing is parsed at
@@ -84,44 +95,71 @@ that re-parse is a smaller fraction of what the plain rebuild costs.
 
 Six targets, `-j8`:
 
-| scenario | plain | split | ratio | fallbacks |
-|---|---:|---:|---:|---:|
-| full | 14.6s | 268.5s | 18.3x slower | **6** |
-| no-op | 0.2s | 0.2s | parity | 0 |
-| one source | 7.4s | 3.7s | **2.0x faster** | 0 |
-| one header | 13.7s | 9.0s | **1.5x faster** | 0 |
-| one body | 13.5s | 8.9s | **1.5x faster** | 0 |
+| scenario | plain | split | ratio | fallbacks | 7 Sep |
+|---|---:|---:|---:|---:|---:|
+| full | 15.4s | 266.4s | 17.3x slower | **0** | 18.3x, 6 fallbacks |
+| no-op | 0.2s | 0.2s | parity | 0 | parity |
+| one source | 7.5s | 2.2s | **3.4x faster** | 0 | 2.0x |
+| one header | 13.9s | 4.7s | **3.0x faster** | 0 | 1.5x |
+| one body | 13.8s | 13.1s | 1.1x faster | 0 | 1.5x |
 
-| artefact | plain | split |
-|---|---|---|
-| build tree | 235M | 3.7G |
-| generated pieces | — | 75168 |
+| artefact | plain | split | 7 Sep |
+|---|---|---|---|
+| build tree | 235M | 4.6G | 3.7G |
+| generated pieces | — | **2338** | 75168 |
 
-### They fall back cold and split warm
+Two things moved: the fallbacks are gone, and the two touch-driven rows got roughly twice as
+fast because there are 2338 pieces to consider instead of 75168.
 
-The fallback column is the interesting part. On the **cold** build all six units fall back:
-every Geometry test includes Boost.Test in header-only mode, and `progress_monitor.ipp`
-defines a macro, uses it in four out-of-line member functions with external linkage, and
-undefines it sixty lines later. Those definitions can go neither to the definitions header —
-the macro is gone by the time that is compiled — nor stay duplicated in the preamble, where
-`ld -r` rejects the copies. There is no placement that works, and falling back is the right
-answer (`TODO/24`).
+### They used to fall back cold. They no longer do.
 
-On every **incremental** build afterwards they split: `4 attempted, 4 split, 0 fallbacks`.
-The headers those units share have been rewritten and cached by then, and the unit no longer
-has to re-derive the parts that defeated it cold.
+On 7 September all six units fell back on the cold build, and split only on the second: every
+Geometry test includes Boost.Test in header-only mode, and an out-of-line `operator bool()`
+there was copied into every piece because conversion operators were not harvested at all. That
+was the last thing standing between these units and a cold split, and merging the harvest
+removed it. The fallback column is zero on every row now, cold included.
 
-So the 18.3x on the full row is the price of *trying and failing* — the split runs, produces
-75168 pieces, fails to link them, and compiles the six units normally on top of that. It is
-the honest cost of the fallback path, which is worth having a number for rather than
-describing as "falls back safely".
+The `18.3x` on that row was therefore the price of *trying and failing*. The `17.3x` today is
+the price of actually doing it, which is a different number that happens to look similar: the
+split runs, produces 2338 pieces, links them, and there is no plain compile underneath.
 
-And the three incremental rows are genuine splits that beat the plain build, on the library's
-own tests, despite the cold build not being able to split them at all.
+**This does not mean the tests work.** The benchmark builds them; it does not run them. They
+still fail at run time:
 
-## What the benchmark found
+```
+$ boost_geometry_algorithms_area          # plain
+$ echo $?  ->  0
+$ boost_geometry_algorithms_area          # split
+Test setup error: There is no argument provided for parameter color_output
+$ echo $?  ->  200
+```
 
-Both of these were found by writing the benchmark, not by the correctness harness.
+That is `TODO/25` defect 3, open and not understood. A row reading "0 fallbacks" says the
+splitter produced an object without giving up; it says nothing about whether the object is
+right. Reading it as the latter is exactly the mistake this benchmark's first run made in the
+other direction, when a fallback was timed as if it were a split.
+
+## What the benchmarks found
+
+Four defects so far, none of them by the correctness harness.
+
+### Written on 8 September, from the piece counts above
+
+`TODO/27` began with a question about one of these files: why is there a `.cpp` for a function
+template, when a template cannot be instantiated ahead of time? It could not be, and it never
+was -- the piece carried a note saying it would not be compiled, and nothing compiled it. It
+was written anyway. On one test translation unit that was 11515 pieces written against 273
+compiled, 12 MB of `.cpp` that nothing reads, 8667 of them templates and their members. The
+reason a definition was kept is now recorded once per unit in a `.keeps` file instead of at the
+top of eleven thousand files nobody opens.
+
+Fixing that immediately exposed a defect in `TODO/26`, which had shipped an hour earlier: a
+`static` variable was being renamed and moved without asking whether it was `const`.
+Boost.Filesystem writes `BOOST_CONSTEXPR_OR_CONST`, so the text says nothing, and a compile-time
+constant was moved out from under its users. The const-ness is asked of the type now, which is
+what the code already did for constexpr *functions* and for the same written-down reason.
+
+### Written on 7 September
 
 ### An explicit specialization losing the `inline` its macro carried
 

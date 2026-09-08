@@ -180,21 +180,22 @@ succeeded: it linked an object missing every definition those pieces carried, an
 with it only because that program referenced none of them. A program that did would have
 failed to link, and the report would have pointed at Boost.Test rather than at the splitter.
 
-### Defect 3 — conversion operators are not harvested, and fixing that breaks the program
+### Defect 3 — conversion operators are harvested now, and the program still misbehaves
 
-With defect 1 cleared, the cold build's next failure is:
+With defect 1 cleared, the cold build's next failure was:
 
 ```
 multiple definition of `boost::test_tools::tt_detail::context_frame::operator bool()'
 ```
 
-`visitor()` harvests `FunctionDecl`, `CXXMethod`, `Constructor`, `Destructor` and
+`visitor()` harvested `FunctionDecl`, `CXXMethod`, `Constructor`, `Destructor` and
 `FunctionTemplate` -- but not `ConversionFunction`, although `collect_emitted()` has always
-counted them. An unharvested definition is never moved out of the preamble, so this one is
-copied into every piece and `ld -r` rejects the copies.
+counted them. An unharvested definition is never moved out of the preamble, so this one was
+copied into every piece and `ld -r` rejected the copies.
 
-Adding `CXCursor_ConversionFunction` to that list does fix the link, and the cold build then
-splits with no fallbacks at all. The program it produces then **fails at run time**:
+`CXCursor_ConversionFunction` is in that list now, on `main`, and the cold build splits with no
+fallbacks at all -- the whole Boost.Geometry test suite included. The program it produces
+**fails at run time**:
 
 ```
 $ boost_geometry_algorithms_area          # plain
@@ -216,22 +217,21 @@ context_frame::operator bool()
 }
 ```
 
-The cause is not understood. A harvest that changes what a program does is worse than one with
-a known hole in it, so the harvest is left as it was, with the hole and this explanation
-written where the list is. `is_conversion` exists on `FunctionInfo` and forces
-`keep_in_header`, so that turning the harvest on later cannot also start emitting pieces --
-`operator T()` names its type where a return type would go, and the out-of-line form rebuilt
-from `return_type + qualified_name` comes out as `bool C::operator bool()`.
+The cause is still not understood. `example/conversion-operator/` is the Boost-free repro to
+iterate on. `is_conversion` on `FunctionInfo` forces `keep_in_header`, so the harvest cannot
+also start emitting pieces -- `operator T()` names its type where a return type would go, and
+the out-of-line form rebuilt from `return_type + qualified_name` comes out as
+`bool C::operator bool()`.
 
-A fourth thing fell out of trying: sanitize_filename() produced a 419-character component from
-`operator typename base_type::value_type()`, past NAME_MAX, after which every filesystem call
+A fourth thing fell out of trying: `sanitize_filename()` produced a 419-character component from
+`operator typename base_type::value_type()`, past `NAME_MAX`, after which every filesystem call
 on that path threw an uncaught `filesystem_error` and the splitter aborted instead of falling
-back. The component is capped now, which is worth having whether or not the harvest is ever
-turned on.
+back. The component is capped now.
 
 ### Where Boost.Geometry stands
 
-Its tests still fall back, on defect 3 alone. What changed is that they now fall back
-*honestly*, cold and warm alike, instead of the warm build reporting success while dropping
-definitions. Two of the three causes are gone and the third is characterised down to a
-one-line change whose consequence is measured rather than assumed.
+Its tests no longer fall back at all -- cold or warm, all six benchmarked targets split, which
+is what `benchmarks/boost-geometry-bench-7-Sep-2026.md` measures on 8 September. What remains
+is defect 3's run-time symptom: the objects are produced without giving up, and the program
+they make still exits 200 where the plain one exits 0. Building is not passing, and this file
+is the only place that says so.
