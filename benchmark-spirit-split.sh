@@ -101,6 +101,10 @@ for run in $(seq 1 "$RUNS"); do
 
     # Settle both first: a build that always has something to do would make every
     # incremental number below meaningless.
+    # Twice, because one is not always enough: a generator that re-checks something of its
+    # own on the first build after an edit turns a "no-op" measured straight afterwards into
+    # that second pass, and the row would blame the splitter for it.
+    build "$PLAIN" >/dev/null; build "$SPLIT" >/dev/null
     build "$PLAIN" >/dev/null; build "$SPLIT" >/dev/null
     report "no-op"      "$(build "$PLAIN")"  "$(build "$SPLIT")"
 

@@ -123,6 +123,11 @@ for run in $(seq 1 "$RUNS"); do
 
     report "full"       "$(build "$PLAIN")"  "$(build "$SPLIT")"
 
+    # Twice each. One is not always enough: this project discovers its tests with a CMake
+    # GLOB, so the first build after any edit re-runs the glob check and relinks, and a
+    # "no-op" measured straight afterwards is really that second pass. The splitter does not
+    # run in either -- it settles in one -- but the row would blame it.
+    build "$PLAIN" >/dev/null; build "$SPLIT" >/dev/null
     build "$PLAIN" >/dev/null; build "$SPLIT" >/dev/null
     report "no-op"      "$(build "$PLAIN")"  "$(build "$SPLIT")"
 
