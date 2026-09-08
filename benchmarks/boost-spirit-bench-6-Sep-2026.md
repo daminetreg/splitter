@@ -102,7 +102,7 @@ failure and is reported as neither:
 One unit crossed from the middle column to the right one rather than to the left: it no longer
 fails, and it has no functions of its own to split either.
 
-## Cost: the five scenarios on Spirit
+## Cost: the five scenarios on a Spirit consumer
 
 | scenario | plain | split | ratio | 6 Sep |
 |---|---:|---:|---:|---:|
@@ -241,11 +241,86 @@ denser. It is a real cost of the approach and nothing here addresses it.
 clearest evidence available that the tree is debug information in the pieces that are
 *compiled* rather than the count of pieces written.
 
+## Compiling Boost.Spirit's own test suite
+
+Added 8 September, because "compiling Boost.Spirit" means two things and on Boost.Geometry they
+gave opposite answers: a consumer's body-edit row loses while the test suite's wins.
+
+Spirit ships no CMakeLists for its tests -- it is header-only and its tests are driven by a
+Boost.Build Jamfile -- so the superproject's `BUILD_TESTING` produces no Spirit targets at all.
+`example/spirit-tests/` builds six of the real sources from `libs/spirit/test` as the programs
+the Jamfile would build; only the driver differs. Six across the four sub-suites, out of 276,
+because the whole suite would take hours.
+
+`./benchmark-spirit-tests.sh`, `-j8`:
+
+| scenario | plain | split | ratio | fallbacks |
+|---|---:|---:|---:|---:|
+| full | 3.7s | 23.1s | 6.2x slower | **1** |
+| no-op | 0.2s | 0.2s | parity | 0 |
+| one source | 2.4s | 0.4s | **6.0x faster** | 0 |
+| one header | 3.7s | 9.5s | **2.55x slower** | **1** |
+| one body | 3.7s | 9.6s | 2.59x slower | **1** |
+
+| artefact | plain | split |
+|---|---|---|
+| build tree | 41M | 991M |
+| generated pieces | — | 109 |
+
+The body edit re-slices in 4 of the units (`TODO/28`) rather than re-parsing them.
+
+### One unit that falls back is the whole story
+
+`one header` is a **timestamp-only** touch: the content does not change, so the split cache
+should recognise every unit and do nothing. On Geometry's test suite that row is 3.0x faster.
+Here it is 2.55x slower, and the reason is the fallback column.
+
+Timed separately, on that same touch:
+
+| | wall |
+|---|---:|
+| the five units that split | **0.5s** |
+| the one that falls back | **9.5s** |
+| the same one, compiled plain | 2.8s |
+
+**One unit in six is 95% of the row.** A fallback returns before `write_split_cache()`, so
+there is no cache to hit: every build repeats the whole split -- parse the unit, split every
+header candidate, fail -- and then compiles plain on top. It does not get cheaper on the second
+build, or the hundredth.
+
+Without it the row would read about 7x faster, in line with the consumer's 5.3x and Geometry's
+3.0x. The other benchmarks carry a warning that a fallback makes a row "a plain build with the
+splitter's overhead in front of it"; this is that warning as a measurement, and it is worse
+than the phrasing suggests, because the overhead is a full split rather than a failed start.
+
+### What it fell back on
+
+`boost/spirit/home/support/detail/lexer/generator.hpp` includes its siblings by quoted relative
+path -- `#include "char_traits.hpp"`. The splitter writes a rewritten copy into its mirror, so
+that name now resolves against the mirror directory, which holds only headers that were
+themselves split. `char_traits.hpp` was skipped, so only its manifest is there:
+
+```
+fatal error: 'char_traits.hpp' file not found
+```
+
+Filed as `TODO/31`, with the measurement above as its motivation. Angle-bracket includes are
+unaffected, which is why the shape is rare: it needs a header that is split, that uses quoted
+relative includes, and whose siblings are not all split too.
+
+### The rows that are not poisoned
+
+`one source` is 6.0x faster -- the best of any benchmark here -- because the edited unit is
+`qi/char1.cpp`, which splits, and the other five are untouched. `full` at 6.2x slower is the
+mildest full-build penalty measured anywhere, and that is not a good sign on its own: it is low
+partly because one of the six units is not being split at all.
+
 ## Reproduction
 
 ```sh
 ./test-boost-libraries.sh 'filesystem;spirit;system;core'
-./benchmark-spirit-split.sh
+./benchmark-spirit-split.sh         # a consumer of the library
+./benchmark-spirit-tests.sh         # the library's own test programs
 ./benchmark-boost-split.sh          # the filesystem comparison
 ```
 
