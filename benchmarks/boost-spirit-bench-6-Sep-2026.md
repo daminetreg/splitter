@@ -248,72 +248,80 @@ gave opposite answers: a consumer's body-edit row loses while the test suite's w
 
 Spirit ships no CMakeLists for its tests -- it is header-only and its tests are driven by a
 Boost.Build Jamfile -- so the superproject's `BUILD_TESTING` produces no Spirit targets at all.
-`example/spirit-tests/` builds six of the real sources from `libs/spirit/test` as the programs
-the Jamfile would build; only the driver differs. Six across the four sub-suites, out of 276,
-because the whole suite would take hours.
+`example/spirit-tests/` builds **all 277** of the `run` and `compile` targets those Jamfiles
+declare, read out of the Jamfiles rather than listed by hand so the port cannot drift from the
+suite it claims to be. The four `compile-fail` sources are the only omission, and they are
+supposed to fail. Every one of the 277 builds without the splitter, so nothing is excluded.
 
 `./benchmark-spirit-tests.sh`, `-j8`:
 
 | scenario | plain | split | ratio | fallbacks |
 |---|---:|---:|---:|---:|
-| full | 3.7s | 23.1s | 6.2x slower | **1** |
-| no-op | 0.2s | 0.2s | parity | 0 |
-| one source | 2.4s | 0.4s | **6.0x faster** | 0 |
-| one header | 3.7s | 9.5s | **2.55x slower** | **1** |
-| one body | 3.7s | 9.6s | 2.59x slower | **1** |
+| full | 71.8s | 774.4s | 10.8x slower | **4** |
+| no-op | 0.2s | 0.6s | **3.2x slower** | 0 |
+| one source | 2.4s | 0.8s | **3.0x faster** | 0 |
+| one header | 70.2s | 15.4s | **4.6x faster** | 3 |
+| one body | 71.9s | 58.2s | **1.2x faster** | 2 |
 
 | artefact | plain | split |
 |---|---|---|
-| build tree | 41M | 991M |
-| generated pieces | — | 109 |
+| build tree | 1.3G | **46G** |
+| generated pieces | — | 4891 |
 
-The body edit re-slices in 4 of the units (`TODO/28`) rather than re-parsing them.
+209 units re-slice the edited body from their recorded harvest instead of re-parsing
+(`TODO/28`). The fallback count differs by row because it is counted per build and each row
+rebuilds a different subset: `one source` touches one unit, and that unit is not one of the two
+that fail.
 
-### One unit that falls back is the whole story
+### Every row is a real answer now
 
-`one header` is a **timestamp-only** touch: the content does not change, so the split cache
-should recognise every unit and do nothing. On Geometry's test suite that row is 3.0x faster.
-Here it is 2.55x slower, and the reason is the fallback column.
+With six targets this benchmark said `one header` was 2.55x *slower*, because a single unit
+fell back and a fallback re-does the whole split on every build. `TODO/31` fixed that unit, and
+at full size the picture is the one the design predicts: the touch-driven rows win by 3-4.6x,
+the body edit wins narrowly, and the cold build costs 10.8x.
 
-Timed separately, on that same touch:
+`one body` at 1.2x faster is the weakest win here and the reason is scale rather than the
+splitter: the edited header reaches nearly every one of the 277 units, so 209 of them re-slice
+and relink. Each one is cheap; there are simply a great many.
 
-| | wall |
-|---|---:|
-| the five units that split | **0.5s** |
-| the one that falls back | **9.5s** |
-| the same one, compiled plain | 2.8s |
+### The no-op row is 3.2x slower, and that is new
 
-**One unit in six is 95% of the row.** A fallback returns before `write_split_cache()`, so
-there is no cache to hit: every build repeats the whole split -- parse the unit, split every
-header candidate, fail -- and then compiles plain on top. It does not get cheaper on the second
-build, or the hundredth.
+0.2s against 0.6s. It was parity at six targets, and it is parity on every other benchmark in
+this directory. Nothing is rebuilt in either tree -- what the split side spends is the launcher
+starting once per unit and hashing every prerequisite that unit records, 277 times over. Around
+2ms each.
 
-Without it the row would read about 7x faster, in line with the consumer's 5.3x and Geometry's
-3.0x. The other benchmarks carry a warning that a fallback makes a row "a plain build with the
-splitter's overhead in front of it"; this is that warning as a measurement, and it is worse
-than the phrasing suggests, because the overhead is a full split rather than a failed start.
+That is not alarming at this size but it is a real per-unit floor, and this is the first corpus
+large enough to show it. A tree of a few thousand units would pay several seconds to discover
+it has nothing to do.
 
-### What it fell back on
+### 46G of build tree
 
-`boost/spirit/home/support/detail/lexer/generator.hpp` includes its siblings by quoted relative
-path -- `#include "char_traits.hpp"`. The splitter writes a rewritten copy into its mirror, so
-that name now resolves against the mirror directory, which holds only headers that were
-themselves split. `char_traits.hpp` was skipped, so only its manifest is there:
+Against 1.3G plain, for 4891 pieces. The ratio is worse than Geometry's (4.6G against 235M) on
+the same axis: every piece carries the debug information of the preamble it includes, and on
+Spirit that preamble is most of Boost. `TODO/27` already stopped writing pieces that are never
+compiled; what is left is the ones that are. Nothing here addresses it.
 
-```
-fatal error: 'char_traits.hpp' file not found
-```
+### Two defects, both new, both from the tests the six-target version never built
 
-Filed as `TODO/31`, with the measurement above as its motivation. Angle-bracket includes are
-unaffected, which is why the shape is rare: it needs a header that is split, that uses quoted
-relative includes, and whose siblings are not all split too.
+The suite falls back on two units and each named a distinct defect:
 
-### The rows that are not poisoned
+**`qi/uint_radix`** -- `ld: multiple definition of 'unsigned_overflow_base35'`.
+`uint_radix.hpp` defines `char const* unsigned_overflow_base35 = "2BR45QB";` at namespace scope
+in a header. The pointee is const; the pointer is not, so it is a definition with external
+linkage. `TODO/17` and `TODO/26` move namespace-scope variables out of the preamble for exactly
+this reason, but both look only at the unit's own source -- a header's arrive through an
+ordinary `#include` and are compiled once per piece. Filed as `TODO/32`.
 
-`one source` is 6.0x faster -- the best of any benchmark here -- because the edited unit is
-`qi/char1.cpp`, which splits, and the other five are untouched. `full` at 6.2x slower is the
-mildest full-build penalty measured anywhere, and that is not a good sign on its own: it is low
-partly because one of the six units is not being split at all.
+**`lex/regression_wide`** -- `invalid application of 'sizeof' to an incomplete type
+'test_data []'`. The source writes `test_data data[] = { ... }` and later takes
+`sizeof(data)/sizeof(data[0])`. Moving the variable leaves `extern test_data data[]`, which is
+the right declaration for an array of unknown bound and the wrong one for `sizeof`. Filed as
+`TODO/33`, and it is the same shape as the `constexpr` trap `TODO/26` hit: a variable moved
+whose type cannot survive the move, where the text says nothing and the type says everything.
+
+Neither is reachable from six hand-picked tests. That is the argument for porting the whole
+Jamfile rather than a sample.
 
 ## Reproduction
 

@@ -12,7 +12,10 @@
 # Boost.Build Jamfile, so the superproject's BUILD_TESTING produces no Spirit targets at all --
 # which is why the four-library harness compiles a consumer for Spirit and calls it that.
 # example/spirit-tests/ builds the real sources from libs/spirit/test as the programs the
-# Jamfile would build; only the driver differs.
+# Jamfile would build; only the driver differs. All 277 of them -- the `run` and `compile`
+# targets its Jamfiles declare, read out of those Jamfiles rather than listed by hand so this
+# cannot drift from the suite it claims to be. The four `compile-fail` sources are the only
+# thing left out, and they are supposed to fail.
 #
 #   full         one object per function, each re-instantiating the grammar its function
 #                needs. This is the cost, and it is the worst number in the table.
@@ -38,14 +41,11 @@ SPLIT_LOG=/tmp/spirit-tests-split.log
 PROJECT="$REPO/example/spirit-tests"
 BOOST="$REPO/example/boost-to-split"
 
-TARGETS="spirit_test_qi_char1
-spirit_test_qi_alternative
-spirit_test_qi_optional
-spirit_test_x3_char1
-spirit_test_karma_char1
-spirit_test_lex_lexertl1"
+# Everything the project defines. Empty rather than a list: `ninja` with no target builds all,
+# and naming 277 targets on the command line adds nothing but a way to fall out of sync.
+TARGETS=""
 
-# One test source, and a Spirit header every one of the targets includes.
+# One test source, and a Spirit header nearly every target includes.
 SOURCE="$BOOST/libs/spirit/test/qi/char1.cpp"
 HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/char_encoding/standard.hpp"
 
@@ -58,10 +58,10 @@ HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/char_encoding/stand
 # Geometry benchmark made until 8 September.
 #
 # utf8_put_encode() is an ordinary non-template free function in Spirit's own header, and the
-# splitter emits and compiles a real piece for it in five of the six targets below. Of the
-# handful of Spirit headers contributing any compiled piece at all it is the one reaching the
-# most targets: char_encoding/standard.hpp's members are all kept as "not emitted by this
-# translation unit", and char_encoding/ascii.hpp's reach three.
+# splitter emits and compiles a real piece for it. Of the handful of Spirit headers
+# contributing any compiled piece at all it is the one reaching the most units:
+# char_encoding/standard.hpp's members are all kept as "not emitted by this translation unit",
+# and char_encoding/ascii.hpp's reach fewer.
 BODY_HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/utf8.hpp"
 BODY_BACKUP="$(mktemp)"
 
@@ -99,7 +99,8 @@ build() {  # build <dir> -> elapsed ms
     start=$(ms)
     # -j8, not -j32: a Spirit test unit is a very large template instantiation and the splitter
     # holds a libclang AST of the same unit alongside the compile. The Geometry suite exhausted
-    # 122 GiB at -j32 and the OOM killer's victims looked exactly like splitter defects.
+    # 122 GiB at -j32 and the OOM killer's victims looked exactly like splitter defects. With
+    # 277 units in flight that headroom matters more here than it did with six.
     ( cd "$dir" && CPP_SPLITTER_VERBOSE=1 tipi run ninja -j8 $TARGETS ) > "$log" 2>&1 \
         || { echo "BUILD FAILED in $dir" >&2; exit 1; }
     end=$(ms)
@@ -125,7 +126,7 @@ export CPP_SPLITTER_LINKER="$LINKER"
 
 echo "==> building cpp-splitter"
 echo "==> relocatable linker: $LINKER"
-echo "==> targets: $(echo "$TARGETS" | wc -w)"
+echo "==> targets: every test the Jamfiles declare"
 tipi run cmake --build "$REPO/build" -j32 >/dev/null
 
 printf '\n%-14s %10s %10s %10s %10s\n' scenario plain split ratio fallbacks
