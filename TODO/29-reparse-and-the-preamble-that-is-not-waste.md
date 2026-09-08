@@ -74,6 +74,50 @@ the documentation. So the editor workflow (keep a TU, reparse it after each edit
 process, and the live process is the server that `TODO/01` removed because its absence silently
 disabled splitting. Reintroducing that failure mode to buy an optimisation is the wrong trade.
 
+### 1b. Why it refuses, and why "fixing" it would not help
+
+Not a bug and not version-specific. The libclang documentation states the precondition
+outright:
+
+> The translation unit must originally have been built with
+> `clang_createTranslationUnitFromSourceFile()`.
+
+The mechanism is two lines of clang. `ASTUnit::Reparse()` opens with
+
+```cpp
+if (!Invocation) return true;      // true == failure
+```
+
+and `ASTUnit::LoadFromASTFile()` never assigns `Invocation` -- it constructs `new ASTUnit(true)`
+with `MainFileIsAST = true` and sets up an `ASTReader` to deserialize on demand. An AST-file
+backed unit therefore has no `CompilerInvocation` to re-run, and the refusal is by construction.
+
+It is tempting to call that an oversight we could patch around: we know the 85 flags, so we
+could synthesize an `Invocation`. **It would buy nothing.** `Reparse()` does not update an AST
+incrementally. After the early returns it does:
+
+```cpp
+clearFileLevelDecls();
+...
+if (Preamble || PreambleRebuildCountdown > 0)
+    OverrideMainBuffer = getMainBufferWithPrecompiledPreamble(PCHContainerOps, *Invocation, VFS);
+...
+bool Result = Parse(std::move(PCHContainerOps), std::move(OverrideMainBuffer), VFS);
+```
+
+It **throws the AST away and parses again**. All of its speed comes from
+`getMainBufferWithPrecompiledPreamble()` reusing a preamble that has not changed. So a patched
+reparse on a loaded TU would discard the AST we paid 0.61s to serialize, and then rebuild the
+preamble anyway -- because the edit is a header inside the include block. Strictly worse than
+parsing.
+
+Clang has no incremental AST update to reach for either: LLVM developers say so directly when
+asked, and the recommendation is to work with the completed AST rather than try to re-derive it.
+
+This closes the question rather than deferring it. The reason to stop is not "the API says no",
+it is that the mechanism the API would give us is a full re-parse whose only shortcut is a
+preamble our edit invalidates.
+
 ### 2. Reparse would not help this row anyway
 
 Reparse is cheap only because of the precompiled preamble: the leading `#include` block is
@@ -188,6 +232,12 @@ Not obviously safe: the depfile is written *after* the split, so a cold run has 
 records what the compiler read rather than what libclang saw. Either the first run keeps the
 preamble and later runs use the cache, or the candidate list comes from a preprocess-only pass.
 Both are guesses until measured.
+
+## Sources
+
+- [clang: Translation unit manipulation](https://clang.llvm.org/doxygen/group__CINDEX__TRANSLATION__UNIT.html) — the documented precondition on `clang_reparseTranslationUnit`.
+- [lib/Frontend/ASTUnit.cpp](https://clang.llvm.org/doxygen/ASTUnit_8cpp_source.html) — `Reparse()`'s `if (!Invocation) return true;`, its `clearFileLevelDecls()` + `Parse()`, and `LoadFromASTFile()` never setting `Invocation`.
+- [Modify (and reparse) AST — LLVM Discussion Forums](https://discourse.llvm.org/t/modify-and-reparse-ast/31051) — no incremental AST update in clang.
 
 ## Acceptance Criteria
 
