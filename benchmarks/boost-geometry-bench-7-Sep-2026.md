@@ -27,7 +27,7 @@ is timed.
 | no-op | should be free. Anything else is a bug, not a measurement. |
 | one source | touch one `.cpp`. |
 | one header | touch the shared header — timestamp only, content identical. |
-| one body | change the body of one inline function in that header. |
+| one body | change the body of one ordinary inline function in a header the splitter emits a piece for. |
 
 `./benchmark-geometry-split.sh` measures `example/geometry-bench/`: four Geometry translation
 units (area, distance, overlay, hull) and a driver behind one shared header. It deliberately
@@ -97,11 +97,11 @@ Six targets, `-j8`:
 
 | scenario | plain | split | ratio | fallbacks | 7 Sep |
 |---|---:|---:|---:|---:|---:|
-| full | 15.4s | 266.4s | 17.3x slower | **0** | 18.3x, 6 fallbacks |
+| full | 15.2s | 262.8s | 17.3x slower | **0** | 18.3x, 6 fallbacks |
 | no-op | 0.2s | 0.2s | parity | 0 | parity |
-| one source | 7.5s | 2.2s | **3.4x faster** | 0 | 2.0x |
+| one source | 7.2s | 2.2s | **3.3x faster** | 0 | 2.0x |
 | one header | 13.9s | 4.7s | **3.0x faster** | 0 | 1.5x |
-| one body | 13.8s | 13.1s | 1.1x faster | 0 | 1.5x |
+| one body | 13.5s | 15.4s | 1.14x slower | 0 | not comparable |
 
 | artefact | plain | split | 7 Sep |
 |---|---|---|---|
@@ -110,6 +110,45 @@ Six targets, `-j8`:
 
 Two things moved: the fallbacks are gone, and the two touch-driven rows got roughly twice as
 fast because there are 2338 pieces to consider instead of 75168.
+
+### The body row changed what it edits, and got worse
+
+Until 8 September this row edited `area<Polygon, polygon_tag>::apply` in
+`boost/geometry/algorithms/area.hpp`, and reported **1.1x faster**. That number was not worth
+having. `apply` is a member of a class template, so the splitter keeps it in the preamble and
+emits no piece for it (`TODO/27`). No edit to it can ever recompile "one piece", because there
+is no piece -- the row was timing the splitter's worst case and printing it as its design case.
+
+It now edits `side_info::collinear()` in `boost/geometry/strategies/side_info.hpp`: an ordinary
+inline member of an ordinary class, the shape splitting exists to serve. The row got *worse*,
+and the worse number is the true one.
+
+What the edit actually causes on the split side:
+
+```
+$ ninja -j8 <six targets>                      # after the edit
+plain:  5 CXX edges          # the 5 units that include side_info.hpp
+split:  5 CXX edges
+$ find ... -name '*.o' -newer <edit>           # piece objects rebuilt, split tree
+      5 side_info.hpp_6_collinear.o
+```
+
+**Five piece objects, all of them the edited function.** Piece-level incrementality is exact:
+nothing else in 2338 pieces was touched. And it is still 1.14x slower than recompiling the
+five translation units outright, because what the splitter pays for is not the compile -- it is
+re-parsing those five units to discover that only one piece changed. On this corpus the parse
+costs more than the compile it saves.
+
+That is the honest statement of where this design stands on a header edit, and it is only
+visible because the row stopped editing a template.
+
+Boost.Geometry makes this hard to measure at all: of the 245 header pieces compiled into every
+one of the six units, **not one comes from a Boost.Geometry header** -- they are Boost.Test,
+SmartPtr and Multiprecision. Geometry is header-only and almost entirely templates, so it
+offers the splitter very little to split. `side_info.hpp` is among the only Geometry headers
+contributing a compiled piece; `boost_geometry_util_range` does not include it and so does not
+rebuild on this row, equally on both sides.
+
 
 ### They used to fall back cold. They no longer do.
 

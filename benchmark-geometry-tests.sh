@@ -38,24 +38,39 @@ boost_geometry_algorithms_approximately_equals"
 # One test source, and a Geometry header every one of the targets includes.
 SOURCE="$BOOST/libs/geometry/test/algorithms/area/area.cpp"
 HEADER="$BOOST/libs/geometry/include/boost/geometry/algorithms/area.hpp"
-HEADER_BACKUP="$(mktemp)"
+
+# A *different* header for the body edit, and the reason is the whole point of that row.
+#
+# area.hpp holds nothing but templates. A member of a class template is kept in the preamble
+# and no piece is emitted for it (TODO/27), so editing its body could never recompile "one
+# piece": it could only re-split every unit that includes it. Timing that and calling it the
+# body-edit row measures the splitter's worst case and reports it as its design case.
+#
+# side_info is an ordinary class and collinear() an ordinary inline member, so the splitter
+# emits and compiles a real piece for it -- side_info.hpp_6_collinear.o exists in every unit
+# below that includes the header. That is the shape this row is supposed to be about.
+#
+# Boost.Geometry has very few of these: it is header-only and almost entirely templates, and
+# of the ~570 Geometry headers one of these units includes, side_info.hpp is among the only
+# ones contributing a compiled piece at all. boost_geometry_util_range does not include it
+# and so does not rebuild on this row -- equally, on both sides, so the ratio stands.
+BODY_HEADER="$BOOST/libs/geometry/include/boost/geometry/strategies/side_info.hpp"
+BODY_BACKUP="$(mktemp)"
 
 # The body edit rewrites a tracked source file, so restore it whatever happens.
-cp "$HEADER" "$HEADER_BACKUP"
-trap 'cp "$HEADER_BACKUP" "$HEADER"; rm -f "$HEADER_BACKUP"' EXIT
+cp "$BODY_HEADER" "$BODY_BACKUP"
+trap 'cp "$BODY_BACKUP" "$BODY_HEADER"; rm -f "$BODY_BACKUP"' EXIT
 
-# Change the body of the polygon area dispatcher without changing what it does. Each call
-# inserts a different marker, so successive edits are genuinely different text.
+# Change the body of side_info::collinear() without changing what it does. Each call inserts a
+# different marker, so successive edits are genuinely different text.
 patch_body() {
-    python3 - "$HEADER" "$1" <<'PROBE'
+    python3 - "$BODY_HEADER" "$1" <<'PROBE'
 import sys
 path, marker = sys.argv[1], sys.argv[2]
-# The polygon specialisation's apply(): the entry point every polygon area() call goes
-# through, so an edit to it is an edit every one of the targets depends on.
-signature = "        return calculate_polygon_sum::apply\n"
+signature = "    inline bool collinear() const\n    {\n"
 src = open(path).read()
 assert src.count(signature) == 1, "benchmark probe target moved"
-src = src.replace(signature, "        (void)%s;  // benchmark probe\n" % marker + signature, 1)
+src = src.replace(signature, signature + "        (void)%s;  // benchmark probe\n" % marker, 1)
 open(path, "w").write(src)
 PROBE
 }
@@ -139,12 +154,12 @@ for run in $(seq 1 "$RUNS"); do
     touch "$HEADER"; s=$(build "$SPLIT")
     report "one header" "$p" "$s"
 
-    cp "$HEADER_BACKUP" "$HEADER"; patch_body "$((run * 2))"
+    cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body "$((run * 2))"
     p=$(build "$PLAIN")
-    cp "$HEADER_BACKUP" "$HEADER"; patch_body "$((run * 2 + 1))"
+    cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body "$((run * 2 + 1))"
     s=$(build "$SPLIT")
     report "one body" "$p" "$s"
-    cp "$HEADER_BACKUP" "$HEADER"
+    cp "$BODY_BACKUP" "$BODY_HEADER"
 done
 
 echo
