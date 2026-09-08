@@ -61,7 +61,7 @@ prerequisite rather than one mtime — strictly better, and the reason the `.ast
 | the same, `ForSerialization` | 1.44s |
 | the same, `PrecompiledPreamble \| CreatePreambleOnFirstParse` | **2.28s** |
 | `clang_saveTranslationUnit` | 0.61s |
-| **`clang_createTranslationUnit2` (load the `.ast`)** | **0.02s** |
+| `clang_createTranslationUnit2` (open the `.ast`) | 0.02s — **but see below** |
 | `clang_reparseTranslationUnit` on a **live** TU | 0 (success) |
 | `clang_reparseTranslationUnit` on a **loaded** TU | **1 (failure)** |
 
@@ -85,26 +85,57 @@ inside the preamble by construction. The preamble would be rebuilt and nothing s
 helps when the main file changes below its own includes, which is the `one source` scenario the
 split cache already wins 3.3x on.
 
-### 3. The useful part: loading a serialized AST is 70x cheaper than parsing
+### 3. Loading a serialized AST is 1.6x cheaper than parsing, not 70x
 
-**0.02s against 1.43s.** That is the fact worth having, and it is better than reparse for
-`TODO/28`'s purpose, because a body-only edit does not need a *new* AST at all — it needs the
-*old* harvest, and the old AST is a complete record of it.
+The 0.02s above is an **open**, not a usable AST. `clang_createTranslationUnit2()`
+deserializes lazily: cursors are materialised on demand, so the cost does not disappear, it
+moves into the first thing that walks the tree. The splitter walks it twice — once to harvest
+and once in `collect_emitted()` — asking each cursor for its kind, spelling, extent and
+linkage. Walking the same 825728 cursors both ways:
 
-So `TODO/28` has two candidate implementations rather than one:
+| | obtain | walk 1 | walk 2 | **total** |
+|---|---:|---:|---:|---:|
+| parse | 1.46s | 0.25s | 0.24s | **1.95s** |
+| load `.ast` | 0.02s | **0.89s** | 0.31s | **1.21s** |
 
-- **(a) a text harvest cache** — write the extents and flags to `<tag>.harvest` and re-slice.
-  Nothing but file I/O, no libclang in the fast path, and the format is inspectable.
-- **(b) a serialized AST** — keep the `.ast` and re-derive the harvest by walking it at 0.02s.
-  No new format to design or version, and `collect_emitted()` can be re-run exactly rather
-  than approximated, which is the one decision `TODO/28` flags as genuinely at risk.
+**1.6x, and 0.74s saved.** Against a re-split that costs ~10s over the cache-hit baseline, that
+is 7%. It also costs 0.61s to write the `.ast` on every cold split and a large file to keep, so
+a good part of the saving is spent up front.
 
-(b) trades disk for correctness and is the more interesting of the two. Against it: the `.ast`
-files are large, `clang_saveTranslationUnit` costs 0.61s on every cold split, and the AST
-describes the source *as it was*, so the edited body's new text still has to come from the file
-and the extents after it still have to be shifted. Neither approach escapes that arithmetic.
+An earlier version of this file quoted the 0.02s as "70x cheaper than parsing" and built a
+recommendation on it. That was an open compared against a full parse: the same class of mistake
+as the 3.9s further down, where work that was not done was counted as work made faster. A
+partial cost is not a cost.
 
-Both need measuring on a real unit before either is written.
+### What this means for TODO/28
+
+`TODO/28` has two candidate implementations, and this measurement decides between them:
+
+- **(a) a text harvest cache** — persist the extents and flags, re-slice, and call no libclang
+  at all on the fast path. This is the only version that can approach zero, because it is the
+  only one that does not walk 825728 cursors.
+- **(b) reload the serialized AST and re-derive the harvest** — 1.21s instead of 1.95s per unit.
+  Real, but small, and it still pays the 0.61s save on every cold split.
+
+**(a) is the one to build.** Not because it is cleverer than libclang, but because the whole
+point is to not need the AST, and (b) still needs it.
+
+### And no, none of this is "reimplementing reparse"
+
+Neither option updates an AST. Nobody should hand-patch one; that is what
+`clang_reparseTranslationUnit()` is for, and where it is available it is the right tool. It is
+simply not available here: a loaded TU refuses to reparse, and the live TU that would accept it
+needs a process that outlives one launcher invocation.
+
+(a) does not maintain an AST at all. It caches the *conclusions* the AST was consulted for —
+which definitions exist, where they start and end, and where each belongs — and re-slices text
+against them. That is a different and much smaller object than an AST, and it is the reason it
+can be nearly free where reparse could not.
+
+**If a persistent process is ever acceptable again, reparse beats both of these and should be
+reconsidered before either.** The server was removed in `TODO/01` because when it was absent
+the launcher silently compiled without splitting; that is a fixable defect — fail loudly — not
+an argument against the process model. Worth revisiting deliberately rather than by accident.
 
 ## The preamble is not waste, and that was nearly missed
 

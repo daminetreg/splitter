@@ -54,6 +54,18 @@ Nothing of the harvest is persisted today. `split.cache` stores only the resulti
 `<tag>.keeps` (TODO/27) stores kept definitions but only line, reason and signature; and
 `CPP_SPLITTER_DUMP_HARVEST` writes to stderr for a human. A harvest cache is new.
 
+## Why not just reload a serialized AST
+
+Because it does not save enough. `clang_createTranslationUnit2()` opens an `.ast` in 0.02s but
+deserializes lazily, so the cost reappears in the first walk: 1.21s to load and walk twice
+against 1.95s to parse and walk twice, plus 0.61s to write the `.ast` on every cold split. That
+is 1.6x on one component of a ~10s re-split.
+
+The spec below caches the *conclusions* instead of the AST — which definitions exist, their
+extents, and where each belongs — so the fast path touches no libclang and walks no cursors.
+That is the only version that can approach zero. See `TODO/29` for the measurements and for why
+`clang_reparseTranslationUnit()` is not available here.
+
 ## Implementation spec
 
 1. **Persist the harvest.** Write `<tag>.harvest` beside the pieces: one record per definition
