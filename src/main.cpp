@@ -2712,6 +2712,24 @@ static std::string shell_quote(const std::string& s) {
     return result;
 }
 
+// Precompile the preamble that every split piece includes.
+//
+// This is the PCH that makes the *split output* affordable to compile, and it must not be
+// removed. Each piece begins with `#include "<tag>_preamble.h"`, and the preamble is the whole
+// translation unit with the function bodies carved out -- every include, class, template and
+// typedef the unit had. Compiling that once per piece would multiply the unit's parse cost by
+// the number of pieces, which on a Boost.Geometry test is a few hundred.
+//
+// It is fed to the compiler by placement, not by a flag: clang and gcc both look for
+// `<header>.gch/` beside a header they are told to include, so nothing appears on the piece's
+// command line. The directory holds one entry per content hash of the preamble, so a preamble
+// that changes does not silently reuse the previous PCH.
+//
+// Do not confuse this with either of the two libclang-side mechanisms in split_unit(), which
+// speed up the *splitter's own parse* and do nothing for the pieces: the prefix PCH built by
+// build_libclang_pch(), and the CXTranslationUnit_PrecompiledPreamble parse flag. Optimising
+// the splitter means touching those; touching this one only makes the build slower. See
+// TODO/29, where a measurement that mixed the two nearly removed the wrong thing.
 static bool build_pch(const std::string& preamble_file,
                       const std::string& compiler_driver,
                       const std::string& compiler,
@@ -4004,6 +4022,22 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     CXTranslationUnit tu = nullptr;
+    // libclang's own preamble, which accelerates this parse and nothing else. It is not the
+    // preamble PCH from build_pch(): that one is consumed by the compiler when building the
+    // split pieces and is a separate, larger win.
+    //
+    // These two flags are expensive -- 2.28s against 1.43s to parse
+    // libs/geometry/test/algorithms/area/area.cpp with its real flags, a 60% surcharge on
+    // every parse, and the launcher parses the unit plus each header candidate. Since nothing
+    // here ever calls clang_reparseTranslationUnit(), which is what a preamble is normally
+    // for, removing them looks free and takes one unit's re-split from 12.2s to 8.3s.
+    //
+    // It is not free. header_split_candidates() builds its list from clang_getInclusions(),
+    // and without a precompiled preamble -- with the prefix PCH supplying the include block
+    // through -include-pch -- that call yields nothing usable: auto-splitting of headers stops
+    // silently, the build still succeeds, and only launcher.depfile_names_originals and
+    // launcher.header_edit_behind_pch notice. The flags stay until the candidate list comes
+    // from somewhere cheaper. See TODO/29.
     unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
                          | CXTranslationUnit_CreatePreambleOnFirstParse;
     CXErrorCode err = clang_parseTranslationUnit2(

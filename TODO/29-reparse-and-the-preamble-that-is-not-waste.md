@@ -3,6 +3,24 @@
 **Severity:** None on its own. This is the design note behind `TODO/28`, and the reason its
 saving has to come from one particular direction.
 
+## Which preamble
+
+Three different things in this codebase are called "the preamble", and a measurement that
+mixes them points at the wrong fix. Keeping them apart is the point of this file.
+
+| | what it is | what it speeds up |
+|---|---|---|
+| **preamble PCH** (`build_pch`) | `<tag>_preamble.h.gch`, found by placement beside the header every piece includes | **compiling the split pieces** -- amortised over hundreds of them per unit |
+| **prefix PCH** (`build_libclang_pch`) | the leading include block, fed back with `-include-pch` | the splitter's own parse |
+| **`CXTranslationUnit_PrecompiledPreamble`** | libclang's implicit preamble for a TU it may reparse | the splitter's own parse |
+
+**The preamble PCH is not a candidate for removal and never was.** It is the reason a unit that
+splits into several hundred pieces can be compiled at all: without it each piece would compile
+the whole carved-out translation unit from source. Everything below is about the other two.
+
+The splitter's own parse is what should get faster, and `clang_reparseTranslationUnit` was
+considered for it before -- the removed server actually used it.
+
 ## The question
 
 `TODO/28` wants a body-only edit to skip the parse. libclang has an API built for exactly
