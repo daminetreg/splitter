@@ -1,6 +1,8 @@
 # Boost.Spirit: split build vs plain build — 6 September 2026
 
-Measured at `c620c20`, after `TODO/17`–`TODO/23` and the prefix-PCH fix those benchmarks
+**Re-measured 8 September at `27eb418`**, after `TODO/25`–`TODO/28`. The 6 September columns
+are kept beside the new ones, because what moved between them is the point. Originally
+measured at `c620c20`, after `TODO/17`–`TODO/23` and the prefix-PCH fix those benchmarks
 turned up.
 
 Boost's libraries are ordinary C++ compiled into a static library. Spirit is template
@@ -44,23 +46,39 @@ Boost build (tipi toolchain `4f846ee`); CMake 3.31.9, ninja 1.12.1; `-j32`; Debu
 
 ## Correctness: filesystem, spirit, system, core
 
-| | plain | split |
-|---|---:|---:|
-| wall time | 6.3s | 81.1s |
-| objects built | 457 | 457 |
-| **failed edges** | **0** | **0** |
-| translation units split | — | 434 |
-| **fallbacks to plain compilation** | — | **0** |
+| | plain | split | 6 Sep |
+|---|---:|---:|---:|
+| wall time | 6.4s | 81.1s | 81.1s |
+| objects built | 457 | 457 | 457 |
+| **failed edges** | **0** | **0** | 0 |
+| translation units split | — | **436** | 434 |
+| **fallbacks to plain compilation** | — | **0** | 0 |
 
 No target fails that would not also fail without the splitter.
+
+Two units that previously had nothing of their own to split now do, which is the
+conversion-operator harvest reaching them.
 
 The Spirit consumer has no CMake test suite, being header-only, so it is compiled directly.
 It is the densest single translation unit available here:
 
-| | time | result |
-|---|---:|---|
-| plain | 4.0s | compiles |
-| split | 31.6s | 4525 pieces, no fallback, links and prints what the plain build prints |
+| | time | result | 6 Sep |
+|---|---:|---|---|
+| plain | 4.0s | compiles | 4.0s |
+| split | 32.1s | **38 pieces**, no fallback, prints what the plain build prints | 4525 pieces |
+
+38 pieces against 4525 is `TODO/27` again, and on one translation unit it is starker than on
+the benchmark tree: this unit is almost entirely templates, so almost every piece it used to
+write could never have been compiled.
+
+### A caveat this table does not show
+
+`./test-boost-libraries.sh` now defaults to six libraries rather than these four, and that set
+reports **8 fallbacks** -- all `libs/assert/test/exp/`, all
+`use of undeclared identifier 'BOOST_CURRENT_FUNCTION'`, filed as `TODO/30`. They are not a
+regression: `assert` was not in the set when the zero above was first recorded, and the binary
+from before `TODO/28` fails on the same files. This table keeps the original four libraries so
+that its column is comparable with 6 September; the wider set is where that defect lives.
 
 ### How that got there
 
@@ -86,21 +104,35 @@ fails, and it has no functions of its own to split either.
 
 ## Cost: the five scenarios on Spirit
 
-| scenario | plain | split | ratio |
-|---|---:|---:|---:|
-| full | 3.7s | 42.3s | 11.6x slower |
-| no-op | 0.2s | 0.2s | parity |
-| one source | 2.9s | 0.6s | **4.5x faster** |
-| one header | 3.6s | 0.7s | **5.1x faster** |
-| one body | 3.7s | 8.1s | 2.2x slower |
+| scenario | plain | split | ratio | 6 Sep |
+|---|---:|---:|---:|---:|
+| full | 3.6s | 42.3s | 11.6x slower | 11.6x |
+| no-op | 0.2s | 0.2s | parity | parity |
+| one source | 3.0s | 0.6s | **5.0x faster** | 4.5x |
+| one header | 3.7s | 0.7s | **5.3x faster** | 5.1x |
+| one body | 3.7s | 5.6s | 1.5x slower | 2.2x slower |
 
-| artefact | plain | split |
-|---|---|---|
-| `spirit_bench` | 12M | 17M |
-| build tree | 31M | 1.4G |
-| generated pieces | — | 22548 |
+| artefact | plain | split | 6 Sep |
+|---|---|---|---|
+| `spirit_bench` | 12M | 26M | 17M |
+| build tree | 31M | 1.4G | 1.4G |
+| generated pieces | — | **131** | 22548 |
 
 The split binary prints exactly what the plain one prints.
+
+Two numbers moved a long way and they moved for different reasons.
+
+**131 pieces where there were 22548**, a 99.4% fall, is `TODO/27`. A piece used to be written
+for every definition including the ones that can never be compiled -- a function template, a
+member of a class template -- and on Spirit almost everything is one of those. The pieces that
+are *compiled* did not change; what stopped is writing tens of thousands of `.cpp` files that
+nothing reads.
+
+**The binary grew from 17M to 26M** while the plain build stayed at 12M. That is the
+conversion-operator harvest (`TODO/25` defect 3) being merged: definitions that used to sit
+unharvested in the preamble are now moved out into pieces of their own, each carrying its own
+copy of debug information. It is a real cost and it is on the same axis as the build tree,
+which did not move.
 
 ## Analysis
 
@@ -108,12 +140,16 @@ The split binary prints exactly what the plain one prints.
 
 Against Boost.Filesystem, re-measured today on the same machine for comparison:
 
-| scenario | filesystem | spirit |
-|---|---:|---:|
-| full | 10.2x slower | 11.6x slower |
-| one source | 2.1x faster | **4.5x faster** |
-| one header | 2.4x faster | **5.1x faster** |
-| one body | 2.8x slower | 2.2x slower |
+| scenario | filesystem | spirit | geometry |
+|---|---:|---:|---:|
+| full | 10.2x slower | 11.6x slower | 13.2x slower |
+| one source | 2.1x faster | **5.0x faster** | 6.7x faster |
+| one header | 2.4x faster | **5.3x faster** | 6.4x faster |
+| one body | 2.8x slower | 1.5x slower | 1.4x slower |
+
+Geometry is included now that it has a benchmark of its own
+(`boost-geometry-bench-7-Sep-2026.md`), measured today at the same commit. The filesystem
+column is its own benchmark's from 5 September and predates `TODO/28`.
 
 The two "faster" rows are the ones where nothing is parsed at all: the split of a translation
 unit is a pure function of its source, its flags and the contents of everything it includes,
@@ -132,21 +168,32 @@ re-instantiating the grammar templates its function needs. Nothing about that is
 improve much, and it is not supposed to — a cold build is not what an edit-build loop spends
 its time on.
 
-The body edit is the interesting row. It recompiles **one piece per translation unit** — the
-design working exactly as intended, a change to one function costing one object file. And it
-is still 2.2x slower than just rebuilding the units, because of what has to happen before
-that: the shared header changed, so all five prefix PCHs are invalidated and rebuilt, and all
-five units are re-parsed. On Spirit a PCH of the include prefix *is* most of the cost of the
-translation unit, so re-parsing five of them costs about what compiling five of them costs.
+The body edit is the interesting row, and it is the one this re-measurement was for. On
+6 September it read 2.2x slower, and this file said why:
 
-    5 x "libclang PCH stale, rebuilding"
-    4 x "compiling 1 header dep file"
-    8.0s
+> the piece-level incrementality is real and complete, and it is currently paying for a
+> re-parse that eats the entire saving. That is where the next round of work belongs: the
+> split of a header does not need the *whole* including unit re-parsed to discover that one
+> function body changed.
 
-So the piece-level incrementality is real and complete, and it is currently paying for a
-re-parse that eats the entire saving. That is where the next round of work belongs: the split
-of a header does not need the *whole* including unit re-parsed to discover that one function
-body changed.
+That is `TODO/28`, now implemented. The extents and hashes needed to prove an edit is confined
+to one body are written beside the pieces, so a body-only edit re-slices that one piece and
+parses nothing. All four Spirit units take that path:
+
+```
+$ ninja        # after editing bench_weight()
+4 x "one body changed in bench_common.hpp; re-sliced its piece without parsing"
+```
+
+**2.2x slower -> 1.5x slower.** The prediction was right about where the time was going, and
+wrong about how much of it there was: removing the re-parse did not turn the row around here.
+What is left is the fixed cost of the edit -- rebuilding the preamble PCH for each unit and
+relinking -- and on a five-unit tree that is most of it.
+
+The same change *does* win the equivalent row on Boost.Geometry's own test suite, 1.14x slower
+to 2.0x faster, because six real test programs give it more to save. The lesson is that the
+parse was the whole of the *avoidable* cost, not the whole cost, and a benchmark this small
+cannot show the difference.
 
 ### The benchmark found a bug, which is most of what it was worth
 
@@ -183,11 +230,16 @@ The re-measurement above (2.8x slower) has no fallbacks in it.
 
 ### Build tree size
 
-1.4G of build tree for a 31M plain build, and 22548 pieces for five translation units. The
+1.4G of build tree for a 31M plain build, and -- when this was first measured -- 22548 pieces
+for five translation units. The
 tree is dominated by per-piece debug information: every piece carries the debug info for the
 whole preamble it includes, and on Spirit that preamble is most of Boost. This is the same
 ratio the filesystem benchmark shows (275M against 6.5M) applied to code that is forty times
 denser. It is a real cost of the approach and nothing here addresses it.
+
+`TODO/27` cut the piece count to 131 without moving the tree size at all, which is the
+clearest evidence available that the tree is debug information in the pieces that are
+*compiled* rather than the count of pieces written.
 
 ## Reproduction
 

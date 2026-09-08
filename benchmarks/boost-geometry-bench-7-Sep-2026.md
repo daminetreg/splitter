@@ -1,9 +1,10 @@
 # Boost.Geometry: split build vs plain build — 7 September 2026
 
-**Re-measured 8 September at `6850486`**, after the conversion-operator harvest was merged and
-after `TODO/26` and `TODO/27` landed. The tables below are the new run; the previous one is
-kept beside them, because what changed between them is the interesting part. Originally
-measured at `a54b555`.
+**Re-measured 8 September at `27eb418`**, after `TODO/28` -- a body-only edit is now re-sliced
+from the recorded harvest instead of re-parsing the unit. An earlier pass the same day, at
+`6850486`, followed the conversion-operator harvest, `TODO/26` and `TODO/27`; the tables keep
+that column beside the new one, because what changed between them is the interesting part.
+Originally measured at `a54b555`.
 
 Two measurements, because "compiling Boost.Geometry" means two different things and they give
 opposite answers. The first is a **consumer** of the library: code someone writes against it.
@@ -45,13 +46,13 @@ CMake 3.31.9, ninja 1.12.1; Debug; `ld` for the relocatable link.
 
 ## Consuming Boost.Geometry
 
-| scenario | plain | split | ratio | 7 Sep |
-|---|---:|---:|---:|---:|
-| full | 5.0s | 59.0s | 11.8x slower | 13.2x |
-| no-op | 0.2s | 0.2s | parity | parity |
-| one source | 4.2s | 0.7s | **6.0x faster** | 6.0x |
-| one header | 4.7s | 0.7s | **6.7x faster** | 6.4x |
-| one body | 4.5s | 9.1s | 2.0x slower | 1.9x |
+| scenario | plain | split | ratio | earlier 8 Sep | 7 Sep |
+|---|---:|---:|---:|---:|---:|
+| full | 4.5s | 59.9s | 13.2x slower | 11.8x | 13.2x |
+| no-op | 0.2s | 0.2s | parity | parity | parity |
+| one source | 4.7s | 0.7s | **6.7x faster** | 6.0x | 6.0x |
+| one header | 4.5s | 0.7s | **6.4x faster** | 6.7x | 6.4x |
+| one body | 4.5s | 6.4s | 1.4x slower | 2.0x slower | 1.9x |
 
 No fallbacks, and the split binary prints exactly what the plain one prints.
 
@@ -61,22 +62,33 @@ No fallbacks, and the split binary prints exactly what the plain one prints.
 | build tree | 21M | 989M | 1.2G |
 | generated pieces | — | **245** | 54622 |
 
-The timings barely moved. The piece count fell by **99.6%** -- 54622 to 245 -- which is
-`TODO/27`: a piece used to be written for every definition including the ones that can never
-be compiled, and on this project 99.6% of them were templates and their members. Every piece
-written now is one that is compiled.
+The piece count fell by **99.6%** -- 54622 to 245 -- which is `TODO/27`: a piece used to be
+written for every definition including the ones that can never be compiled, and on this
+project 99.6% of them were templates and their members. Every piece written now is one that is
+compiled.
+
+The body row is the only timing that moved, from 2.0x slower to **1.4x slower**, and it moved
+because of `TODO/28`: all four units re-slice `bench_weight()`'s piece from the recorded
+harvest rather than re-parsing. It still loses. Four units and one driver is a small enough
+tree that what remains -- rebuilding the preamble PCH and relinking 245 pieces -- outweighs a
+parse that is no longer happening. The same change wins the test-suite body row below, where
+there is more work for it to save.
+
+The full row moved from 11.8x to 13.2x, which is run-to-run noise on a 4.5s baseline rather
+than a regression: the split side is 59.0s against 59.9s, and it is the plain side that moved.
 
 ### The trend across three kinds of code
 
 | scenario | filesystem | spirit | geometry |
 |---|---:|---:|---:|
-| full | 10.2x slower | 11.6x slower | 11.8x slower |
-| one source | 2.1x faster | 4.5x faster | **6.0x faster** |
-| one header | 2.4x faster | 5.1x faster | **6.7x faster** |
-| one body | 2.8x slower | 2.2x slower | **2.0x slower** |
+| full | 10.2x slower | 11.6x slower | 13.2x slower |
+| one source | 2.1x faster | 5.0x faster | **6.7x faster** |
+| one header | 2.4x faster | 5.3x faster | **6.4x faster** |
+| one body | 2.8x slower | 1.5x slower | **1.4x slower** |
 
-The filesystem and Spirit columns are their own benchmarks' numbers and have not been
-re-measured since; only the Geometry column is from today.
+Spirit and Geometry are both from today, at the same commit; the filesystem column is its own
+benchmark's and has not been re-measured since 5 September, so its body row still predates
+`TODO/28` and should be expected to improve when it is re-run.
 
 Every column moves the same way, and that is the argument for this approach stated as a
 measurement rather than a hope. The two winning rows are the ones where nothing is parsed at
@@ -97,11 +109,11 @@ Six targets, `-j8`:
 
 | scenario | plain | split | ratio | fallbacks | 7 Sep |
 |---|---:|---:|---:|---:|---:|
-| full | 15.4s | 262.7s | 17.1x slower | **0** | 18.3x, 6 fallbacks |
+| full | 15.1s | 265.1s | 17.5x slower | **0** | 18.3x, 6 fallbacks |
 | no-op | 0.2s | 0.2s | parity | 0 | parity |
-| one source | 7.9s | 2.2s | **3.6x faster** | 0 | 2.0x |
-| one header | 13.6s | 4.6s | **3.0x faster** | 0 | 1.5x |
-| one body | 14.6s | 7.2s | **2.0x faster** | 0 | not comparable |
+| one source | 7.3s | 2.2s | **3.3x faster** | 0 | 2.0x |
+| one header | 14.0s | 4.6s | **3.0x faster** | 0 | 1.5x |
+| one body | 14.2s | 7.2s | **2.0x faster** | 0 | not comparable |
 
 | artefact | plain | split | 7 Sep |
 |---|---|---|---|
