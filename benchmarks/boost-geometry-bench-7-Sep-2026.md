@@ -97,11 +97,11 @@ Six targets, `-j8`:
 
 | scenario | plain | split | ratio | fallbacks | 7 Sep |
 |---|---:|---:|---:|---:|---:|
-| full | 15.2s | 262.8s | 17.3x slower | **0** | 18.3x, 6 fallbacks |
+| full | 15.4s | 262.7s | 17.1x slower | **0** | 18.3x, 6 fallbacks |
 | no-op | 0.2s | 0.2s | parity | 0 | parity |
-| one source | 7.2s | 2.2s | **3.3x faster** | 0 | 2.0x |
-| one header | 13.9s | 4.7s | **3.0x faster** | 0 | 1.5x |
-| one body | 13.5s | 15.4s | 1.14x slower | 0 | not comparable |
+| one source | 7.9s | 2.2s | **3.6x faster** | 0 | 2.0x |
+| one header | 13.6s | 4.6s | **3.0x faster** | 0 | 1.5x |
+| one body | 14.6s | 7.2s | **2.0x faster** | 0 | not comparable |
 
 | artefact | plain | split | 7 Sep |
 |---|---|---|---|
@@ -134,13 +134,19 @@ $ find ... -name '*.o' -newer <edit>           # piece objects rebuilt, split tr
 ```
 
 **Five piece objects, all of them the edited function.** Piece-level incrementality is exact:
-nothing else in 2338 pieces was touched. And it is still 1.14x slower than recompiling the
-five translation units outright, because what the splitter pays for is not the compile -- it is
-re-parsing those five units to discover that only one piece changed. On this corpus the parse
-costs more than the compile it saves.
+nothing else in 2338 pieces was touched.
 
-That is the honest statement of where this design stands on a header edit, and it is only
-visible because the row stopped editing a template.
+For one day this row still read **1.14x slower**, because what the splitter paid for was not
+the compile but re-parsing those five units to discover that only one piece had changed. That
+is what `TODO/28` removed: the extents and the hashes needed to prove an edit is confined to
+one body are now written beside the pieces, so a body-only edit re-slices that one piece and
+parses nothing. The row is **2.0x faster** than the plain build, and the split output is
+byte-identical to what a full parse produces -- 4642 files checked, which is the assertion the
+fixture makes rather than a timing claim.
+
+It took editing a real, non-template function to see any of this. While the row edited a class
+template's member the splitter could only lose it, and the loss was invisible because the
+number happened to look like a win.
 
 Boost.Geometry makes this hard to measure at all: of the 245 header pieces compiled into every
 one of the six units, **not one comes from a Boost.Geometry header** -- they are Boost.Test,

@@ -182,6 +182,18 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunHeaderEditTest.cmake)
 
+# TODO/28: an edit confined to one function body is re-sliced from the recorded harvest
+# instead of re-parsing the translation unit.
+add_test(
+  NAME launcher.incremental_body_edit
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/incremental_main.cpp
+          -DHEADER=${cpp_splitter_test_dir}/incremental_header.hpp
+          -DWORKDIR=${cpp_splitter_test_output}/incremental
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunIncrementalSplitTest.cmake)
+
 # What language standard libclang parses at when the command line names none. Its own driver
 # is needed because the check is that split and plain agree, and because no -std may appear
 # on the command line -- which is exactly what the other fixtures' driver passes.
