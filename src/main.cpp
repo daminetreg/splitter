@@ -3604,6 +3604,101 @@ static SplitResult split_unit(CXTranslationUnit tu,
 // Splits every header this translation unit should split, using the inventory harvested
 // from `tu` rather than re-parsing each header on its own, then collects the objects and
 // include directories the caller has to link and compile against.
+
+// Make a rewritten header's quoted includes resolve where they did before it was moved.
+// TODO/31.
+//
+// `#include "x.hpp"` is looked up relative to the directory of the file doing the including.
+// A rewritten copy lives in the mirror under <split_dir>/include, so that directory is now the
+// one searched -- and the mirror holds a copy only for headers that were themselves split.
+// Boost.Spirit's lexer headers include their siblings this way:
+//
+//     generator.hpp:10:10: fatal error: 'char_traits.hpp' file not found
+//
+// and no -I can rescue it, because the name is unqualified while the original sits several
+// directories down an include root.
+//
+// This runs as a pass over the copies once they have all been written, rather than while each
+// one is generated, and that is deliberate: whether a sibling ends up in the mirror is not
+// known in advance. A header on the candidate list can still produce no copy -- it may have no
+// definitions of its own, or fail to parse standalone -- so asking the filesystem afterwards
+// is the only answer that is actually true.
+static void fix_mirror_quoted_includes(const std::string& output_dir,
+                                       const std::vector<std::string>& inc_dirs,
+                                       bool verbose, std::ostream& out) {
+    const std::string mirror_root = split_include_root(output_dir);
+
+    for (const auto& entry : g_split_headers) {
+        const std::string& original = entry.first;
+        const std::string& copy_path = entry.second.preamble_path;
+        if (copy_path.empty() || !fs::exists(copy_path)) continue;
+
+        const fs::path orig_dir = fs::path(original).parent_path();
+        const std::string text = read_file(copy_path);
+        if (text.empty()) continue;
+
+        std::string rebuilt;
+        rebuilt.reserve(text.size());
+        size_t pos = 0;
+        int rewritten = 0;
+        while (pos <= text.size()) {
+            size_t eol = text.find('\n', pos);
+            const bool last = (eol == std::string::npos);
+            if (last) eol = text.size();
+            std::string line = text.substr(pos, eol - pos);
+
+            // Only a line whose first non-blank character is `#` can be a directive, which
+            // keeps this away from the word "include" inside code or a comment.
+            const size_t hash = line.find_first_not_of(" \t");
+            if (hash != std::string::npos && line[hash] == '#') {
+                const size_t kw = line.find("include", hash + 1);
+                const size_t q1 = (kw == std::string::npos) ? std::string::npos
+                                                           : line.find('"', kw + 7);
+                const size_t q2 = (q1 == std::string::npos) ? std::string::npos
+                                                           : line.find('"', q1 + 1);
+                if (q2 != std::string::npos) {
+                    const std::string target = line.substr(q1 + 1, q2 - q1 - 1);
+                    const fs::path resolved =
+                        (orig_dir / target).lexically_normal();
+                    std::error_code ec;
+                    if (!target.empty() && target[0] != '/' && fs::exists(resolved, ec)) {
+                        // If the sibling is mirrored too, leave the directive alone. The
+                        // mirror is structurally parallel to the original tree, so the same
+                        // relative path still names the right file -- and pointing this one
+                        // at the original instead would read a header whose definitions have
+                        // been split out, defining every one of them a second time.
+                        const std::string sib_rel =
+                            header_mirror_relpath(resolved.string(), inc_dirs);
+                        const bool sibling_mirrored =
+                            !sib_rel.empty() &&
+                            fs::exists((fs::path(mirror_root) / sib_rel).string(), ec);
+                        if (!sibling_mirrored) {
+                            line = line.substr(0, q1 + 1) + resolved.string() +
+                                   line.substr(q2);
+                            ++rewritten;
+                        }
+                    }
+                }
+            }
+
+            rebuilt += line;
+            if (!last) rebuilt += '\n';
+            if (last) break;
+            pos = eol + 1;
+        }
+
+        if (rewritten > 0 && rebuilt != text) {
+            std::ofstream ofs(copy_path);
+            if (ofs.is_open()) {
+                ofs << rebuilt;
+                if (verbose)
+                    out << "  [quoted includes] " << rewritten << " rewritten in "
+                        << copy_path << "\n";
+            }
+        }
+    }
+}
+
 static void resolve_header_deps(CXTranslationUnit tu,
                                 const HarvestMap& harvest,
                                 const VarHarvestMap& var_harvest,
@@ -4375,6 +4470,8 @@ static SplitResult do_split(const std::string& input_path,
         resolve_header_deps(tu, harvest, var_harvest, referenced, candidates, tu_preamble,
                             result, output_dir,
                             all_flags, extra_flags, parse_errors == 0, verbose, out);
+        // Once every copy that is going to exist does, and not before. TODO/31.
+        fix_mirror_quoted_includes(output_dir, unit_include_dirs(extra_flags), verbose, out);
     }
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);

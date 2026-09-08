@@ -182,6 +182,17 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunHeaderEditTest.cmake)
 
+# TODO/31: a rewritten header's quoted include must still resolve from inside the mirror.
+add_test(
+  NAME launcher.quoted_include_in_mirror
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/quoted_include_main.cpp
+          -DHEADERDIR=${cpp_splitter_test_dir}/quoted_include/pkg
+          -DWORKDIR=${cpp_splitter_test_output}/quoted_include
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunQuotedIncludeTest.cmake)
+
 # TODO/28: an edit confined to one function body is re-sliced from the recorded harvest
 # instead of re-parsing the translation unit.
 add_test(

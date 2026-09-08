@@ -103,3 +103,45 @@ CPP_SPLITTER_VERBOSE=1 ninja -C /tmp/sp -j8 spirit_test_lex_lexertl1
   split, one including the other by quoted relative path. The definition the included one
   contributes must appear exactly once in the final object -- checked with `nm`, because it
   links either way.
+
+## Outcome
+
+**Fixed.** `fix_mirror_quoted_includes()` rewrites the directives per the spec.
+
+It runs as a pass over the copies once they have all been written, rather than while each one
+is generated, and that ordering is the design decision. Whether a sibling ends up in the mirror
+is not knowable in advance: a header on the candidate list can still produce no copy, because
+it has no definitions of its own or because it will not parse standalone. Asking the filesystem
+afterwards is the only answer that is actually true.
+
+### Measured
+
+`./benchmark-spirit-tests.sh`, before and after:
+
+| scenario | before | after |
+|---|---:|---:|
+| full | 6.2x slower, **1 fallback** | 6.2x slower, **0** |
+| one source | 5.75x faster | 5.75x faster |
+| **one header** | **2.55x slower** | **7.6x faster** |
+| **one body** | **2.59x slower** | **1.5x faster** |
+
+Both poisoned rows came back, and the header row overshot the estimate in the motivation
+(about 7x) because the fifth unit now re-slices as well: `TODO/28` reports 5 units re-sliced
+where it reported 4.
+
+No regression elsewhere: Boost.Geometry's test suite is unchanged on every row with 0
+fallbacks, and the four-library harness still builds 457 of 457 objects with 0 failed edges,
+436 units split and 0 fallbacks.
+
+### The fixture, and why its layout is load-bearing
+
+`launcher.quoted_include_in_mirror` asserts both halves of the rule: a sibling with no copy
+must be rewritten to the original's absolute path, and a mirrored partner must be left exactly
+as written.
+
+The headers sit in a `pkg/` subdirectory with only its parent on the include path, which is the
+shape Spirit's lexer headers have. Flat in the source directory the sibling is found through
+`-I` whatever the splitter does, and the test would pass without testing anything.
+
+Checked that it discriminates: with `fix_mirror_quoted_includes()` disabled it fails with
+`cpp-splitter fell back instead of splitting`.
