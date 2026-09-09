@@ -1,7 +1,9 @@
 # Boost.Geometry: split build vs plain build — 7 September 2026
 
-**Re-measured 8 September at `27eb418`**, after `TODO/28` -- a body-only edit is now re-sliced
-from the recorded harvest instead of re-parsing the unit. An earlier pass the same day, at
+**Re-measured 9 September at `2271136`**, at **C++17** -- now the default for everything built
+through `environments/monolithic.cmake` (`TODO/33`). The 8 September pass at `27eb418` added
+`TODO/28`, which re-slices a body-only edit from the recorded harvest instead of re-parsing the
+unit. An earlier pass the same day, at
 `6850486`, followed the conversion-operator harvest, `TODO/26` and `TODO/27`; the tables keep
 that column beside the new one, because what changed between them is the interesting part.
 Originally measured at `a54b555`.
@@ -46,20 +48,20 @@ CMake 3.31.9, ninja 1.12.1; Debug; `ld` for the relocatable link.
 
 ## Consuming Boost.Geometry
 
-| scenario | plain | split | ratio | earlier 8 Sep | 7 Sep |
+| scenario | plain | split | ratio | 8 Sep | 7 Sep |
 |---|---:|---:|---:|---:|---:|
-| full | 4.5s | 59.9s | 13.2x slower | 11.8x | 13.2x |
+| full | 4.5s | 60.0s | 13.3x slower | 13.2x | 13.2x |
 | no-op | 0.2s | 0.2s | parity | parity | parity |
-| one source | 4.7s | 0.7s | **6.7x faster** | 6.0x | 6.0x |
-| one header | 4.5s | 0.7s | **6.4x faster** | 6.7x | 6.4x |
-| one body | 4.5s | 6.4s | 1.4x slower | 2.0x slower | 1.9x |
+| one source | 4.3s | 0.7s | **6.1x faster** | 6.7x | 6.0x |
+| one header | 4.5s | 0.7s | **6.4x faster** | 6.4x | 6.4x |
+| one body | 4.3s | 6.3s | 1.5x slower | 1.4x slower | 1.9x |
 
 No fallbacks, and the split binary prints exactly what the plain one prints.
 
 | artefact | plain | split | 7 Sep |
 |---|---|---|---|
-| `geometry_bench` | 7.8M | 15M | 11M |
-| build tree | 21M | 989M | 1.2G |
+| `geometry_bench` | 7.9M | 16M | 11M |
+| build tree | 22M | 1.1G | 1.2G |
 | generated pieces | — | **245** | 54622 |
 
 The piece count fell by **99.6%** -- 54622 to 245 -- which is `TODO/27`: a piece used to be
@@ -81,14 +83,18 @@ than a regression: the split side is 59.0s against 59.9s, and it is the plain si
 
 | scenario | filesystem | spirit | geometry |
 |---|---:|---:|---:|
-| full | 10.2x slower | 11.6x slower | 13.2x slower |
-| one source | 2.1x faster | 5.0x faster | **6.7x faster** |
-| one header | 2.4x faster | 5.3x faster | **6.4x faster** |
-| one body | 2.8x slower | 1.5x slower | **1.4x slower** |
+| full | 10.2x slower | 11.5x slower | 13.3x slower |
+| one source | 2.1x faster | 5.0x faster | **6.1x faster** |
+| one header | 2.4x faster | 5.4x faster | **6.4x faster** |
+| one body | 2.8x slower | 1.6x slower | **1.5x slower** |
 
-Spirit and Geometry are both from today, at the same commit; the filesystem column is its own
-benchmark's and has not been re-measured since 5 September, so its body row still predates
-`TODO/28` and should be expected to improve when it is re-run.
+Spirit and Geometry are both from today, at the same commit and at C++17; the filesystem column
+is its own benchmark's and has not been re-measured since 5 September, so its body row still
+predates `TODO/28` and should be expected to improve when it is re-run.
+
+These are all *consumers*. Both libraries' own test suites answer the body row differently and
+in the same direction -- Geometry's 1.8x faster, Spirit's 1.2x faster -- because a suite of real
+programs gives the saving more to work with than four translation units and a driver.
 
 Every column moves the same way, and that is the argument for this approach stated as a
 measurement rather than a hope. The two winning rows are the ones where nothing is parsed at
@@ -109,15 +115,15 @@ Six targets, `-j8`:
 
 | scenario | plain | split | ratio | fallbacks | 7 Sep |
 |---|---:|---:|---:|---:|---:|
-| full | 15.1s | 265.1s | 17.5x slower | **0** | 18.3x, 6 fallbacks |
+| full | 15.1s | 274.7s | 18.2x slower | **0** | 18.3x, 6 fallbacks |
 | no-op | 0.2s | 0.2s | parity | 0 | parity |
-| one source | 7.3s | 2.2s | **3.3x faster** | 0 | 2.0x |
-| one header | 14.0s | 4.6s | **3.0x faster** | 0 | 1.5x |
-| one body | 14.2s | 7.2s | **2.0x faster** | 0 | not comparable |
+| one source | 7.2s | 2.3s | **3.1x faster** | 0 | 2.0x |
+| one header | 13.6s | 4.6s | **3.0x faster** | 0 | 1.5x |
+| one body | 13.1s | 7.3s | **1.8x faster** | 0 | not comparable |
 
 | artefact | plain | split | 7 Sep |
 |---|---|---|---|
-| build tree | 235M | 4.6G | 3.7G |
+| build tree | 237M | 5.2G | 3.7G |
 | generated pieces | — | **2338** | 75168 |
 
 Two things moved: the fallbacks are gone, and the two touch-driven rows got roughly twice as

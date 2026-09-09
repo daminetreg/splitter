@@ -1,9 +1,11 @@
 # Boost.Spirit: split build vs plain build — 6 September 2026
 
-**Re-measured 8 September at `27eb418`**, after `TODO/25`–`TODO/28`. The 6 September columns
-are kept beside the new ones, because what moved between them is the point. Originally
-measured at `c620c20`, after `TODO/17`–`TODO/23` and the prefix-PCH fix those benchmarks
-turned up.
+**Re-measured 9 September at `2271136`**, at **C++17** -- which is now the default for
+everything built through `environments/monolithic.cmake`, and which `TODO/33` showed is not
+optional: the splitter can only leave a namespace-scope variable in a header if it can mark it
+`inline`. The 6 September columns are kept beside the new ones, because what moved between them
+is the point. Originally measured at `c620c20`, after `TODO/17`–`TODO/23` and the prefix-PCH
+fix those benchmarks turned up.
 
 Boost's libraries are ordinary C++ compiled into a static library. Spirit is template
 metaprogramming: a single translation unit costs seconds, one shared header reaches across
@@ -48,10 +50,10 @@ Boost build (tipi toolchain `4f846ee`); CMake 3.31.9, ninja 1.12.1; `-j32`; Debu
 
 | | plain | split | 6 Sep |
 |---|---:|---:|---:|
-| wall time | 6.4s | 81.1s | 81.1s |
+| wall time | 7.5s | 102.2s | 81.1s |
 | objects built | 457 | 457 | 457 |
 | **failed edges** | **0** | **0** | 0 |
-| translation units split | — | **436** | 434 |
+| translation units split | — | **437** | 434 |
 | **fallbacks to plain compilation** | — | **0** | 0 |
 
 No target fails that would not also fail without the splitter.
@@ -106,15 +108,15 @@ fails, and it has no functions of its own to split either.
 
 | scenario | plain | split | ratio | 6 Sep |
 |---|---:|---:|---:|---:|
-| full | 3.6s | 42.3s | 11.6x slower | 11.6x |
+| full | 3.8s | 43.1s | 11.5x slower | 11.6x |
 | no-op | 0.2s | 0.2s | parity | parity |
 | one source | 3.0s | 0.6s | **5.0x faster** | 4.5x |
-| one header | 3.7s | 0.7s | **5.3x faster** | 5.1x |
-| one body | 3.7s | 5.6s | 1.5x slower | 2.2x slower |
+| one header | 3.8s | 0.7s | **5.4x faster** | 5.1x |
+| one body | 3.7s | 5.9s | 1.6x slower | 2.2x slower |
 
 | artefact | plain | split | 6 Sep |
 |---|---|---|---|
-| `spirit_bench` | 12M | 26M | 17M |
+| `spirit_bench` | 12M | 27M | 17M |
 | build tree | 31M | 1.4G | 1.4G |
 | generated pieces | — | **131** | 22548 |
 
@@ -257,31 +259,38 @@ supposed to fail. Every one of the 277 builds without the splitter, so nothing i
 
 | scenario | plain | split | ratio | fallbacks |
 |---|---:|---:|---:|---:|
-| full | 71.8s | 774.4s | 10.8x slower | **4** |
-| no-op | 0.2s | 0.6s | **3.2x slower** | 0 |
-| one source | 2.4s | 0.8s | **3.0x faster** | 0 |
-| one header | 70.2s | 15.4s | **4.6x faster** | 3 |
-| one body | 71.9s | 58.2s | **1.2x faster** | 2 |
+| full | 73.8s | 802.5s | 10.9x slower | **0** |
+| no-op | 0.2s | 0.6s | **2.9x slower** | 0 |
+| one source | 2.4s | 0.8s | **3.2x faster** | 0 |
+| one header | 72.6s | 8.2s | **8.9x faster** | 0 |
+| one body | 72.8s | 58.7s | **1.2x faster** | 0 |
 
 | artefact | plain | split |
 |---|---|---|
-| build tree | 1.3G | **46G** |
-| generated pieces | — | 4891 |
+| build tree | 1.4G | **48G** |
+| generated pieces | — | 4882 |
 
-209 units re-slice the edited body from their recorded harvest instead of re-parsing
-(`TODO/28`). The fallback count differs by row because it is counted per build and each row
-rebuilds a different subset: `one source` touches one unit, and that unit is not one of the two
-that fail.
+210 units re-slice the edited body from their recorded harvest instead of re-parsing
+(`TODO/28`), and **nothing falls back on any row**.
 
 ### Every row is a real answer now
 
-With six targets this benchmark said `one header` was 2.55x *slower*, because a single unit
-fell back and a fallback re-does the whole split on every build. `TODO/31` fixed that unit, and
-at full size the picture is the one the design predicts: the touch-driven rows win by 3-4.6x,
-the body edit wins narrowly, and the cold build costs 10.8x.
+This row has been wrong twice, in the same way and for the same reason, and it is worth
+recording how it moved:
+
+| `one header` | |
+|---|---|
+| six targets, one unit falling back | **2.55x slower** |
+| all 277, four units falling back | 4.6x faster |
+| all 277, C++17, none falling back | **8.9x faster** |
+
+A fallback writes no split cache, so a unit that falls back re-does its entire split on every
+build for ever. Three of them were enough to halve the row. Each of the three fixes -- `TODO/31`,
+`TODO/32`, `TODO/33` -- removed one, and only with the last of them does the row measure what it
+claims to.
 
 `one body` at 1.2x faster is the weakest win here and the reason is scale rather than the
-splitter: the edited header reaches nearly every one of the 277 units, so 209 of them re-slice
+splitter: the edited header reaches nearly every one of the 277 units, so 210 of them re-slice
 and relink. Each one is cheap; there are simply a great many.
 
 ### The no-op row is 3.2x slower, and that is new
@@ -295,33 +304,41 @@ That is not alarming at this size but it is a real per-unit floor, and this is t
 large enough to show it. A tree of a few thousand units would pay several seconds to discover
 it has nothing to do.
 
-### 46G of build tree
+### 48G of build tree
 
-Against 1.3G plain, for 4891 pieces. The ratio is worse than Geometry's (4.6G against 235M) on
+Against 1.4G plain, for 4882 pieces. The ratio is worse than Geometry's (4.6G against 235M) on
 the same axis: every piece carries the debug information of the preamble it includes, and on
 Spirit that preamble is most of Boost. `TODO/27` already stopped writing pieces that are never
 compiled; what is left is the ones that are. Nothing here addresses it.
 
-### Two defects, both new, both from the tests the six-target version never built
+### Two defects, both found here, both fixed
 
-The suite falls back on two units and each named a distinct defect:
+The 8 September run fell back on two units. Each named a distinct defect, and neither is
+reachable from six hand-picked tests -- which is the argument for porting the whole Jamfile
+rather than a sample.
 
 **`qi/uint_radix`** -- `ld: multiple definition of 'unsigned_overflow_base35'`.
 `uint_radix.hpp` defines `char const* unsigned_overflow_base35 = "2BR45QB";` at namespace scope
-in a header. The pointee is const; the pointer is not, so it is a definition with external
-linkage. `TODO/17` and `TODO/26` move namespace-scope variables out of the preamble for exactly
-this reason, but both look only at the unit's own source -- a header's arrive through an
-ordinary `#include` and are compiled once per piece. Filed as `TODO/32`.
+in a header. The pointee is const; the pointer is not, so it is a definition of an object with
+external linkage. `resolve_header_deps()` read that header's variables out of the harvest and
+then skipped it on `fns.empty()` alone, recording "no function definitions" -- so the header was
+never rewritten, the preamble included the original, and every piece compiled the definitions
+again. It now skips only a header with neither functions nor variables, and the mirrored copy
+reads `inline char const* max_unsigned_base3 = ...`. `TODO/32`.
 
 **`lex/regression_wide`** -- `invalid application of 'sizeof' to an incomplete type
 'test_data []'`. The source writes `test_data data[] = { ... }` and later takes
-`sizeof(data)/sizeof(data[0])`. Moving the variable leaves `extern test_data data[]`, which is
-the right declaration for an array of unknown bound and the wrong one for `sizeof`. Filed as
-`TODO/33`, and it is the same shape as the `constexpr` trap `TODO/26` hit: a variable moved
-whose type cannot survive the move, where the text says nothing and the type says everything.
+`sizeof(data)/sizeof(data[0])`. Moved to the definitions header it left `extern test_data
+data[];` behind, which is the right declaration for an array of unknown bound and the wrong one
+for `sizeof`. `TODO/33`, and it needed **no change to the placement logic at all**: at C++17 the
+array stays where it is marked `inline`, keeping its initialiser and therefore its bound. This
+benchmark had pinned `cxx_std_14`, so that path was never reached.
 
-Neither is reachable from six hand-picked tests. That is the argument for porting the whole
-Jamfile rather than a sample.
+Both are the same answer, and it is the one worth stating: a namespace-scope definition that
+would otherwise be duplicated into every piece is **left where it is and marked `inline`**, not
+moved. Moving is what breaks a variable whose type cannot survive it -- an array with a deduced
+bound, or a constant that a constant-expression needs (`TODO/26`). That is why C++17 is assumed
+rather than accommodated.
 
 ## Reproduction
 
