@@ -39,7 +39,7 @@ The `-j8` is not modesty. A Spirit test unit is a very large template instantiat
 splitter holds a libclang AST of that unit in memory *alongside* the compile. At `-j32` a
 corpus like this exhausts 122 GiB.
 
-## The five benchamkred scenarios
+## The five benchmarked scenarios
 
 | scenario | what it asks |
 |---|---|
@@ -122,13 +122,47 @@ rather than re-parsing.
 
 ## What the numbers say
 
-### The cold build costs an order of magnitude
+### The cold build costs an order of magnitude — of *work*, not of wall time
 
-10.9x, and that is inherent. One object per function is strictly more work than one object per
-source, and on Spirit each of those objects re-instantiates the grammar templates its function
-needs. Remote Execution of the build with Bazel or CMake RE fixes that, and it is one of the main reason for the splitter: break the most atomic unit of the builds to maximize cacheability and distributabilty of the build.
+10.9x more work, and that part is inherent: one object per function is strictly more than one
+object per source, and on Spirit each of those objects re-instantiates the grammar templates
+its function needs.
 
-However a cold build is not where an edit-build loop spends its time and therefore even if we make this slower on single machine builds, the goal is to serve very active edit loop.
+But 802 seconds is what that work costs **on eight lanes of one machine**, and a single
+machine is not where this is meant to run. Remote execution — Bazel, or CMake's — is what the
+cold-build column is aimed at, and it is one of the main reasons the splitter exists: break the
+build into its most atomic unit, and both halves of remote execution get better at once.
+
+| | independent units of work |
+|---|---:|
+| plain | 277 translation units |
+| split | **4882 pieces** |
+
+**Distributability.** A conventional build cannot go faster than its slowest translation unit,
+however many machines you point at it. One heavy Spirit unit is a single job, on a single core,
+start to finish — add a hundred workers and it takes exactly as long. Splitting removes that
+floor: the unit becomes a parse, then hundreds of small independent compiles that can land on
+different machines at once, then a link. Distribution's usual problem is running out of work to
+hand out; 277 units cannot occupy 500 workers, and 4882 pieces can.
+
+**Cacheability.** The same cut helps the cache, and for a different reason. A translation
+unit's object is invalidated by any change anywhere in the file — edit one function of thirty
+and the cache entry for all thirty is gone. A piece is one function: its cache key survives
+every edit to its neighbours. The finer the unit, the more of the build a cache can keep across
+a change, which is the property remote execution is actually built to exploit.
+
+There is a third, more prosaic way the two fit together, and this benchmark ran straight into
+it: the `-j8` above is a **memory** limit, not a CPU one. The splitter holds a libclang AST
+alongside the compile, so eight is what 122 GiB will carry. A farm replaces "more lanes on one
+box" with "lanes on many boxes", each bringing its own RAM — the constraint that caps this
+benchmark does not exist there.
+
+And a cold build is not where an edit-build loop spends its time in any case. Making it slower
+on one machine is a deliberate trade in favour of the loop the next two rows measure.
+
+**None of that is measured here.** This is a single-machine benchmark, and the 10.9x is a real
+number for a single machine. The distributed and cached cases are the design intent and the
+mechanism it rests on, not a result — and they are the next thing to measure.
 
 ### The touch rows are where the design pays
 
@@ -181,9 +215,14 @@ count of pieces written. It is a real cost of the approach and nothing here addr
 ## The honest summary
 
 On a corpus this hostile, per-function splitting turns a **73-second** rebuild after a header
-touch into an **8-second** one, and a real body edit from 73 seconds into 59. It costs an
-order of magnitude on the cold build and 34x the disk.
+touch into an **8-second** one, and a real body edit from 73 seconds into 59, with nothing
+falling back to a plain compile.
 
-Whether that trade is worth taking depends entirely on how often you do a cold build versus how
-often you change one function — which is to say, it is worth taking exactly when you are doing
-the thing this is for.
+It costs 10.9x the work on a cold build and 34x the disk. The disk is a real cost and this post
+has no answer to it. The cold build is a different kind of number: 10.9x more work, cut into
+18x more independent jobs, each one small enough to cache on its own and to hand to a different
+machine. On eight lanes of one box that trade loses, and it is supposed to — the reason to make
+it is that a build farm can only go as fast as the largest thing you can give a single worker,
+and this makes that thing a function.
+
+Proving it is the next benchmark, on more machines than one.
