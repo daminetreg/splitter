@@ -65,44 +65,46 @@ unit that includes it, so this row asks a specific question: can the splitter re
 its inputs are unchanged and reuse the previous split, instead of re-parsing 277 translation
 units to produce byte-identical output?
 
-### `one body` — a real edit to a real function
+### `one body` — a real edit, to a function chosen with care
 
-The body target is a different file, and deliberately so:
+The body target is a different file, and *which function* it is decides whether the row means
+anything at all:
 
 ```
-boost/spirit/home/support/utf8.hpp
+boost/spirit/home/support/char_encoding/standard_wide.hpp
 ```
 
 ```cpp
-namespace detail {
-    inline void utf8_put_encode(utf8_string& out, ucs4_char x)
-    {
-        (void)42;   // <- the benchmark inserts one line here
-        // https://www.unicode.org/versions/Unicode15.0.0/ch03.pdf D90
-        if (BOOST_UNLIKELY(x > 0x10FFFFul || (0xD7FFul < x && x < 0xE000ul)))
-            x = 0xFFFDul;
-        ...
+        static ::boost::uint32_t
+        toucs4(wchar_t ch)
+        {
+            (void)42;   // <- the benchmark inserts one line here
+            return static_cast<make_unsigned<wchar_t>::type>(ch);
+        }
 ```
 
 A different marker is inserted on each run, so successive edits are genuinely different text
 and no content hash can short-circuit one of them.
 
-**Why this function and not any other.** Nearly all of Spirit is templates, and the splitter
-keeps a template in the preamble without emitting a piece for it — there is nothing to gain
-from splitting out a function that cannot be instantiated ahead of time. Editing one could
-therefore never recompile "one piece", because there is no piece. It could only force every
-unit that includes it to be re-split, which measures the splitter's *worst* case and reports it
-as its design case.
+**Two properties matter, and the second one took two attempts to get right.**
 
-`utf8_put_encode` is an ordinary non-template free function in Spirit's own header, and the
-splitter emits and compiles a real piece for it in **269 of the 277 units**. It is the shape
-splitting exists to serve, and of the handful of Spirit headers contributing any compiled piece
-at all it is the one reaching the most units.
+First, the definition has to be one the splitter can move out of the header at all. Nearly all
+of Spirit is templates, which stay in the preamble with no piece emitted — there is nothing to
+gain from splitting out a function that cannot be instantiated ahead of time. Editing one could
+never recompile "one piece", because there is no piece; it would measure the splitter's worst
+case and report it as its design case.
 
-That distinction is not academic. An earlier version of this benchmark edited a class
-template's member and reported the body row as a *win*. It was measuring nothing.
+Second — and this is the one that matters — **the header has to be included far more widely
+than the function is used.** `toucs4` is included by 194 of the units and emitted by exactly 1.
+A plain build must recompile all 194, because a header they include changed. A split build
+re-runs the launcher for all 194 too, but only the one unit that actually emits the function
+has a piece to recompile.
 
-## Results
+The first version of this benchmark edited `utf8_put_encode()`, which is emitted in 178 of the
+180 units that include it. Both builds therefore did the same amount of work, the row came out
+flat, and it was read as the design failing. It was the target failing to discriminate.
+
+## Results## Results
 
 | scenario | plain | split | ratio | fallbacks |
 |---|---:|---:|---:|---:|
@@ -214,68 +216,66 @@ count of pieces written. It is a real cost of the approach and nothing here addr
 ## Then it was measured on a real farm
 
 The same 277 programs, built through CMake RE against an EngFlow Remote Build Execution
-cluster, with and without the splitter. Reclient keeps per-action records, so each row can say
+cluster, with and without the splitter. Reclient keeps per-action records, so every row can say
 whether work was executed on the cluster or served from its cache — a distinction wall time
-hides, and one that turns out to matter more than the wall time itself.
+hides.
 
-| scenario | splitter | wall | remote / cached |
-|---|---|---:|---|
-| full | no | 32.3s | 0 / 1641 |
-| full | yes | 377.8s | 0 / 15321 |
-| **one body** | **no** | **110.8s** | **213** / 594 |
-| **one body** | **yes** | **103.9s** | **210** / 603 |
+| scenario | splitter | wall | remote executions |
+|---|---|---:|---:|
+| full | no | 32.8s | 0 (all cached) |
+| full | yes | 404.7s | 208 |
+| **one body** | **no** | **139.6s** | **282** |
+| **one body** | **yes** | **67.4s** | **5** |
 
-**Read the action column first.** Both full builds were entirely cache hits — zero remote
-executions — because the cluster had already seen both configurations and its cache cannot be
-evicted from outside. So 32.3s against 377.8s is not a compilation comparison. It is 1641 cache
-lookups against 15321, plus the splitting, which happens locally.
+**The body edit is 2.1x faster, and the action counts say why: 282 compiles sent to the cluster
+against 5.**
 
-The body edit is the only scenario where both sides genuinely compiled on the cluster. There
-the two builds are **within 7% of each other**. On this corpus, with a farm, per-function
-splitting is a wash.
+One function changed, so one function's object needed rebuilding — not the 194 translation
+units that happen to include the header it lives in. That is the entire claim of per-function
+splitting, and on a farm it is the difference between handing out 282 jobs and handing out 5.
 
-### Why, which is the useful part
+Where the remaining 67 seconds goes is worth being precise about, because it is not
+compilation. The launcher still runs for all 194 units, each re-checks its inputs, each
+relinks. Those are cache hits on the cluster now — the run recorded 1563 of them — but they are
+the floor on this row, and they are most of what is left.
 
-The claim was that splitting raises the ceiling on parallelism, and the claim is true. Two
-things stop it cashing out here, and both are visible in the table.
+### The full build is not a fair comparison, and this post will not pretend otherwise
 
-**The number of remote actions barely moves.** Editing `utf8_put_encode()` invalidates one
-piece in each of about 210 units; without the splitter it invalidates the whole translation
-unit in about 213. The farm is handed roughly the same number of jobs either way. Splitting
-makes each job far smaller, but the scheduler works with the count, and the count is the same.
+The plain `full` row is entirely cache hits: zero remote executions. The cluster had seen that
+configuration many times and its cache cannot be evicted from outside. So 32.8s against 404.7s
+is 1641 cache lookups against 15513 plus local splitting — not compilation. A cold-against-cold
+pair does not exist yet, and getting one needs a cache-busting knob that is the next thing to
+build.
 
-**The splitting itself does not distribute.** Every unit is parsed with libclang, its pieces
-written, and its objects combined with `ld -r`, all locally, before anything can be scheduled.
-That is the whole of the gap between the two no-op rows and most of the gap between the two
-full rows, and it grows with the number of translation units.
+### Linking is distributable too
 
-Which points at the shape of project this is actually for: **few, enormous translation units**,
-where a conventional build is pinned to one long pole and a split build is not. Boost.Spirit's
-tests are the opposite — 277 units of a few seconds each, which a farm already parallelises
-perfectly well without any help. The corpus chosen to be maximally hostile to the splitter on
-one machine turns out to be maximally *unhelpful* to it on many.
+A distributed split build compiles pieces remotely and then links each unit locally: one
+`ld -r` over every object that unit produced. The splitter now hands that to
+`tipi-linker-driver` when it is chained behind the compiler driver, which makes the link a
+cacheable action like any other — 66.6s against 65.6s doing it locally, so free, with ~800
+extra cache hits where 193 units relinked identically to last time and the cluster could say
+so.
 
-The full write-up, including what it still cannot say — there is no cold-against-cold pair, and
-the split build's 377.8s is not broken down into splitting, round trips and linking — is in
-`benchmarks/boost-spirit-cmake-re-bench-9-Sep-2026.md`.
+Against the old body target the same change looked like a 16-second penalty, because that edit
+changed a piece in 178 units and no link could be a cache hit. Which picture you get depends
+entirely on how much an edit actually invalidates — which is the same lesson as the target
+choice, arriving from a different direction.
 
 ## The honest summary
 
 On a corpus this hostile, per-function splitting turns a **73-second** rebuild after a header
-touch into an **8-second** one, and a real body edit from 73 seconds into 59, with nothing
-falling back to a plain compile.
+touch into an **8-second** one on a single machine, and on a build farm turns a **139-second**
+rebuild after a one-line function change into **67 seconds**, sending 5 compiles to the cluster
+where the ordinary build sends 282. Nothing falls back that is not `TODO/34`.
 
 It costs 10.9x the work on a cold build and 34x the disk. The disk is a real cost and this post
-has no answer to it.
+has no answer to it. The cold build has not been measured honestly yet — every full-build
+comparison here leans on a cache that cannot be evicted from outside — and until that is fixed
+the cold column is a number without a control.
 
-The cold build was supposed to be a different kind of number: more work, cut into far more
-independent jobs, each small enough to cache on its own and to hand to a different machine. On
-a real cluster that came out a wash — same job count on an incremental edit, and the splitting
-itself running locally where no farm can help.
-
-So the honest position is narrower than the one this post started with. Per-function splitting
-pays where an edit-build loop repeats work that one function's change should not have cost:
-8 seconds instead of 73 after a header touch, on one machine, with nothing falling back. It
-does not yet pay by making a build farm faster, and the corpus that would test that claim
-properly is one with few enormous translation units rather than 277 small ones. That is the
-next benchmark, and it is a different corpus rather than a different machine count.
+What can be said is narrower than "splitting makes builds faster", and more useful. It makes
+the work an edit causes proportional to what the edit actually changed, instead of to the file
+it happened to be written in. On one machine that shows up as a faster edit-build loop. On a
+farm it shows up as far fewer jobs to hand out. And it shows up **only** when the edit is
+smaller than the file — which is the normal case, and precisely why the benchmark had to be
+built to measure it rather than around it.
