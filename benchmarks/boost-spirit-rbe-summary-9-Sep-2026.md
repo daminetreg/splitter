@@ -17,9 +17,8 @@ pieces back with `ld -r`.
 |---|---|
 | Machine | AMD EPYC-Milan, 32 cores, 122 GiB RAM |
 | Compiler | clang 13.0.0 (tipi toolchain `4f846ee`), C++17, **Release** |
-| Build system | CMake RE v0.0.88, `-j500` |
-| Execution | EngFlow RBE, `opal.cluster.engflow.com:443`, mTLS |
-| Command | `BUILD_TYPE=Release CMAKE_RE_JOBS=500 ./benchmark-spirit-cmake-re.sh --distributed` |
+| Build system | CMake RE v0.0.88 |
+| Execution | EngFlow RBE at `opal.cluster.engflow.com:443` over mTLS (`-j500`), and this machine alone (`-j16`) |
 
 ## The five scenarios
 
@@ -68,47 +67,82 @@ nothing.
 cluster, and actions served from its cache. Wall time alone cannot tell those apart, and they
 differ by an order of magnitude.
 
+### On the cluster, `-j500`
+
 | scenario | splitter | wall | fallbacks | remote | cached |
 |---|---|---:|---:|---:|---:|
-| full | no | 33.5s | 0 | 0 | 1641 |
-| full | yes | 554.7s | 0 | 5178 | 351 |
-| no-op | no | 11.9s | 0 | 0 | 0 |
-| no-op | yes | 17.8s | 0 | 0 | 1635 |
+| full | no | 32.1s | 0 | 0 | 1641 |
+| full | yes | 456.0s | 0 | 0 | 15885 |
+| no-op | no | 12.0s | 0 | 0 | 0 |
+| no-op | yes | 17.7s | 0 | 0 | 1635 |
 | one source | no | 11.9s | 0 | 0 | 0 |
-| one source | yes | 13.8s | 0 | 0 | 0 |
-| one header | no | 11.9s | 0 | 0 | 0 |
+| one source | yes | 13.9s | 0 | 0 | 0 |
+| one header | no | 12.0s | 0 | 0 | 0 |
 | one header | yes | 13.8s | 0 | 0 | 0 |
-| **one body** | **no** | **224.2s** | **0** | **271** | 762 |
-| **one body** | **yes** | **75.2s** | **0** | **1** | 1575 |
+| **one body** | **no** | **136.2s** | **0** | **271** | 762 |
+| **one body** | **yes** | **74.9s** | **0** | **1** | 1575 |
 
-**Nothing falls back to a plain compile on any row**, in either configuration.
+### On this machine alone, `-j16`
 
-## Reading the table
+No cluster, so no per-action records exist and the last two columns cannot be filled in.
 
-**The body edit is the result.** 224.2s against 75.2s, and the action counts say why: the
-ordinary build executes **271** compiles on the cluster, the split build **one**. A content
+| scenario | splitter | wall | fallbacks |
+|---|---|---:|---:|
+| full | no | 64.2s | 0 |
+| full | yes | 654.5s | 0 |
+| no-op | no | 12.0s | 0 |
+| no-op | yes | 17.5s | 0 |
+| one source | no | 11.8s | 0 |
+| one source | yes | 13.6s | 0 |
+| one header | no | 11.8s | 0 |
+| one header | yes | 13.7s | 0 |
+| one body | no | 63.2s | 0 |
+| one body | yes | 90.2s | 0 |
+
+**Nothing falls back to a plain compile on any row, in either mode.**
+
+## Reading the tables
+
+**The body edit is the result.** On the cluster, 136.2s against 74.9s — and the action counts
+say why: the ordinary build executes **271** compiles, the split build **one**. A content
 change gives every affected unit a new action key, so nothing the ordinary build needs can come
 from cache; it genuinely recompiles all 271. The split build rebuilds the single piece that
-changed and takes 1575 cache hits for everything else.
+changed and takes 1575 cache hits for the rest.
 
 That is the whole claim of per-function splitting: the work an edit causes is proportional to
 what the edit changed, not to the file it was written in.
 
-**The two full rows are not a like-for-like comparison in this run.** The ordinary build was
-served entirely from the cluster's cache (0 executed) while the split build executed 5178
-actions. They measure different things and their ratio is meaningless.
+**The full rows measure overhead, not compilation.** Both are now served entirely from the
+cluster's cache — zero executions on either side — so they are directly comparable and what
+they compare is bookkeeping: 1641 cache lookups against 15885, 32.1s against 456.0s. That is
+the standing cost of carrying 9.7x more actions, paid on a build where nothing needed
+compiling.
 
-**The touch rows behave as designed** — both configurations do nothing, and the splitter adds
-about 2 seconds of launcher overhead across 277 units.
+**On one machine the cold full build costs 10.2x**, 64.2s against 654.5s. One object per
+function is strictly more work, and without a farm or a cache there is nothing to absorb it.
 
-**The no-op row is not free for the split build**, 11.9s against 17.8s. Nothing is compiled;
+**The touch rows behave as designed.** Both configurations do nothing: CMake RE mirrors sources
+by content, so a file whose bytes did not change is not re-mirrored. The splitter adds about
+two seconds of launcher overhead across 277 units.
+
+**The no-op row is not free for the split build**, 12.0s against 17.7s. Nothing is compiled;
 the difference is 1635 cache lookups where the ordinary build needs none.
 
 ## Caveats
 
-- **The body row is noisy on the ordinary side.** It executes 271 real compiles, and cluster
-  load moves that by roughly a factor of two between runs. The action counts, 271 against 1,
-  are the stable part of the result.
+- **`--host` rows cannot distinguish work from cache.** Without a cluster there are no
+  per-action records, so a fast row there cannot be shown to have compiled anything. An earlier
+  pass in this same configuration reported the full split build at 78.5s rather than 654.5s;
+  the difference is far too large to be the code change between them, and the likely
+  explanation is a warm cache the driver could still reach. Treat the `-j16` table as
+  indicative and the cluster table as measured.
+- **The `one body` row under `--host` is not incremental.** It reads 90.2s against a 654.5s
+  full build, but a content change makes CMake RE re-execute the whole graph, and with no cache
+  there is nothing to absorb the parts that did not really change. It is a partial rebuild
+  wearing an incremental label.
+- **The body row is noisy on the ordinary side.** It executes 271 real compiles and cluster
+  load moves that substantially between runs. The action counts, 271 against 1, are the stable
+  part of the result.
 - **One edit is not a distribution of edits.** This one has a reach-to-use ratio of 194:1. An
   edit to something used as widely as it is included would show both builds doing the same
   work.
@@ -120,6 +154,7 @@ the difference is 1635 cache lookups where the ordinary build needs none.
 
 ```sh
 BUILD_TYPE=Release CMAKE_RE_JOBS=500 ./benchmark-spirit-cmake-re.sh --distributed
+BUILD_TYPE=Release CMAKE_RE_JOBS=16  ./benchmark-spirit-cmake-re.sh --host
 ```
 
 Credentials are mTLS, read from `~/engflow-mTLS` unless `ENGFLOW_MTLS_DIR` says otherwise.

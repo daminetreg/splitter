@@ -222,12 +222,12 @@ earlier attempts managed.
 
 | scenario | splitter | wall | remote executions |
 |---|---|---:|---:|
-| full | no | **154.8s** | 547 |
-| full | yes | **537.4s** | 5249 |
-| **one body** | **no** | **224.2s** | **271** |
-| **one body** | **yes** | **75.2s** | **1** |
+| full | no | 32.1s | 0 (all cached) |
+| full | yes | 456.0s | 0 (all cached) |
+| **one body** | **no** | **136.2s** | **271** |
+| **one body** | **yes** | **74.9s** | **1** |
 
-**The body edit is 3.0x faster, executing one compile where the ordinary build executes 271** —
+**The body edit is 1.8x faster, executing one compile where the ordinary build executes 271** —
 and nothing falls back on any row.
 
 A content change gives every affected unit a new action key, so nothing the plain build needs
@@ -251,44 +251,20 @@ behind. Under real load, 500-way parallelism absorbs most of it and the penalty 
 what the cached measurement implied. Cold is the number that matters and it is the one that was
 hardest to get.
 
-### And on one machine, in Release, it nearly pays for itself anyway
+### And on one machine, in Release, it costs about 10x
 
-Same benchmark, `--host`, `-j16`: a cold full build is **63.6s plain against 78.5s split**.
-1.23x, where the Debug measurement at the top of this post says 10.9x.
+Same benchmark, `--host`, `-j16`: a full build is **64.2s plain against 654.5s split**.
 
-Most of that gap is debug information. Every piece carries the debug info of the preamble it
-includes, and on Spirit that preamble is most of Boost. Strip it and the extra objects are
-cheap. The split tree is still 38G against 85M — the disk cost is real and unaddressed — but
-the *time* cost of splitting, in Release, is nearly gone.
+An earlier pass in exactly this configuration reported 78.5s, and I wrote here that splitting
+"nearly pays for itself" without a farm. That was wrong, and the way it was wrong is worth
+keeping: with no cluster there are no per-action records, so nothing in a `--host` run
+distinguishes work done from work served out of a cache the compiler driver could still reach.
+The 78.5s was almost certainly cached; 654.5s is what the build costs. One object per function
+is more work, and on one machine there is nothing to absorb it.
 
-One caveat, because the table would otherwise mislead: the `one body` row under `--host` reads
-78.3s, essentially the full-build number, and that is exactly what it is. A content change
-under cmake-re re-executes the whole graph — 525 edges — and on one machine there is no cache
-to absorb the parts that did not really change. That row is a second full build wearing an
-incremental label. The edit-build loop is what the single-machine numbers at the top of this
-post measure, with ordinary CMake and ninja.
-
-### The last five fallbacks were a defect filed under the wrong name
-
-Until this week five of the 277 units fell back, and the report was titled after what it looked
-like: the splitter had inserted `inline` into the middle of an alias template in
-`boost/mp11/algorithm.hpp`, so the rewritten header would not compile. The proposed fix was to
-stop harvesting alias templates.
-
-That would have treated a symptom. The clue was recorded in the report and not followed: the
-same 277 sources split cleanly under the single-machine benchmark. Nothing about alias
-templates differed between the two builds — the *invocation* did.
-
-cmake-re composes the launcher as `<cpp-splitter>;tipi-compiler-driver`, so the splitter is run
-as `cpp-splitter tipi-compiler-driver clang++ …` and `argv[1]` is a launcher, not a compiler.
-The splitter probed `argv[1]` to ask where the system headers live. A launcher cannot answer
-`-x c++ -E -dM /dev/null`; it came back empty, and libclang then parsed a translation unit
-without the compiler's include paths — one the compiler would never have seen. The corrupted
-alias was just where the wrong offsets happened to land.
-
-The fix is one line. The lesson is that a defect named after its symptom sends you to the wrong
-file, and that "the same input works under a different invocation" is a fact worth chasing
-immediately rather than logging as an open question.
+The `one body` row there reads 90.2s, and it is not an incremental number either: a content
+change makes CMake RE re-execute the whole graph, and locally there is no cache to absorb the
+parts that did not really change.
 
 ### Linking is distributable too
 
