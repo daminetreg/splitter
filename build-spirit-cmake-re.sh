@@ -22,6 +22,7 @@
 #   ./build-spirit-cmake-re.sh --split              # through cpp-splitter as compiler launcher
 #   ./build-spirit-cmake-re.sh --distributed        # on the RBE cluster
 #   ./build-spirit-cmake-re.sh --distributed --split
+#   ./build-spirit-cmake-re.sh --distributed --split --clean   # force a cold build
 #   CMAKE_RE_JOBS=200 ./build-spirit-cmake-re.sh --distributed
 #
 # RBE credentials are mTLS: the cluster authenticates the client by its certificate, so there
@@ -44,14 +45,32 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORIGIN="$REPO/example/spirit-tests"
+
+# Which cmake-re to drive.
+#
+# Putting cpp-splitter in front of the compiler needs a cmake-re that understands
+# CMAKE_<LANG>_COMPILER_LAUNCHER and CMAKE_<LANG>_LINKER_LAUNCHER: it sets a launcher of its
+# own (tipi-compiler-driver, which is how the action reaches the cluster), so a build that also
+# wants the splitter needs the two composed rather than one overwriting the other. v0.0.87 on
+# PATH does not do that; the binary in cmake-re-dev-latest/ does. Prefer it when it is there.
+CMAKE_RE="${CMAKE_RE:-}"
+if [ -z "$CMAKE_RE" ]; then
+    if [ -x "$REPO/cmake-re-dev-latest/cmake-re" ]; then
+        CMAKE_RE="$REPO/cmake-re-dev-latest/cmake-re"
+    else
+        CMAKE_RE="$(command -v cmake-re || true)"
+    fi
+fi
 SOURCE="$REPO/example/boost-to-split/cmake-re"
 USE_SPLITTER=0
 DISTRIBUTED=0
+CLEAN=0
 
 for arg in "$@"; do
     case "$arg" in
         --split) USE_SPLITTER=1 ;;
         --distributed) DISTRIBUTED=1 ;;
+        --clean) CLEAN=1 ;;
         --host) ;;   # the default, and accepted so the two can be written together
         --help|-h) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -131,11 +150,13 @@ export TIPI_DISABLE_AR_RANLIB_DRIVER="ON"
 export TIPI_CACHE_CONSUME_ONLY="ON"
 export TIPI_CACHE_FORCE_ENABLE="OFF"
 
-if ! command -v cmake-re >/dev/null 2>&1; then
-    echo "cmake-re is not installed. Install it with:" >&2
+if [ -z "$CMAKE_RE" ] || [ ! -x "$CMAKE_RE" ]; then
+    echo "cmake-re not found. Install it with:" >&2
     echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"' >&2
+    echo "or set CMAKE_RE to a binary." >&2
     exit 1
 fi
+echo "==> cmake-re:     $CMAKE_RE ($("$CMAKE_RE" --info 2>/dev/null | awk '/^version:/ {print $2}'))"
 
 # Only reported, never required: --host does not use docker. It is what --remote and
 # --distributed would need, and knowing it is absent explains why this script uses --host.
@@ -189,7 +210,7 @@ echo "==> installed the cmake-re project into $SOURCE"
 SHIM_DIR="$REPO/build/.tipi-drivers"
 prepare_drivers() {
     local home needed=0 src name
-    home="$(cmake-re --info 2>/dev/null | awk '/^tipi_home_dir:/ {print $2}')"
+    home="$("$CMAKE_RE" --info 2>/dev/null | awk '/^tipi_home_dir:/ {print $2}')"
     [ -n "$home" ] || home=/usr/local/share/.tipi
 
     for src in $(find "$home" -maxdepth 3 -type f -name 'tipi-*-driver' 2>/dev/null); do
@@ -226,6 +247,9 @@ if [ "$USE_SPLITTER" = 1 ]; then
               -DCMAKE_TOOLCHAIN_FILE="$REPO/environments/monolithic.cmake" >/dev/null
         cmake --build "$REPO/build" -j"$(nproc)" >/dev/null
     fi
+    # C++ only: cpp-splitter parses C++ with libclang and has nothing to do with C sources.
+    # No LINKER_LAUNCHER either -- the splitter does its own `ld -r` inside the compile step,
+    # and the final link is an ordinary one.
     launcher_args+=("-DCMAKE_CXX_COMPILER_LAUNCHER=$REPO/build/cpp-splitter")
 fi
 
@@ -235,8 +259,21 @@ echo "==> jobs:      $JOBS"
 echo "==> mode:      ${MODE_FLAGS[*]}"
 echo "==> splitter:  $([ "$USE_SPLITTER" = 1 ] && echo yes || echo no)"
 
+# Removing -B is not enough to force a cold build. cmake-re keys its real build directory on
+# the configuration, so an identical configure lands back on the same one and ninja reports
+# "no work to do" over outputs an earlier run produced -- which, after a run that fell back,
+# means a green build measuring nothing. --clean removes the directory -B resolves to.
+if [ "$CLEAN" = 1 ]; then
+    resolved="$(readlink -f "$BUILD" 2>/dev/null || true)"
+    if [ -n "$resolved" ] && [ -d "$resolved" ]; then
+        echo "==> clean: removing $resolved"
+        rm -rf "$resolved"
+    fi
+    rm -rf "$BUILD"
+fi
+
 echo "==> configure"
-cmake-re "${MODE_FLAGS[@]}" \
+"$CMAKE_RE" "${MODE_FLAGS[@]}" \
     -S "$SOURCE" \
     -B "$BUILD" \
     -j "$JOBS" \
@@ -247,7 +284,7 @@ cmake-re "${MODE_FLAGS[@]}" \
 # `--build` has to be the first argument: cmake-re dispatches on it to pick the subcommand, and
 # putting --host ahead of it is a usage error rather than a flag ordering nicety.
 echo "==> build"
-cmake-re --build "$BUILD" "${MODE_FLAGS[@]}" -j "$JOBS"
+"$CMAKE_RE" --build "$BUILD" "${MODE_FLAGS[@]}" -j "$JOBS"
 
 # -B is a symlink into the mirror rather than a directory, so anything reporting on it has to
 # resolve it first. cmake-re builds out of its own copy of the source tree, which is why the

@@ -5067,6 +5067,26 @@ static int run_as_launcher(int argc, char* argv[]) {
       auto actual_compiler = *split_flags.begin();
       split_flags = std::vector<std::string>(split_flags.begin()+1, split_flags.end());
     }
+
+    // Being chained behind another launcher.
+    //
+    // cmake-re composes CMAKE_CXX_COMPILER_LAUNCHER as "<cpp-splitter>;tipi-compiler-driver",
+    // so this process is invoked as `cpp-splitter tipi-compiler-driver clang++ <flags>` and
+    // argv[1] is a launcher rather than a compiler. The real compiler is the argument after
+    // it, and the two have to stay adjacent in everything re-invoked: a driver handed
+    // `-I/some/dir` where it expects the compiler treats it as its own flag, prints its usage
+    // and exits non-zero. That is what made every unit of a distributed Boost.Spirit build
+    // fall back -- 279 fallbacks over 277 units, each one silently compiled whole.
+    //
+    // compile_prefix is therefore what a command starts with, and compile_flags is what is
+    // left once the compiler has been taken out of the flags.
+    const bool chained_behind_driver = (compiler == "tipi-compiler-driver") && !other_flags.empty();
+    std::string compile_prefix = shell_quote(compiler);
+    std::vector<std::string> compile_flags = other_flags;
+    if (chained_behind_driver) {
+        compile_prefix += " " + shell_quote(compile_flags.front());
+        compile_flags.erase(compile_flags.begin());
+    }
     
     const std::string inputs_hash = split_inputs_hash(split_dir, input_file, split_flags);
 
@@ -5159,7 +5179,7 @@ static int run_as_launcher(int argc, char* argv[]) {
             continue;
         }
 
-        std::string cmd = shell_quote(compiler);
+        std::string cmd = compile_prefix;
 
         // The split tree has to precede the project's own include directories. Its
         // rewritten headers are the ones whose definitions were moved into split files;
@@ -5176,7 +5196,7 @@ static int run_as_launcher(int argc, char* argv[]) {
         // rewritten headers still win.
         cmd += " -I" + shell_quote(fs::absolute(input_file).parent_path().string());
 
-        for (const auto& f : other_flags)
+        for (const auto& f : compile_flags)
             cmd += " " + shell_quote(f);
 
         if (fi == 0 && (has_md || has_mmd)) {
@@ -5226,7 +5246,7 @@ static int run_as_launcher(int argc, char* argv[]) {
             std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
             if (!fs::exists(hcpp)) continue;
             if (!fs::exists(hobj) || needs_recompile(hcpp, hobj, "")) {
-                std::string cmd = shell_quote(compiler);
+                std::string cmd = compile_prefix;
                 // The unit's own preamble lives at the root of the split directory, and the
                 // header pieces include it for context. The split tree precedes the
                 // project's own include directories for the reason above.
@@ -5235,7 +5255,7 @@ static int run_as_launcher(int argc, char* argv[]) {
                 for (const auto& hdr_dir : sr.header_obj_dirs)
                     cmd += " -I" + shell_quote(hdr_dir);
                 cmd += " -I" + shell_quote(fs::absolute(input_file).parent_path().string());
-                for (const auto& f : other_flags)
+                for (const auto& f : compile_flags)
                     cmd += " " + shell_quote(f);
 
                 // The dependency flags normally go to the unit's first piece. A unit whose
