@@ -23,8 +23,8 @@
 #   one source   touch one test .cpp.
 #   one header   touch a Spirit header every target includes -- timestamp only, content
 #                identical, so the split cache should recognise the inputs (TODO 14).
-#   one body     change the body of one ordinary inline function in a header the splitter
-#                emits a piece for. See BODY_HEADER below for why that qualification matters.
+#   one body     change the body of standard_wide::toucs4(), in a header nearly every unit
+#                includes and exactly one of them emits. See BODY_HEADER below.
 #
 # Fallbacks are reported on every row rather than aborting the run, as in the Geometry test
 # benchmark: on a library's own test suite a fallback is a finding, and a row where the
@@ -49,36 +49,40 @@ TARGETS=""
 SOURCE="$BOOST/libs/spirit/test/qi/char1.cpp"
 HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/char_encoding/standard.hpp"
 
-# A different header for the body edit, and the reason is the point of that row.
+# A different header for the body edit, and which function is edited decides what the row can
+# show.
 #
-# Nearly all of Spirit is templates, and the splitter keeps a template in the preamble without
-# emitting a piece for it (TODO 27) -- so editing one could never recompile "one piece", only
-# force every unit that includes it to be re-split. Timing that and calling it the body-edit
-# row measures the worst case and reports it as the design case, which is the mistake the
-# Geometry benchmark made until 8 September.
+# Two things have to hold. The definition must be one the splitter can move out of the header
+# at all -- nearly all of Spirit is templates, which stay in the preamble with no piece emitted
+# (TODO 27), so editing one could only measure the splitter's worst case while looking like its
+# design case. And the header must be included far more widely than the function is used.
 #
-# utf8_put_encode() is an ordinary non-template free function in Spirit's own header, and the
-# splitter emits and compiles a real piece for it. Of the handful of Spirit headers
-# contributing any compiled piece at all it is the one reaching the most units:
-# char_encoding/standard.hpp's members are all kept as "not emitted by this translation unit",
-# and char_encoding/ascii.hpp's reach fewer.
-BODY_HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/utf8.hpp"
+# standard_wide::toucs4() is both: 194 of the units include the header and exactly 1 emits a
+# piece for it. A plain build recompiles all 194 because the header changed. A split build
+# re-runs the launcher for all 194 too, but only that one unit has a piece to recompile -- the
+# other 193 keep the definition in their rewritten copy, and piece recompilation is decided
+# from the piece source and the preamble, neither of which moved.
+#
+# The previous target, utf8_put_encode(), was emitted in 178 of the 180 units that include it,
+# so both builds did the same amount of work and the row measured nothing but the fixed cost
+# per unit. Reach and use have to differ for this row to say anything.
+BODY_HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/char_encoding/standard_wide.hpp"
 BODY_BACKUP="$(mktemp)"
 
 # The body edit rewrites a tracked source file, so restore it whatever happens.
 cp "$BODY_HEADER" "$BODY_BACKUP"
 trap 'cp "$BODY_BACKUP" "$BODY_HEADER"; rm -f "$BODY_BACKUP"' EXIT
 
-# Change the body of utf8_put_encode() without changing what it does. Each call inserts a
-# different marker, so successive edits are genuinely different text.
+# Change the body of toucs4() without changing what it does. Each call inserts a different
+# marker, so successive edits are genuinely different text.
 patch_body() {
     python3 - "$BODY_HEADER" "$1" <<'PROBE'
 import sys
 path, marker = sys.argv[1], sys.argv[2]
-signature = "    inline void utf8_put_encode(utf8_string& out, ucs4_char x)\n    {\n"
+signature = "        toucs4(wchar_t ch)\n        {\n"
 src = open(path).read()
 assert src.count(signature) == 1, "benchmark probe target moved"
-src = src.replace(signature, signature + "        (void)%s;  // benchmark probe\n" % marker, 1)
+src = src.replace(signature, signature + "            (void)%s;  // benchmark probe\n" % marker, 1)
 open(path, "w").write(src)
 PROBE
 }

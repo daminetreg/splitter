@@ -18,8 +18,20 @@
 #   no-op        a settled tree should do nothing.
 #   one source   touch one test .cpp -- timestamp only, content identical.
 #   one header   touch a widely included header -- timestamp only, content identical.
-#   one body     change the body of utf8_put_encode(), an ordinary non-template inline
-#                function the splitter emits a real piece for in 269 of the 277 units.
+#   one body     change the body of standard_wide::toucs4(), an ordinary non-template function
+#                in a header 194 of the units include and exactly 1 of them emits.
+#
+# That last choice is the point of this benchmark rather than a detail. A plain build has to
+# recompile every unit that includes the header -- 194 of them -- because the header changed.
+# A split build re-runs the launcher for all 194 too, but only the unit that actually emits the
+# function has a piece to recompile: the other 193 keep the definition in their rewritten copy,
+# and the splitter decides piece recompilation from the piece source and the preamble, neither
+# of which moved. So the work that distributes drops from ~178 remote compiles, which is what
+# editing utf8_put_encode costs, to one.
+#
+# Measured with utf8_put_encode -- emitted in 178 of the 180 units that include it -- the row
+# was a wash: 210 remote actions against the plain build's 213. This is the same edit shaped to
+# ask whether that was the splitter failing or the target failing to discriminate.
 #
 # The two touch rows are free by construction here and that is worth stating rather than
 # hiding: cmake-re mirrors sources by content, so a file whose bytes did not change is not
@@ -40,7 +52,7 @@ DRIVER="$REPO/build-spirit-cmake-re.sh"
 
 SOURCE="$BOOST/libs/spirit/test/qi/char1.cpp"
 HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/char_encoding/standard.hpp"
-BODY_HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/utf8.hpp"
+BODY_HEADER="$BOOST/libs/spirit/include/boost/spirit/home/support/char_encoding/standard_wide.hpp"
 BODY_BACKUP="$(mktemp)"
 cp "$BODY_HEADER" "$BODY_BACKUP"
 trap 'cp "$BODY_BACKUP" "$BODY_HEADER"; rm -f "$BODY_BACKUP"' EXIT
@@ -49,10 +61,10 @@ patch_body() {
     python3 - "$BODY_HEADER" "$1" <<'PROBE'
 import sys
 path, marker = sys.argv[1], sys.argv[2]
-signature = "    inline void utf8_put_encode(utf8_string& out, ucs4_char x)\n    {\n"
+signature = "        toucs4(wchar_t ch)\n        {\n"
 src = open(path).read()
 assert src.count(signature) == 1, "benchmark probe target moved"
-src = src.replace(signature, signature + "        (void)%s;  // benchmark probe\n" % marker, 1)
+src = src.replace(signature, signature + "            (void)%s;  // benchmark probe\n" % marker, 1)
 open(path, "w").write(src)
 PROBE
 }

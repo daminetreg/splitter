@@ -49,8 +49,9 @@ named after a hash of the include directives alone, which do not change when one
 headers they name is edited, so 2 of the 12 units were handed a stale PCH, failed to parse and
 compiled whole — silently, because that message was gated on `CPP_SPLITTER_VERBOSE`. Every
 other row is unaffected: they either parse nothing or start from a clean tree. Re-measured
-with the PCH fix in place the row is 0.7s against 1.9s, 2.8x slower. See
-`boost-spirit-bench-6-Sep-2026.md`.
+with the PCH fix in place the row is 0.7s against 1.9s, 2.8x slower. The Spirit benchmark that
+turned that defect up was dropped when its body-edit target was replaced; `TODO/12` and the
+`launcher.header_edit_behind_pch` fixture are what remain of it.
 
 | artefact | plain | split |
 |---|---|---|
