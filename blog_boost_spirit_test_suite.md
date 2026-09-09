@@ -224,22 +224,26 @@ earlier attempts managed.
 |---|---|---:|---:|
 | full | no | **154.8s** | 547 |
 | full | yes | **537.4s** | 5249 |
-| **one body** | **no** | **159.1s** | **271** |
-| **one body** | **yes** | **71.8s** | **3** |
+| **one body** | **no** | **224.2s** | **271** |
+| **one body** | **yes** | **75.2s** | **1** |
 
-**The body edit is 2.2x faster, executing 3 compiles where the ordinary build executes 271.**
+**The body edit is 3.0x faster, executing one compile where the ordinary build executes 271** —
+and nothing falls back on any row.
 
 A content change gives every affected unit a new action key, so nothing the plain build needs
 can come from the cache — it genuinely recompiles 271 units, because 194 of them include the
-header that changed. The split build compiles 3 things and takes 1569 cache hits: its pieces
-did not change, so the cluster already had them.
+header that changed. The split build compiles **one** thing and takes 1575 cache hits: its other pieces did not
+change, so the cluster already had them.
 
 That is the whole claim of per-function splitting, and a content-addressed cache is what
 rewards it. One function changed, so one function's object needed building.
 
 ### The cold full build costs 3.5x, not the 11.8x a warm cache suggested
 
-Both full rows executed everything, no cache hits on either side. 154.8s against 537.4s.
+Both full rows executed everything, no cache hits on either side. 154.8s against 537.4s. (The
+body-edit figures above are from a later pass, after the last fallbacks were fixed; the plain
+side of that row is noisy, having read anywhere from 118s to 224s across four runs while
+executing the same 271 compiles. The action counts are the stable part.)
 
 Earlier, with both sides *cache-served*, the same rows read 11.8x — but that comparison had no
 compiling in it at all, so the split build's 9.8x-larger action count had nothing to hide
@@ -263,6 +267,28 @@ under cmake-re re-executes the whole graph — 525 edges — and on one machine 
 to absorb the parts that did not really change. That row is a second full build wearing an
 incremental label. The edit-build loop is what the single-machine numbers at the top of this
 post measure, with ordinary CMake and ninja.
+
+### The last five fallbacks were a defect filed under the wrong name
+
+Until this week five of the 277 units fell back, and the report was titled after what it looked
+like: the splitter had inserted `inline` into the middle of an alias template in
+`boost/mp11/algorithm.hpp`, so the rewritten header would not compile. The proposed fix was to
+stop harvesting alias templates.
+
+That would have treated a symptom. The clue was recorded in the report and not followed: the
+same 277 sources split cleanly under the single-machine benchmark. Nothing about alias
+templates differed between the two builds — the *invocation* did.
+
+cmake-re composes the launcher as `<cpp-splitter>;tipi-compiler-driver`, so the splitter is run
+as `cpp-splitter tipi-compiler-driver clang++ …` and `argv[1]` is a launcher, not a compiler.
+The splitter probed `argv[1]` to ask where the system headers live. A launcher cannot answer
+`-x c++ -E -dM /dev/null`; it came back empty, and libclang then parsed a translation unit
+without the compiler's include paths — one the compiler would never have seen. The corrupted
+alias was just where the wrong offsets happened to land.
+
+The fix is one line. The lesson is that a defect named after its symptom sends you to the wrong
+file, and that "the same input works under a different invocation" is a fact worth chasing
+immediately rather than logging as an open question.
 
 ### Linking is distributable too
 

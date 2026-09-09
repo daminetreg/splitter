@@ -194,6 +194,17 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunHeaderVariableTest.cmake)
 
+# TODO/34: chained behind another compiler launcher, the splitter must probe the real compiler
+# for system includes rather than the launcher in front of it.
+add_test(
+  NAME launcher.chained_behind_driver
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/chained_driver_main.cpp
+          -DWORKDIR=${cpp_splitter_test_output}/chained_driver
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunChainedDriverTest.cmake)
+
 # TODO/31: a rewritten header's quoted include must still resolve from inside the mirror.
 add_test(
   NAME launcher.quoted_include_in_mirror

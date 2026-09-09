@@ -4984,6 +4984,39 @@ static bool try_incremental_split(const std::string& split_dir,
 // does the combining stops being an incidental choice. `CPP_SPLITTER_LINKER` names the
 // program; it defaults to `ld` and is passed `-r` either way, since mold, lld and GNU ld all
 // spell relocatable output the same. Set it to `mold` or `ld.lld` to try another.
+// Where a bare program name resolves on PATH, or empty if it does not resolve at all.
+//
+// Needed twice, and for the same underlying reason: the tipi drivers exec what they are given
+// rather than going through a shell, so they need an absolute path -- and a build can have the
+// compiler driver without the linker driver, in which case asking for the latter has to be a
+// question rather than an assumption.
+static std::string which_on_path(const std::string& name) {
+    if (name.find('/') != std::string::npos)
+        return fs::exists(name) ? name : std::string();
+    const char* path_env = std::getenv("PATH");
+    const std::string path = path_env ? path_env : "";
+    size_t pos = 0;
+    while (pos <= path.size()) {
+        const size_t sep = path.find(':', pos);
+        const std::string dir =
+            path.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
+        std::error_code ec;
+        if (!dir.empty()) {
+            const fs::path cand = fs::path(dir) / name;
+            // Executable, not merely present. tipibuild/tipi-ubuntu-2404 ships every
+            // tipi-*-driver as -rwxrw-r-- owned by `tipi`, so a build running as any other
+            // uid finds the file and cannot run it -- and a link driven at it dies with
+            // "Permission denied", falls the unit back, and writes no split cache (TODO/31).
+            if (fs::exists(cand, ec) && !fs::is_directory(cand, ec) &&
+                ::access(cand.c_str(), X_OK) == 0)
+                return cand.string();
+        }
+        if (sep == std::string::npos) break;
+        pos = sep + 1;
+    }
+    return std::string();
+}
+
 static std::string relocatable_linker() {
     const char* env = std::getenv("CPP_SPLITTER_LINKER");
     if (env && *env) return env;
@@ -4993,8 +5026,26 @@ static std::string relocatable_linker() {
 static int run_as_launcher(int argc, char* argv[]) {
     bool verbose = launcher_verbose();
     std::string compiler = argv[1];
+
+    // What the system-include and default-standard probes run against.
+    //
+    // Not necessarily argv[1]. cmake-re composes CMAKE_CXX_COMPILER_LAUNCHER as
+    // "<cpp-splitter>;tipi-compiler-driver", so this process is invoked as
+    // `cpp-splitter tipi-compiler-driver clang++ <flags>` and argv[1] is a launcher. Probing
+    // *it* runs `tipi-compiler-driver -x c++ -E -dM /dev/null`, which the driver answers by
+    // trying to exec `-x` as the compiler and dying:
+    //
+    //     execve failed: No such file or directory
+    //
+    // Both probes then return nothing, so the parse gets no system include paths and no
+    // probed standard. libclang parses something that is not the translation unit the
+    // compiler sees, the harvest comes out of a broken AST, and the damage surfaces far away
+    // -- `inline` inserted into the middle of an alias template in boost/mp11/algorithm.hpp,
+    // five Boost.Spirit units falling back, and a defect report about alias templates that
+    // had nothing to do with alias templates. See TODO/34.
+    //
     // Probed lazily, once, the first time flags are built for a parse.
-    g_compiler = compiler;
+    g_compiler = (compiler == "tipi-compiler-driver" && argc > 2) ? argv[2] : compiler;
 
     std::string input_file;
     std::string output_file;
@@ -5351,29 +5402,22 @@ static int run_as_launcher(int argc, char* argv[]) {
             // the driver is cacheable where a local one is not -- which is worth more on a
             // machine with fewer cores than this one, or on a rebuild the cluster has already
             // seen. CPP_SPLITTER_NO_LINKER_DRIVER=1 turns it off; benchmarks/ has the numbers.
-            const bool driven_link =
-                chained_behind_driver && !std::getenv("CPP_SPLITTER_NO_LINKER_DRIVER");
+            // Asking whether the linker driver is there, rather than assuming it. A build can
+            // be chained behind the compiler driver without the linker driver being on PATH --
+            // every test fixture that stubs the former is exactly that case -- and driving the
+            // link at a program that does not exist fails the link, which falls back the whole
+            // unit and writes no split cache (TODO/31). Degrade to a plain `ld -r` instead.
+            const std::string linker_driver =
+                (chained_behind_driver && !std::getenv("CPP_SPLITTER_NO_LINKER_DRIVER"))
+                    ? which_on_path("tipi-linker-driver")
+                    : std::string();
+            const bool driven_link = !linker_driver.empty();
             // Resolved to an absolute path before it is handed over. The driver execs the
             // linker itself rather than going through a shell, so a bare `ld` that PATH would
             // have found dies as `execve failed: No such file or directory`.
-            std::string driven_linker = linker;
-            if (driven_link && driven_linker.find('/') == std::string::npos) {
-                const char* path_env = std::getenv("PATH");
-                std::string path = path_env ? path_env : "";
-                size_t pos = 0;
-                while (pos <= path.size()) {
-                    const size_t sep = path.find(':', pos);
-                    const std::string dir =
-                        path.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
-                    std::error_code ec;
-                    const fs::path cand = fs::path(dir.empty() ? "." : dir) / linker;
-                    if (!dir.empty() && fs::exists(cand, ec)) { driven_linker = cand.string(); break; }
-                    if (sep == std::string::npos) break;
-                    pos = sep + 1;
-                }
-            }
+            const std::string driven_linker = driven_link ? which_on_path(linker) : linker;
             std::string cmd = driven_link
-                                  ? "tipi-linker-driver " + shell_quote(driven_linker)
+                                  ? shell_quote(linker_driver) + " " + shell_quote(driven_linker)
                                   : shell_quote(linker);
             cmd += " -r -o " + shell_quote(output_file);
             for (const auto& obj : obj_files)
