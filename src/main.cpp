@@ -3725,16 +3725,26 @@ static void resolve_header_deps(CXTranslationUnit tu,
         const std::string src = read_file(inc_path);
         if (src.empty()) continue;
 
-        if (fns.empty()) {
+        // Variables count, not only functions. A header that defines a namespace-scope
+        // variable and no function still has to be rewritten: the preamble includes it in the
+        // ordinary way and every piece includes the preamble, so the definition is compiled
+        // once per piece and `ld -r` rejects the copies --
+        // `multiple definition of 'unsigned_overflow_base35'` on Boost.Spirit's uint_radix
+        // test, whose header is nothing but `char const*` definitions. Rewriting it lets
+        // prepare_variables() mark them `inline` and leave them where they are, which is the
+        // only placement that works for a variable whose type cannot survive being moved.
+        // TODO/32.
+        if (fns.empty() && vars.empty()) {
             // Nothing to split, but record the decision so it is not reconsidered on every
             // invocation.
             const std::string rel =
                 header_mirror_relpath(inc_path, unit_include_dirs(extra_flags));
             const std::string unit_dir =
                 (fs::path(split_include_root(output_dir)) / fs::path(rel).parent_path()).string();
-            if (verbose) out << "No function definitions found in " << inc_path << "\n";
+            if (verbose)
+                out << "No function or variable definitions found in " << inc_path << "\n";
             write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
-                                          inc_path, "no function definitions");
+                                          inc_path, "no function or variable definitions");
             continue;
         }
 

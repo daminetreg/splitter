@@ -63,7 +63,10 @@ function(add_spirit_test kind suite name extra_source)
     "${spirit_test_dir}/${suite}"
     ${boost_includes}
     "${BOOST_ROOT_DIR}/libs/numeric/conversion/include")
-  target_compile_features(${target} PRIVATE cxx_std_14)
+  # C++17, not the 14 the Jamfile's `[ requires cxx14_... ]` asks for as a minimum. The
+  # splitter needs inline variables to leave a namespace-scope definition in a header that
+  # every piece includes; see environments/monolithic.cmake.
+  target_compile_features(${target} PRIVATE cxx_std_17)
 endfunction()
 
 foreach(suite qi karma lex x3 support)

@@ -60,24 +60,31 @@ CPP_SPLITTER_VERBOSE=1 ninja -C /tmp/sp -j8 spirit_test_qi_uint_radix
 
 ## Implementation spec
 
-1. **Harvest variables from the headers too, not only from the unit's source.** `harvest_variable()`
-   already records what it is given; the `wanted` set is what limits it to the unit. A header
-   that is a split candidate is already in that set, so its variables are reachable -- what is
-   missing is passing them to the placement decision for the *unit's* preamble.
+**Keep the definition where it is and mark it `inline`. Do not move it.** C++17 is the assumed
+default for this project (`environments/monolithic.cmake`), an `inline` variable has vague
+linkage, and the copies every piece gets then merge -- which is precisely what the preamble
+needs from anything it carries. Moving is the treatment that has to justify itself, not the
+other way round: `TODO/33` is a variable that cannot survive a move at all, and `TODO/26` is a
+constant that stopped being a constant expression when it was moved.
 
-2. **Move a header's namespace-scope variable the same way a source's is moved.** The
-   treatment exists: definition into the definitions header, which exactly one piece compiles,
-   and an `extern` declaration left where it was. The declaration has to be emitted into the
-   rewritten header copy, not into the unit preamble, because that is the file every piece
-   reads.
+`prepare_variables()` already does this. It sets `inline_in_place` whenever the standard is
+C++17 or later and the declaration does not define a type, and `generate_preamble()` emits the
+`inline`. The machinery was simply never reached for this header.
 
-3. **Do not mangle these.** `TODO/26` mangles internal-linkage variables because two units may
-   both define one. A header's *external*-linkage variable is a different case: renaming it
-   would break any other translation unit that refers to it by its real name. Move it and leave
-   the name alone.
+1. **Split a header that defines variables and no functions.** `resolve_header_deps()` reads
+   both `fns` and `vars` out of the harvest and then skips on `fns.empty()` alone, discarding
+   the variables and writing a "no function definitions" manifest. A header skipped that way is
+   never rewritten, so the preamble includes the original and every piece compiles its
+   definitions again. The condition is `fns.empty() && vars.empty()`, which is already what
+   `split_unit()` uses for the same decision one level down.
 
-4. **Keep the existing bail-outs**, and note that `TODO/33` adds one: an array whose bound
-   comes from its initialiser cannot be declared `extern` without losing its size.
+2. **Nothing else changes.** Once the header is rewritten, `prepare_variables()` marks its
+   variables `inline` in the mirrored copy, which sits ahead of the original on the include
+   path, and the copies merge.
+
+3. **Do not mangle the name.** `TODO/26` mangles internal-linkage variables because two units
+   may each define one. An `inline` variable is one entity by definition; renaming it would
+   break any other translation unit that refers to it.
 
 ## Acceptance Criteria
 
@@ -89,3 +96,26 @@ CPP_SPLITTER_VERBOSE=1 ninja -C /tmp/sp -j8 spirit_test_qi_uint_radix
   way once the duplicates are gone.
 - `./benchmark-spirit-tests.sh` loses this fallback and the whole four-library harness is
   unchanged.
+
+## Outcome
+
+**Fixed, by splitting the header rather than by moving anything.**
+
+`resolve_header_deps()` now skips only when a header has neither functions nor variables. With
+the header rewritten, the existing C++17 path marks its definitions `inline` in the mirrored
+copy:
+
+```cpp
+inline char const* max_unsigned_base3 =                "102002022201221111210";
+```
+
+`spirit_test_qi_uint_radix` splits with no fallback and the program passes.
+
+The fix is one condition. The reason it took a file to find is that the symptom -- a multiple
+definition reported against a piece of an unrelated header -- points nowhere near
+`resolve_header_deps()`, and the variables were being read out of the harvest correctly and
+then dropped on the next line.
+
+Covered by `launcher.variables_stay_in_place`, which asserts the mirrored copy says `inline`
+rather than only that the program runs. Verified it fails without the fix, with
+`cpp-splitter fell back instead of splitting`.

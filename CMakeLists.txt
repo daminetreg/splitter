@@ -182,6 +182,18 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunHeaderEditTest.cmake)
 
+# TODO/32 and TODO/33: a variable defined in a header, and an array whose bound comes from its
+# initialiser, both have to stay where they are and be marked inline rather than moved.
+add_test(
+  NAME launcher.variables_stay_in_place
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/header_variable_main.cpp
+          -DHEADERDIR=${cpp_splitter_test_dir}/header_variable/pkg
+          -DWORKDIR=${cpp_splitter_test_output}/header_variable
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunHeaderVariableTest.cmake)
+
 # TODO/31: a rewritten header's quoted include must still resolve from inside the mirror.
 add_test(
   NAME launcher.quoted_include_in_mirror

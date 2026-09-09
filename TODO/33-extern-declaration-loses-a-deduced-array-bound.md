@@ -62,18 +62,29 @@ CPP_SPLITTER_VERBOSE=1 ninja -C /tmp/sp -j8 spirit_test_lex_regression_wide
 
 ## Implementation spec
 
-1. **Refuse to move an array of unknown bound.** In `prepare_variables()`, ask libclang for the
-   variable's type: `clang_getArrayElementType()` on a `CXType_IncompleteArray` identifies
-   exactly this case. Do not test the spelling for `[]`; a typedef can hide it, and asking the
-   type is the lesson `TODO/26` already paid for.
+**Keep it in place and mark it `inline`, rather than refusing to move it.** An earlier draft of
+this file proposed detecting `CXType_IncompleteArray` and leaving the definition in the
+preamble untouched. That is worse than it looks: a definition left in the preamble without
+`inline` is compiled once per piece, so the array would go from a broken `sizeof` to a
+multiple-definition link failure -- `TODO/32` is exactly that failure for a different variable.
 
-2. **A bound that is written keeps working.** `test_data data[7]` is a complete type in any
-   declaration, so `CXType_ConstantArray` stays movable. The refusal is specifically for
-   `CXType_IncompleteArray`.
+C++17 is the assumed default for this project, and `prepare_variables()` already sets
+`inline_in_place` for every namespace-scope variable that does not define a type. An array with
+a deduced bound keeps its initialiser, so `sizeof` still has a bound to read, and the copies
+merge instead of colliding. Nothing needs to detect the array shape at all.
 
-3. **Say so where the other bail-outs are.** `variable_declaration_head()` already lists the
-   cases that keep a variable where it is; this belongs with them, with the reason, not as a
-   separate check somewhere else.
+1. **Make C++17 the default.** `environments/monolithic.cmake` sets `CMAKE_CXX_STANDARD 17`,
+   and every project built through it follows. The driver's own default is `gnu++14`, so
+   leaving this unset means the splitter places against C++14 rules and the move comes back.
+
+2. **Raise anything that pins something older.** `example/spirit-tests/` asked for
+   `cxx_std_14` because the Jamfile's `[ requires cxx14_... ]` names it as a minimum; a
+   minimum is not a maximum.
+
+3. **The pre-C++17 path stays as it is.** `warn_pre_cxx17_variable_move()` already says once
+   per unit that a variable had to be moved because the standard is too old. That warning is
+   now the whole of the C++14 story, and it is honest: the move is what an older standard
+   forces, and it is why this defect existed.
 
 ## Acceptance Criteria
 
@@ -83,3 +94,30 @@ CPP_SPLITTER_VERBOSE=1 ninja -C /tmp/sp -j8 spirit_test_lex_regression_wide
 - A second fixture proving the refusal is not blanket: an array with a written bound is still
   moved out of the preamble, checked by looking for its `extern` declaration.
 - `./benchmark-spirit-tests.sh` loses this fallback.
+
+## Outcome
+
+**Fixed by making C++17 the default**, with no code change to the placement logic.
+
+`inline_in_place` already covered this variable; it was never reached because the benchmark
+project pinned `cxx_std_14`. At C++17 the array stays where it is:
+
+```cpp
+inline test_data data[] =
+{
+    { ID_IDENT, L"alpha" },
+    ...
+```
+
+so `sizeof(data)/sizeof(data[0])` still has a bound to read, and the copies every piece carries
+merge rather than colliding. `spirit_test_lex_regression_wide` splits with no fallback and the
+program passes.
+
+Worth stating plainly, because the first spec got it backwards: the bug was not that the
+splitter moved an array it should have detected and left alone. It was that it was being asked
+to place variables under C++14 rules in a project that assumes C++17. Detecting the array shape
+would have produced a definition duplicated per piece instead of an incomplete one -- trading
+this defect for `TODO/32`'s.
+
+Covered by `launcher.variables_stay_in_place` alongside `TODO/32`, which asserts the array is
+still spelled `inline Row rows[]` in the preamble rather than only that the program runs.
