@@ -109,6 +109,31 @@ sources, so what differs between the two builds is part of that question.
 They matter more than five failures in 277 sounds. A fallback writes no split cache, so the
 unit re-does its whole split and then compiles plain on *every* build (`TODO/31`).
 
+## Sending the relocatable link to the cluster too
+
+The `one body` row above says the compiles already distribute and something else is the cost.
+The obvious candidate is the one step that stays here: one `ld -r` per translation unit over
+every object that unit produced, a few hundred of them. The splitter now hands that to
+`tipi-linker-driver` whenever it is chained behind `tipi-compiler-driver`, so the link becomes
+a distributed, cacheable action like any other.
+
+**It costs rather than saves, on this corpus:**
+
+| `one body`, distributed + split | wall | remote / cached |
+|---|---:|---|
+| local `ld -r` | 103.9s | 210 / 603 |
+| link through `tipi-linker-driver` | **120.0s** | **482** / 795 |
+
+The 272 extra remote actions are exactly the 272 links. The objects being linked were produced
+here, so sending the link away buys a round trip to upload a few hundred of them per unit, and
+that costs about 16 seconds more than doing it locally.
+
+It is left on by default regardless, for two reasons that this measurement does not test. A
+driven link is *cacheable*, where a local one is not, so a rebuild the cluster has already seen
+can skip it entirely. And the trade turns on how much local CPU there is: on a machine with far
+fewer than 32 cores, a few hundred local links compete with the splitter's own parsing in a way
+they do not here. `CPP_SPLITTER_NO_LINKER_DRIVER=1` turns it off.
+
 ## What this benchmark still cannot say
 
 - **Cold against cold.** Both `full` rows were cache-served and the cluster's cache cannot be

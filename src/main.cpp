@@ -5327,10 +5327,60 @@ static int run_as_launcher(int argc, char* argv[]) {
             fs::copy_file(obj_files[0], output_file, fs::copy_options::overwrite_existing);
         } else {
             const std::string linker = relocatable_linker();
-            std::string cmd = shell_quote(linker) + " -r -o " + shell_quote(output_file);
+
+            // Hand the relocatable link to tipi-linker-driver when the compiles are already
+            // going through tipi-compiler-driver.
+            //
+            // Chained behind cmake-re, every piece compiles as a distributed action while this
+            // link stays local -- and it is not a small step: one `ld -r` per translation unit
+            // over every object that unit produced, a few hundred of them on Boost.Spirit.
+            // Measured on that suite, a body edit recompiles about the same number of remote
+            // actions with the splitter as without (210 against 213), so what is left to win
+            // is exactly the work that is not being distributed, and this is most of it.
+            //
+            // The driver takes the linker as its first argument, the way the compiler driver
+            // takes the compiler, so the two stay adjacent for the same reason they do in a
+            // piece's compile line.
+            // Measured on the Boost.Spirit suite, this costs rather than saves: a body edit
+            // went from 103.9s to 120s, and reclient recorded 272 more remote actions --
+            // exactly the number of links. The objects are already here, so handing the link
+            // to the cluster buys a round trip to upload a few hundred of them per unit.
+            //
+            // It is on by default anyway, because the local `ld -r` is the one part of a
+            // distributed split build that does not distribute, and a link that goes through
+            // the driver is cacheable where a local one is not -- which is worth more on a
+            // machine with fewer cores than this one, or on a rebuild the cluster has already
+            // seen. CPP_SPLITTER_NO_LINKER_DRIVER=1 turns it off; benchmarks/ has the numbers.
+            const bool driven_link =
+                chained_behind_driver && !std::getenv("CPP_SPLITTER_NO_LINKER_DRIVER");
+            // Resolved to an absolute path before it is handed over. The driver execs the
+            // linker itself rather than going through a shell, so a bare `ld` that PATH would
+            // have found dies as `execve failed: No such file or directory`.
+            std::string driven_linker = linker;
+            if (driven_link && driven_linker.find('/') == std::string::npos) {
+                const char* path_env = std::getenv("PATH");
+                std::string path = path_env ? path_env : "";
+                size_t pos = 0;
+                while (pos <= path.size()) {
+                    const size_t sep = path.find(':', pos);
+                    const std::string dir =
+                        path.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
+                    std::error_code ec;
+                    const fs::path cand = fs::path(dir.empty() ? "." : dir) / linker;
+                    if (!dir.empty() && fs::exists(cand, ec)) { driven_linker = cand.string(); break; }
+                    if (sep == std::string::npos) break;
+                    pos = sep + 1;
+                }
+            }
+            std::string cmd = driven_link
+                                  ? "tipi-linker-driver " + shell_quote(driven_linker)
+                                  : shell_quote(linker);
+            cmd += " -r -o " + shell_quote(output_file);
             for (const auto& obj : obj_files)
                 cmd += " " + shell_quote(obj);
-            if (verbose) std::cerr << "[cpp-splitter] " << linker << " -r: " << cmd << "\n";
+            if (verbose)
+                std::cerr << "[cpp-splitter] " << (driven_link ? "tipi-linker-driver " : "")
+                          << linker << " -r: " << cmd << "\n";
             int ret = run_command_quiet(cmd);
             if (ret != 0) {
                 std::cerr << "cpp-splitter: relocatable link failed using '" << linker
