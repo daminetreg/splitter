@@ -1,6 +1,6 @@
 # Boost.Spirit's test suite on Remote Build Execution — 9 September 2026
 
-Measured at `b7a3d14` with `./benchmark-spirit-cmake-re.sh`, against EngFlow's cluster at
+Measured at `fad365c` with `./benchmark-spirit-cmake-re.sh`, against EngFlow's cluster at
 `opal.cluster.engflow.com:443` over mTLS.
 
 Every other benchmark here measures one machine, where cutting a translation unit into one
@@ -42,40 +42,60 @@ own per-action records rather than inferred from the clock.
 
 | scenario | splitter | wall | fallbacks | remote/cached/local |
 |---|---|---:|---:|---|
-| full | no | 32.8s | 0 | 0 / 1641 / 0 |
+| full | no | 32.5s | 0 | 0 / 1641 / 0 |
 | no-op | no | 12.0s | 0 | 0 / 0 / 0 |
 | one source | no | 12.0s | 0 | 0 / 0 / 0 |
-| one header | no | 12.0s | 0 | 0 / 0 / 0 |
-| one body | no | **139.6s** | 0 | **282** / 729 / 0 |
-| full | yes | 404.7s | 5 | 208 / 15513 / 0 |
-| no-op | yes | 22.8s | 0 | 0 / 1605 / 0 |
-| one source | yes | 14.5s | 0 | 0 / 0 / 0 |
+| one header | no | 11.9s | 0 | 0 / 0 / 0 |
+| one body | no | **117.8s** | 0 | **271** / 762 / 0 |
+| full | yes | 384.3s | 5 | 0 / 16137 / 0 |
+| no-op | yes | 21.2s | 0 | 0 / 1605 / 0 |
+| one source | yes | 14.4s | 0 | 0 / 0 / 0 |
 | one header | yes | 14.4s | 0 | 0 / 0 / 0 |
-| one body | yes | **67.4s** | 2 | **5** / 1563 / 0 |
+| one body | yes | **65.3s** | 2 | **3** / 1569 / 0 |
 
-## The body edit: 2.1x faster, and 56x less work sent to the cluster
+Run twice, the second time after the cluster had executed and cached everything the first pass
+produced. The body row read 139.6s against 67.4s on the first pass and 117.8s against 65.3s on
+this one: the split side is stable and the plain side carries the variance, which is what one
+would expect of the side doing 271 real compiles.
 
-**139.6s against 67.4s**, and the action counts say why rather than leaving it to be guessed:
-the plain build executed **282** compiles on the cluster, the split build **5**.
+## The body edit: 1.8x faster, and 90x less work sent to the cluster
 
-That is the design working exactly as described. One function changed, so one function's object
-needs rebuilding — not the 194 translation units that happen to include the header it lives in.
-The farm is handed 5 jobs instead of 282, and the wall time follows.
+**117.8s against 65.3s**, and the action counts say why rather than leaving it to be guessed:
+the plain build executed **271** compiles on the cluster, the split build **3**.
 
-It is worth being precise about where the remaining 67.4s goes, because it is not compilation.
-The launcher still runs for all 194 units, each re-checks its inputs, and each relinks; those
-1563 cache hits are that work being recognised as already done. The floor on this row is the
-per-unit fixed cost, and it is most of what is left.
+This row is a real comparison on both sides, unlike the full rows below. A content change
+produces new action keys, so nothing the plain build needs can come out of the cache — it
+genuinely recompiles 271 units, because 194 of them include the header that changed and the
+rest follow from it. The split build genuinely recompiles the one piece that changed.
 
-## The full build is still not a fair comparison
+That is the design working as described. One function changed, so one function's object needs
+rebuilding, not the translation units that happen to include the header it lives in. The farm
+is handed 3 jobs instead of 271.
 
-The plain `full` row is **entirely cache hits** — zero remote executions. By the time these
-were measured the cluster had seen that configuration many times, and its cache cannot be
-evicted from here. So 32.8s against 404.7s is not plain-versus-split compilation; it is 1641
-cache lookups against 15513, plus the splitting, which happens locally.
+Where the remaining 65 seconds goes is worth being precise about, because it is not
+compilation. The launcher still runs for all 194 units, each re-checks its inputs, and each
+relinks; those 1569 cache hits are that work being recognised as already done. The floor on
+this row is the per-unit fixed cost, and it is most of what is left.
 
-What it does say is that the split build carries **9.5x more actions** and a large local cost.
-What it cannot say is anything about throughput under real load.
+## The full build, with both sides fully cached
+
+The first pass could not compare these rows: the plain build was entirely cache-served while
+the split build still executed 208 actions. Run again, **both are now zero remote executions** —
+every action on both sides came out of the cluster's cache.
+
+| `full` | wall | actions |
+|---|---:|---|
+| plain | 32.5s | 1641 cached |
+| split | 384.3s | 16137 cached |
+
+So this is a like-for-like measurement at last, and what it measures is **overhead**: 9.8x more
+actions to look up, plus the splitting, which happens locally. **11.8x the wall time when
+nothing needs compiling at all.**
+
+That is a real cost, and it is the price paid for the body row above. It is also not the
+cold-build number: with the cache empty on both sides the split build would additionally
+compile 16137 pieces where the plain one compiles 1641, and that comparison still cannot be
+made from here.
 
 ## The two touch rows are free by construction
 
@@ -121,10 +141,11 @@ its whole split and then compiles plain on *every* build (`TODO/31`).
 
 ## What this benchmark still cannot say
 
-- **Cold against cold.** Both `full` rows lean on the cluster's cache and it cannot be evicted
-  from here. A salt in the action key, or a fresh instance, is the single most valuable change
-  to make next.
-- **Where the split build's 404.7s goes.** Splitter parse, cache round-trips and linking are
+- **Cold against cold.** Both `full` rows are cache-served on both sides now, which makes them
+  a fair measure of overhead and no measure at all of compilation. The cluster's cache cannot be
+  evicted from here; a salt in the action key, or a fresh instance, is the single most valuable
+  change to make next.
+- **Where the split build's 384.3s goes.** Splitter parse, cache round-trips and linking are
   not separated, and the cold-build argument turns on which dominates.
 - **Whether the body row generalises.** It measures one edit whose reach and use differ by
   194:1. Real edits vary, and an edit to something used everywhere looks like the old

@@ -222,30 +222,43 @@ hides.
 
 | scenario | splitter | wall | remote executions |
 |---|---|---:|---:|
-| full | no | 32.8s | 0 (all cached) |
-| full | yes | 404.7s | 208 |
-| **one body** | **no** | **139.6s** | **282** |
-| **one body** | **yes** | **67.4s** | **5** |
+| full | no | 32.5s | 0 (all cached) |
+| full | yes | 384.3s | 0 (all cached) |
+| **one body** | **no** | **117.8s** | **271** |
+| **one body** | **yes** | **65.3s** | **3** |
 
-**The body edit is 2.1x faster, and the action counts say why: 282 compiles sent to the cluster
-against 5.**
+**The body edit is 1.8x faster, and the action counts say why: 271 compiles sent to the cluster
+against 3.**
 
 One function changed, so one function's object needed rebuilding — not the 194 translation
 units that happen to include the header it lives in. That is the entire claim of per-function
 splitting, and on a farm it is the difference between handing out 282 jobs and handing out 5.
 
-Where the remaining 67 seconds goes is worth being precise about, because it is not
+The body row is a real comparison on both sides, which the full rows are not. A content change
+produces new action keys, so nothing the plain build needs can come from the cache: it
+genuinely recompiles 271 units. The split build genuinely recompiles one piece.
+
+Where the remaining 65 seconds goes is worth being precise about, because it is not
 compilation. The launcher still runs for all 194 units, each re-checks its inputs, each
-relinks. Those are cache hits on the cluster now — the run recorded 1563 of them — but they are
-the floor on this row, and they are most of what is left.
+relinks. Those are cache hits on the cluster now — 1569 of them — but they are the floor on
+this row, and they are most of what is left.
 
-### The full build is not a fair comparison, and this post will not pretend otherwise
+### The full build, measured fairly, is where the cost is
 
-The plain `full` row is entirely cache hits: zero remote executions. The cluster had seen that
-configuration many times and its cache cannot be evicted from outside. So 32.8s against 404.7s
-is 1641 cache lookups against 15513 plus local splitting — not compilation. A cold-against-cold
-pair does not exist yet, and getting one needs a cache-busting knob that is the next thing to
-build.
+The first run could not compare the full rows: the plain build was entirely cache-served while
+the split build still executed 208 actions. Run again, after the cluster had cached everything
+that first pass produced, **both come back with zero remote executions** — every action on both
+sides served from cache.
+
+That makes it a like-for-like measurement at last, and what it measures is overhead: **1641
+cache lookups against 16137, and 32.5s against 384.3s.** Nothing was compiled on either side.
+The split build carries 9.8x more actions and does its splitting locally, and when there is no
+compiling to be done that costs 11.8x the wall time.
+
+This is the honest price of the body row above, and it is not small. Nor is it the cold-build
+number — with an empty cache the split build would additionally compile 16137 pieces against
+the plain build's 1641, and that comparison still cannot be made from here, because the
+cluster's cache cannot be evicted from outside.
 
 ### Linking is distributable too
 
@@ -264,14 +277,15 @@ choice, arriving from a different direction.
 ## The honest summary
 
 On a corpus this hostile, per-function splitting turns a **73-second** rebuild after a header
-touch into an **8-second** one on a single machine, and on a build farm turns a **139-second**
-rebuild after a one-line function change into **67 seconds**, sending 5 compiles to the cluster
-where the ordinary build sends 282. Nothing falls back that is not `TODO/34`.
+touch into an **8-second** one on a single machine, and on a build farm turns a **118-second**
+rebuild after a one-line function change into **65 seconds**, sending 3 compiles to the cluster
+where the ordinary build sends 271. Nothing falls back that is not `TODO/34`.
 
-It costs 10.9x the work on a cold build and 34x the disk. The disk is a real cost and this post
-has no answer to it. The cold build has not been measured honestly yet — every full-build
-comparison here leans on a cache that cannot be evicted from outside — and until that is fixed
-the cold column is a number without a control.
+It costs 10.9x the work on a cold build and 34x the disk, and on the farm it carries 16137
+actions where the ordinary build carries 1641 — 11.8x the wall time on a full build where
+nothing at all needs compiling. The disk is a real cost and this post has no answer to it. The
+truly cold build has still not been measured with a control, because the cluster's cache cannot
+be evicted from outside, so the cold column remains a number without one.
 
 What can be said is narrower than "splitting makes builds faster", and more useful. It makes
 the work an edit causes proportional to what the edit actually changed, instead of to the file
