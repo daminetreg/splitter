@@ -69,15 +69,17 @@ written for every definition including the ones that can never be compiled, and 
 project 99.6% of them were templates and their members. Every piece written now is one that is
 compiled.
 
-The body row is the only timing that moved, from 2.0x slower to **1.4x slower**, and it moved
-because of `TODO/28`: all four units re-slice `bench_weight()`'s piece from the recorded
-harvest rather than re-parsing. It still loses. Four units and one driver is a small enough
-tree that what remains -- rebuilding the preamble PCH and relinking 245 pieces -- outweighs a
-parse that is no longer happening. The same change wins the test-suite body row below, where
-there is more work for it to save.
+The body row is the only timing that has moved since `TODO/27`, from 2.0x slower to
+**1.5x slower**, and it moved because of `TODO/28`: all four units re-slice `bench_weight()`'s
+piece from the recorded harvest rather than re-parsing. It still loses. Four units and one
+driver is a small enough tree that what remains -- rebuilding the preamble PCH and relinking
+245 pieces -- outweighs a parse that is no longer happening. The same change wins the
+test-suite body row below, where there is more work for it to save.
 
-The full row moved from 11.8x to 13.2x, which is run-to-run noise on a 4.5s baseline rather
-than a regression: the split side is 59.0s against 59.9s, and it is the plain side that moved.
+Everything else here is within run-to-run noise of the 8 September pass on a 4.3-4.5s baseline.
+Moving to C++17 changed nothing measurable on this project: it has no namespace-scope variable
+that needed the `inline` placement C++17 allows, which is exactly why the defects that forced
+the change (`TODO/32`, `TODO/33`) turned up on Spirit and not here.
 
 ### The trend across three kinds of code
 
