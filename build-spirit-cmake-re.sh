@@ -28,29 +28,45 @@
 # are no per-RPC credentials and nothing here reads a token. Point ENGFLOW_MTLS_DIR at a
 # directory holding the certificate and key if they are not in ~/engflow-mTLS.
 #
-# `--distributed` needs docker on the machine that starts it. Before scheduling anything,
-# cmake-re packages the toolchain -- clang, ninja, reclient, the tipi drivers -- and ships it
-# so the remote workers execute against the same environment this repository builds in, and it
-# calls `docker version` to do that. Inside the tipi container there is no docker-in-docker, so
-# the mode has to be started from a host that has one. The credentials and the endpoint are
-# fine there; only the packaging step is missing.
+# `--distributed` implies `--host` here, and the pair needs no docker. The two flags answer
+# different questions -- where the build is orchestrated, and where the compiles run -- so
+# asking for both means orchestrate locally and execute on the cluster.
+#
+# What would need docker is resolving the environment image: cmake-re has to tell the workers
+# which image to run in, and turning a tag into a manifest digest is what it shells out for.
+# environments/ubuntu-clang.pkr.js pins the digest instead, so that step disappears. Re-pin it
+# when the image moves:
+#
+#   curl -fsSI -H "Authorization: Bearer $TOKEN" \
+#        -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+#        https://registry-1.docker.io/v2/tipibuild/tipi-ubuntu-2404/manifests/<tag>
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORIGIN="$REPO/example/spirit-tests"
 SOURCE="$REPO/example/boost-to-split/cmake-re"
 USE_SPLITTER=0
-MODE=host
+DISTRIBUTED=0
 
 for arg in "$@"; do
     case "$arg" in
         --split) USE_SPLITTER=1 ;;
-        --distributed) MODE=distributed ;;
-        --host) MODE=host ;;
-        --help|-h) sed -n '2,34p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        --distributed) DISTRIBUTED=1 ;;
+        --host) ;;   # the default, and accepted so the two can be written together
+        --help|-h) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
+
+# `--host` and `--distributed` are not alternatives: the first says where the build is
+# orchestrated from and the second says where the compiles run. Together they mean orchestrate
+# here, execute on the cluster, which is the combination that needs no docker locally.
+MODE_FLAGS=(--host)
+MODE=host
+if [ "$DISTRIBUTED" = 1 ]; then
+    MODE_FLAGS+=(--distributed)
+    MODE=distributed
+fi
 
 BUILD="$REPO/build/cmake-re-spirit-$MODE"
 [ "$USE_SPLITTER" = 1 ] && BUILD="$BUILD-split"
@@ -62,15 +78,26 @@ BUILD="$REPO/build/cmake-re-spirit-$MODE"
 # reproxy's, not this script's invention.
 #
 # service_no_auth is not a weakening: the cluster authenticates the client by its certificate
-# during the TLS handshake, so there are no per-RPC credentials to send. TLS itself stays on;
-# turning it off would be RBE_service_no_security, which is not set here and should not be.
+# during the TLS handshake, so there are no per-RPC credentials to send, and this is what turns
+# those off. TLS itself stays on; disabling it would be RBE_service_no_security, which is not
+# set here and should not be.
+#
+# Nothing sets RBE_use_application_default_credentials. Setting it to false looked tidier and
+# was inert -- reproxy logged `--use_application_default_credentials=true` regardless, because
+# service_no_auth had already disabled per-RPC credentials. An export with no effect is worse
+# than no export, so it is gone.
 ENGFLOW_MTLS_DIR="${ENGFLOW_MTLS_DIR:-$HOME/engflow-mTLS}"
-if [ "$MODE" = distributed ]; then
+if [ "$DISTRIBUTED" = 1 ]; then
     export RBE_service="${RBE_service:-opal.cluster.engflow.com:443}"
     export RBE_tls_client_auth_cert="${RBE_tls_client_auth_cert:-$ENGFLOW_MTLS_DIR/engflow.crt}"
     export RBE_tls_client_auth_key="${RBE_tls_client_auth_key:-$ENGFLOW_MTLS_DIR/engflow.key}"
     export RBE_service_no_auth="${RBE_service_no_auth:-true}"
-    export RBE_use_application_default_credentials="${RBE_use_application_default_credentials:-false}"
+    # Per-action records, so a run can be audited afterwards rather than taken on trust:
+    #   reclient/<rev>/dumpstats --proxy_log_dir=<dir> --output_dir=<dir>
+    # writes rbe_metrics.txt with the remote, cache-hit and local-fallback counts. Without it
+    # reproxy keeps no record of where each action ran.
+    export RBE_proxy_log_dir="${RBE_proxy_log_dir:-$REPO/build/rbe-logs}"
+    mkdir -p "$RBE_proxy_log_dir"
 
     for f in "$RBE_tls_client_auth_cert" "$RBE_tls_client_auth_key"; do
         if [ ! -r "$f" ]; then
@@ -87,7 +114,7 @@ fi
 # A Spirit test unit is a very large template instantiation, and with the splitter in front of
 # it the launcher holds a libclang AST of that unit alongside the compile. Eight is what
 # 122 GiB carries; without the splitter there is no such ceiling.
-if [ "$MODE" = distributed ]; then
+if [ "$DISTRIBUTED" = 1 ]; then
     # The width is the point of distributing, and it is not bounded by this machine's cores:
     # the compiles run on the cluster and only the scheduling happens here.
     JOBS="${CMAKE_RE_JOBS:-64}"
@@ -120,27 +147,10 @@ else
     docker_ok=0
 fi
 
-# Fail here rather than several minutes in. cmake-re ships the toolchain to the workers before
-# it schedules anything and calls `docker version` to package it, so without docker the run
-# dies with a bare "execve failed: No such file or directory" after uploading everything.
-if [ "$MODE" = distributed ] && [ "$docker_ok" = 0 ]; then
-    cat >&2 <<'MSG'
---distributed needs docker on this machine, and there is none.
-
-cmake-re packages the toolchain and ships it to the RBE workers before scheduling any
-compile, and it drives that with docker. Inside the tipi container there is no
-docker-in-docker, so start this mode from a host that has one:
-
-    ./build-spirit-cmake-re.sh --distributed
-
-The RBE endpoint and the mTLS credentials are unaffected -- they were verified from in here:
-the cluster accepts the client certificate over TLS with ALPN h2. Only the packaging step is
-missing.
-
-Use --host to build on this machine instead.
-MSG
-    exit 1
-fi
+# No docker check, and no docker needed. cmake-re shells out to docker to resolve a tagged
+# image reference into the manifest digest it must give the RBE workers;
+# environments/ubuntu-clang.pkr.js names the digest outright, so there is nothing to resolve.
+# Building the environment locally -- which is what --remote would do -- still needs docker.
 
 if [ ! -d "$REPO/example/boost-to-split/libs/spirit" ]; then
     echo "example/boost-to-split does not contain a Boost checkout with libs/spirit" >&2
@@ -222,11 +232,11 @@ fi
 echo "==> source:    $SOURCE"
 echo "==> build dir: $BUILD"
 echo "==> jobs:      $JOBS"
-echo "==> mode:      --$MODE"
+echo "==> mode:      ${MODE_FLAGS[*]}"
 echo "==> splitter:  $([ "$USE_SPLITTER" = 1 ] && echo yes || echo no)"
 
 echo "==> configure"
-cmake-re "--$MODE" \
+cmake-re "${MODE_FLAGS[@]}" \
     -S "$SOURCE" \
     -B "$BUILD" \
     -j "$JOBS" \
@@ -237,7 +247,7 @@ cmake-re "--$MODE" \
 # `--build` has to be the first argument: cmake-re dispatches on it to pick the subcommand, and
 # putting --host ahead of it is a usage error rather than a flag ordering nicety.
 echo "==> build"
-cmake-re --build "$BUILD" "--$MODE" -j "$JOBS"
+cmake-re --build "$BUILD" "${MODE_FLAGS[@]}" -j "$JOBS"
 
 # -B is a symlink into the mirror rather than a directory, so anything reporting on it has to
 # resolve it first. cmake-re builds out of its own copy of the source tree, which is why the
