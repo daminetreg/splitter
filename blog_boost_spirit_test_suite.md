@@ -16,11 +16,10 @@ Spirit ships no CMakeLists for its tests — they are driven by a Boost.Build Ja
 those Jamfiles: every `run` and `compile` rule the `qi`, `karma`, `lex`, `x3` and `support`
 suites declare becomes a CMake target.
 
-**277 targets. All 277 build. Nothing is excluded**, and nothing is hand-picked — a sample of
-six, which is where this started, misses defects that only turn up in the tail.
+**277 targets. All 277 build. Nothing is excluded**.
 
 The four `compile-fail` sources are the only omission, for the obvious reason: a build that is
-supposed to fail cannot be timed against one that is not.
+supposed to fail is not interesting in benchmarking compilation performance.
 
 Two trees are configured identically apart from `CMAKE_CXX_COMPILER_LAUNCHER`, and both are
 settled before any incremental scenario is timed.
@@ -38,15 +37,14 @@ settled before any incremental scenario is timed.
 
 The `-j8` is not modesty. A Spirit test unit is a very large template instantiation, and the
 splitter holds a libclang AST of that unit in memory *alongside* the compile. At `-j32` a
-corpus like this exhausts 122 GiB, and the OOM killer's victims look exactly like splitter
-defects — which cost a day of chasing them once already.
+corpus like this exhausts 122 GiB.
 
-## The five scenarios, and what exactly gets edited
+## The five benchamkred scenarios
 
 | scenario | what it asks |
 |---|---|
 | **full** | the cost. One object per function, each re-instantiating the grammar its function needs. |
-| **no-op** | a settled tree should do nothing. Anything else is a bug, not a measurement. |
+| **no-op** | rerunning on an existing build tree. Should do nothing. Anything else is a bug, not a measurement. |
 | **one source** | touch one test `.cpp` — `libs/spirit/test/qi/char1.cpp`. |
 | **one header** | touch a widely-included header, timestamp only, content identical. |
 | **one body** | change the body of one ordinary inline function in a header. |
@@ -128,8 +126,9 @@ rather than re-parsing.
 
 10.9x, and that is inherent. One object per function is strictly more work than one object per
 source, and on Spirit each of those objects re-instantiates the grammar templates its function
-needs. Nothing is going to fix that, and it is not supposed to: a cold build is not where an
-edit-build loop spends its time.
+needs. Remote Execution of the build with Bazel or CMake RE fixes that, and it is one of the main reason for the splitter: break the most atomic unit of the builds to maximize cacheability and distributabilty of the build.
+
+However a cold build is not where an edit-build loop spends its time and therefore even if we make this slower on single machine builds, the goal is to serve very active edit loop.
 
 ### The touch rows are where the design pays
 
