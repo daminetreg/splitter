@@ -43,11 +43,24 @@
 # an order of magnitude. A row whose actions are all CACHE_HIT measured scheduling and local
 # work, not compilation.
 #
-# Usage: ./benchmark-spirit-cmake-re.sh
+# Usage:
+#   ./benchmark-spirit-cmake-re.sh                                  # distributed
+#   ./benchmark-spirit-cmake-re.sh --host                           # this machine only
+#   BUILD_TYPE=Release CMAKE_RE_JOBS=500 ./benchmark-spirit-cmake-re.sh
+#
+# BUILD_TYPE is part of every RBE action key, so switching it empties the cache from the
+# cluster's point of view -- which is the only way from here to measure a genuinely cold
+# distributed build on both sides.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOST="$REPO/example/boost-to-split"
+
+MODE="${1:---distributed}"
+case "$MODE" in
+    --distributed|--host) ;;
+    *) echo "usage: $0 [--distributed|--host]" >&2; exit 2 ;;
+esac
 DRIVER="$REPO/build-spirit-cmake-re.sh"
 
 SOURCE="$BOOST/libs/spirit/test/qi/char1.cpp"
@@ -89,13 +102,20 @@ run() {  # run <log> <extra args...> -> elapsed ms
     rm -rf "$REPO/build/rbe-logs"
     local start end
     start=$(ms)
-    "$DRIVER" --distributed "$@" > "$log" 2>&1 || { echo "BUILD FAILED, see $log" >&2; exit 1; }
+    "$DRIVER" "$MODE" "$@" > "$log" 2>&1 || { echo "BUILD FAILED, see $log" >&2; exit 1; }
     end=$(ms)
+    # A build the OOM killer got into is not a measurement. At high -j the splitter holds a
+    # libclang AST per unit alongside everything else, and the victims look like defects.
+    if grep -q '^Killed\|signal 9' "$log" 2>/dev/null; then
+        echo "OOM kills during $log -- this is not a measurement" >&2
+        exit 1
+    fi
     echo $((end - start))
 }
 
 fallbacks() { grep -c 'falling back' "$1" 2>/dev/null || true; }
 
+echo "==> mode: $MODE   build type: ${BUILD_TYPE:-Debug}   jobs: ${CMAKE_RE_JOBS:-default}"
 echo "==> building cpp-splitter"
 tipi run cmake --build "$REPO/build" -j"$(nproc)" >/dev/null
 

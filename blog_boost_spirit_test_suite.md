@@ -215,81 +215,85 @@ count of pieces written. It is a real cost of the approach and nothing here addr
 
 ## Then it was measured on a real farm
 
-The same 277 programs, built through CMake RE against an EngFlow Remote Build Execution
-cluster, with and without the splitter. Reclient keeps per-action records, so every row can say
-whether work was executed on the cluster or served from its cache — a distinction wall time
-hides.
+The same 277 programs through CMake RE against an EngFlow cluster, at `-j500`, in Release —
+and Release matters for more than the optimiser: the build type is part of every action key, so
+switching to it emptied the cluster's cache. Both sides start genuinely cold, which none of the
+earlier attempts managed.
 
 | scenario | splitter | wall | remote executions |
 |---|---|---:|---:|
-| full | no | 32.5s | 0 (all cached) |
-| full | yes | 384.3s | 0 (all cached) |
-| **one body** | **no** | **117.8s** | **271** |
-| **one body** | **yes** | **65.3s** | **3** |
+| full | no | **154.8s** | 547 |
+| full | yes | **537.4s** | 5249 |
+| **one body** | **no** | **159.1s** | **271** |
+| **one body** | **yes** | **71.8s** | **3** |
 
-**The body edit is 1.8x faster, and the action counts say why: 271 compiles sent to the cluster
-against 3.**
+**The body edit is 2.2x faster, executing 3 compiles where the ordinary build executes 271.**
 
-One function changed, so one function's object needed rebuilding — not the 194 translation
-units that happen to include the header it lives in. That is the entire claim of per-function
-splitting, and on a farm it is the difference between handing out 282 jobs and handing out 5.
+A content change gives every affected unit a new action key, so nothing the plain build needs
+can come from the cache — it genuinely recompiles 271 units, because 194 of them include the
+header that changed. The split build compiles 3 things and takes 1569 cache hits: its pieces
+did not change, so the cluster already had them.
 
-The body row is a real comparison on both sides, which the full rows are not. A content change
-produces new action keys, so nothing the plain build needs can come from the cache: it
-genuinely recompiles 271 units. The split build genuinely recompiles one piece.
+That is the whole claim of per-function splitting, and a content-addressed cache is what
+rewards it. One function changed, so one function's object needed building.
 
-Where the remaining 65 seconds goes is worth being precise about, because it is not
-compilation. The launcher still runs for all 194 units, each re-checks its inputs, each
-relinks. Those are cache hits on the cluster now — 1569 of them — but they are the floor on
-this row, and they are most of what is left.
+### The cold full build costs 3.5x, not the 11.8x a warm cache suggested
 
-### The full build, measured fairly, is where the cost is
+Both full rows executed everything, no cache hits on either side. 154.8s against 537.4s.
 
-The first run could not compare the full rows: the plain build was entirely cache-served while
-the split build still executed 208 actions. Run again, after the cluster had cached everything
-that first pass produced, **both come back with zero remote executions** — every action on both
-sides served from cache.
+Earlier, with both sides *cache-served*, the same rows read 11.8x — but that comparison had no
+compiling in it at all, so the split build's 9.8x-larger action count had nothing to hide
+behind. Under real load, 500-way parallelism absorbs most of it and the penalty is a third of
+what the cached measurement implied. Cold is the number that matters and it is the one that was
+hardest to get.
 
-That makes it a like-for-like measurement at last, and what it measures is overhead: **1641
-cache lookups against 16137, and 32.5s against 384.3s.** Nothing was compiled on either side.
-The split build carries 9.8x more actions and does its splitting locally, and when there is no
-compiling to be done that costs 11.8x the wall time.
+### And on one machine, in Release, it nearly pays for itself anyway
 
-This is the honest price of the body row above, and it is not small. Nor is it the cold-build
-number — with an empty cache the split build would additionally compile 16137 pieces against
-the plain build's 1641, and that comparison still cannot be made from here, because the
-cluster's cache cannot be evicted from outside.
+Same benchmark, `--host`, `-j16`: a cold full build is **63.6s plain against 78.5s split**.
+1.23x, where the Debug measurement at the top of this post says 10.9x.
+
+Most of that gap is debug information. Every piece carries the debug info of the preamble it
+includes, and on Spirit that preamble is most of Boost. Strip it and the extra objects are
+cheap. The split tree is still 38G against 85M — the disk cost is real and unaddressed — but
+the *time* cost of splitting, in Release, is nearly gone.
+
+One caveat, because the table would otherwise mislead: the `one body` row under `--host` reads
+78.3s, essentially the full-build number, and that is exactly what it is. A content change
+under cmake-re re-executes the whole graph — 525 edges — and on one machine there is no cache
+to absorb the parts that did not really change. That row is a second full build wearing an
+incremental label. The edit-build loop is what the single-machine numbers at the top of this
+post measure, with ordinary CMake and ninja.
 
 ### Linking is distributable too
 
 A distributed split build compiles pieces remotely and then links each unit locally: one
 `ld -r` over every object that unit produced. The splitter now hands that to
 `tipi-linker-driver` when it is chained behind the compiler driver, which makes the link a
-cacheable action like any other — 66.6s against 65.6s doing it locally, so free, with ~800
-extra cache hits where 193 units relinked identically to last time and the cluster could say
-so.
+cacheable action — 66.6s against 65.6s doing it locally, so free, with ~800 extra cache hits
+where 193 units relinked identically and the cluster could say so.
 
 Against the old body target the same change looked like a 16-second penalty, because that edit
 changed a piece in 178 units and no link could be a cache hit. Which picture you get depends
-entirely on how much an edit actually invalidates — which is the same lesson as the target
-choice, arriving from a different direction.
+entirely on how much an edit actually invalidates — the same lesson as the target choice,
+arriving from a different direction.
 
 ## The honest summary
 
-On a corpus this hostile, per-function splitting turns a **73-second** rebuild after a header
-touch into an **8-second** one on a single machine, and on a build farm turns a **118-second**
-rebuild after a one-line function change into **65 seconds**, sending 3 compiles to the cluster
-where the ordinary build sends 271. Nothing falls back that is not `TODO/34`.
+Per-function splitting makes the work an edit causes proportional to what the edit changed
+rather than to the file it happened to be written in.
 
-It costs 10.9x the work on a cold build and 34x the disk, and on the farm it carries 16137
-actions where the ordinary build carries 1641 — 11.8x the wall time on a full build where
-nothing at all needs compiling. The disk is a real cost and this post has no answer to it. The
-truly cold build has still not been measured with a control, because the cluster's cache cannot
-be evicted from outside, so the cold column remains a number without one.
+On one machine that is a faster edit-build loop: **8 seconds instead of 73** after a header
+touch, nothing falling back. On a build farm it is **3 compiles instead of 271** for a one-line
+function change, and 71.8s instead of 159.1s. Those are the numbers the design predicts, and
+they only appear when the edit is smaller than the file — which is the normal case, and exactly
+why the benchmark had to be built to measure it rather than around it.
 
-What can be said is narrower than "splitting makes builds faster", and more useful. It makes
-the work an edit causes proportional to what the edit actually changed, instead of to the file
-it happened to be written in. On one machine that shows up as a faster edit-build loop. On a
-farm it shows up as far fewer jobs to hand out. And it shows up **only** when the edit is
-smaller than the file — which is the normal case, and precisely why the benchmark had to be
-built to measure it rather than around it.
+The costs are real and worth stating in the same breath. A cold full build is 3.5x slower on
+the farm and 1.23x slower on one machine in Release — the Debug figure of 10.9x turns out to be
+mostly debug information rather than compilation. The build tree is 38G against 85M, and this
+post has no answer to that.
+
+What is still missing is a corpus where the argument should be strongest: few enormous
+translation units, where an ordinary build is pinned to one long pole and a split build is not.
+Boost.Spirit's tests are 277 small ones. They were chosen to be hostile, and they were — but
+being hostile is not the same as being the case this is for.

@@ -53,6 +53,11 @@ ORIGIN="$REPO/example/spirit-tests"
 # own (tipi-compiler-driver, which is how the action reaches the cluster), so a build that also
 # wants the splitter needs the two composed rather than one overwriting the other. v0.0.87 on
 # PATH does not do that; the binary in cmake-re-dev-latest/ does. Prefer it when it is there.
+# Debug unless told otherwise. The build type is part of every action key, so changing it
+# invalidates the whole RBE cache -- which is a nuisance when comparing runs and a gift when a
+# cold measurement is what is wanted.
+BUILD_TYPE="${BUILD_TYPE:-Debug}"
+
 CMAKE_RE="${CMAKE_RE:-}"
 if [ -z "$CMAKE_RE" ]; then
     if [ -x "$REPO/cmake-re-dev-latest/cmake-re" ]; then
@@ -255,6 +260,7 @@ fi
 
 echo "==> source:    $SOURCE"
 echo "==> build dir: $BUILD"
+echo "==> build type: $BUILD_TYPE"
 echo "==> jobs:      $JOBS"
 echo "==> mode:      ${MODE_FLAGS[*]}"
 echo "==> splitter:  $([ "$USE_SPLITTER" = 1 ] && echo yes || echo no)"
@@ -277,7 +283,7 @@ echo "==> configure"
     -S "$SOURCE" \
     -B "$BUILD" \
     -j "$JOBS" \
-    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_TOOLCHAIN_FILE="$REPO/environments/ubuntu-clang.cmake" \
     "${launcher_args[@]}"
 
