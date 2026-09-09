@@ -160,9 +160,8 @@ benchmark does not exist there.
 And a cold build is not where an edit-build loop spends its time in any case. Making it slower
 on one machine is a deliberate trade in favour of the loop the next two rows measure.
 
-**None of that is measured here.** This is a single-machine benchmark, and the 10.9x is a real
-number for a single machine. The distributed and cached cases are the design intent and the
-mechanism it rests on, not a result — and they are the next thing to measure.
+**That was the argument. It has since been measured, and it did not hold up.** The section
+below has the numbers.
 
 ### The touch rows are where the design pays
 
@@ -212,6 +211,54 @@ number of pieces written by two orders of magnitude did not move this number at 
 the clearest evidence available that the cost is in the pieces that are *compiled*, not the
 count of pieces written. It is a real cost of the approach and nothing here addresses it.
 
+## Then it was measured on a real farm
+
+The same 277 programs, built through CMake RE against an EngFlow Remote Build Execution
+cluster, with and without the splitter. Reclient keeps per-action records, so each row can say
+whether work was executed on the cluster or served from its cache — a distinction wall time
+hides, and one that turns out to matter more than the wall time itself.
+
+| scenario | splitter | wall | remote / cached |
+|---|---|---:|---|
+| full | no | 32.3s | 0 / 1641 |
+| full | yes | 377.8s | 0 / 15321 |
+| **one body** | **no** | **110.8s** | **213** / 594 |
+| **one body** | **yes** | **103.9s** | **210** / 603 |
+
+**Read the action column first.** Both full builds were entirely cache hits — zero remote
+executions — because the cluster had already seen both configurations and its cache cannot be
+evicted from outside. So 32.3s against 377.8s is not a compilation comparison. It is 1641 cache
+lookups against 15321, plus the splitting, which happens locally.
+
+The body edit is the only scenario where both sides genuinely compiled on the cluster. There
+the two builds are **within 7% of each other**. On this corpus, with a farm, per-function
+splitting is a wash.
+
+### Why, which is the useful part
+
+The claim was that splitting raises the ceiling on parallelism, and the claim is true. Two
+things stop it cashing out here, and both are visible in the table.
+
+**The number of remote actions barely moves.** Editing `utf8_put_encode()` invalidates one
+piece in each of about 210 units; without the splitter it invalidates the whole translation
+unit in about 213. The farm is handed roughly the same number of jobs either way. Splitting
+makes each job far smaller, but the scheduler works with the count, and the count is the same.
+
+**The splitting itself does not distribute.** Every unit is parsed with libclang, its pieces
+written, and its objects combined with `ld -r`, all locally, before anything can be scheduled.
+That is the whole of the gap between the two no-op rows and most of the gap between the two
+full rows, and it grows with the number of translation units.
+
+Which points at the shape of project this is actually for: **few, enormous translation units**,
+where a conventional build is pinned to one long pole and a split build is not. Boost.Spirit's
+tests are the opposite — 277 units of a few seconds each, which a farm already parallelises
+perfectly well without any help. The corpus chosen to be maximally hostile to the splitter on
+one machine turns out to be maximally *unhelpful* to it on many.
+
+The full write-up, including what it still cannot say — there is no cold-against-cold pair, and
+the split build's 377.8s is not broken down into splitting, round trips and linking — is in
+`benchmarks/boost-spirit-cmake-re-bench-9-Sep-2026.md`.
+
 ## The honest summary
 
 On a corpus this hostile, per-function splitting turns a **73-second** rebuild after a header
@@ -219,10 +266,16 @@ touch into an **8-second** one, and a real body edit from 73 seconds into 59, wi
 falling back to a plain compile.
 
 It costs 10.9x the work on a cold build and 34x the disk. The disk is a real cost and this post
-has no answer to it. The cold build is a different kind of number: 10.9x more work, cut into
-18x more independent jobs, each one small enough to cache on its own and to hand to a different
-machine. On eight lanes of one box that trade loses, and it is supposed to — the reason to make
-it is that a build farm can only go as fast as the largest thing you can give a single worker,
-and this makes that thing a function.
+has no answer to it.
 
-Proving it is the next benchmark, on more machines than one.
+The cold build was supposed to be a different kind of number: more work, cut into far more
+independent jobs, each small enough to cache on its own and to hand to a different machine. On
+a real cluster that came out a wash — same job count on an incremental edit, and the splitting
+itself running locally where no farm can help.
+
+So the honest position is narrower than the one this post started with. Per-function splitting
+pays where an edit-build loop repeats work that one function's change should not have cost:
+8 seconds instead of 73 after a header touch, on one machine, with nothing falling back. It
+does not yet pay by making a build farm faster, and the corpus that would test that claim
+properly is one with few enormous translation units rather than 277 small ones. That is the
+next benchmark, and it is a different corpus rather than a different machine count.
