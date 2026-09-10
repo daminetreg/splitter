@@ -196,48 +196,18 @@ cp "$ORIGIN/cmake-re/CMakeLists.txt" "$SOURCE/CMakeLists.txt"
 cp "$ORIGIN/SpiritTestsFromJamfiles.cmake" "$SOURCE/SpiritTestsFromJamfiles.cmake"
 echo "==> installed the cmake-re project into $SOURCE"
 
-# cmake-re drives the compile, link, ar and ranlib steps through helper binaries under
-# $TIPI_HOME/<driver>/<rev>/, referenced by bare name and found on PATH. In
-# tipibuild/tipi-ubuntu-2404:v0.0.87 every one of them is mode `-rwxrw-r--` and owned by the
-# `tipi` user: the owner may execute them, the group may not. The container recipe this
-# repository documents runs as your own uid with `--group-add tipi`, so the group bits are the
-# ones that apply and every driver fails with
-#
-#     /bin/sh: 1: tipi-compiler-driver: Permission denied
-#
-# Nothing here can fix the mode -- the files belong to another user and we are not root. What
-# it can do is take a copy we own, make that executable, and put it first on PATH so the bare
-# names resolve to it. The copies are ordinary files in the build tree and cost about 190 MB.
-#
-# This is a workaround for the image, not for cmake-re, and it is skipped entirely when the
-# drivers are already runnable -- as they are when the container runs as the `tipi` user, or
-# once the image ships them group-executable.
+# cmake-re runs compiles, links and archiving through helpers found on PATH by bare name, and
+# the image ships them non-executable for anyone but the `tipi` user. tools/stage-tipi-drivers.sh
+# takes copies we own; it explains the mode in full and is shared with the ctest suite. The
+# copies are ordinary files in the build tree and cost about 190 MB.
 SHIM_DIR="$REPO/build/.tipi-drivers"
 prepare_drivers() {
-    local home needed=0 src name
+    local home shim
     home="$("$CMAKE_RE" --info 2>/dev/null | awk '/^tipi_home_dir:/ {print $2}')"
-    [ -n "$home" ] || home=/usr/local/share/.tipi
-
-    for src in $(find "$home" -maxdepth 3 -type f -name 'tipi-*-driver' 2>/dev/null); do
-        name="$(basename "$src")"
-        if [ -x "$src" ]; then
-            continue                      # already runnable as us; nothing to shim
-        fi
-        if [ ! -r "$src" ]; then
-            echo "cannot read $src, and it is not executable either -- cmake-re cannot run here" >&2
-            exit 1
-        fi
-        mkdir -p "$SHIM_DIR"
-        if [ ! -x "$SHIM_DIR/$name" ] || [ "$src" -nt "$SHIM_DIR/$name" ]; then
-            cp "$src" "$SHIM_DIR/$name"
-            chmod u+x "$SHIM_DIR/$name"
-        fi
-        needed=$((needed + 1))
-    done
-
-    if [ "$needed" -gt 0 ]; then
-        echo "==> shimmed $needed tipi driver(s) into $SHIM_DIR (not group-executable in the image)"
-        PATH="$SHIM_DIR:$PATH"
+    shim="$("$REPO/tools/stage-tipi-drivers.sh" "$SHIM_DIR" ${home:+"$home"})"
+    if [ -n "$shim" ]; then
+        echo "==> shimmed tipi driver(s) into $shim (not group-executable in the image)"
+        PATH="$shim:$PATH"
         export PATH
     fi
 }
