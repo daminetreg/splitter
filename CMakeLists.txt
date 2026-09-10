@@ -194,6 +194,34 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunHeaderVariableTest.cmake)
 
+# Outside the source tree, because cmake-re mirrors the git repository that encloses whatever
+# it is pointed at, and this repository is 41176 files.
+#
+# The suffix keeps two people on one machine out of each other's way. USER is unset in the tipi
+# container, which silently produced the shared, surprising "cpp-splitter-remote-split-", so ask
+# the system rather than the environment.
+execute_process(COMMAND id -u OUTPUT_VARIABLE cpp_splitter_uid OUTPUT_STRIP_TRAILING_WHITESPACE)
+set(cpp_splitter_remote_split_workdir "/tmp/cpp-splitter-remote-split-${cpp_splitter_uid}"
+    CACHE PATH "Work directory for launcher.remote_split_on_opal; must be outside any git repo")
+
+# TODO/35: the split itself is produced on the RBE cluster. Talks to a real cluster and skips
+# when there are no credentials -- see the driver for why a stub would not be worth having.
+add_test(
+  NAME launcher.remote_split_on_opal
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DPROJECTDIR=${cpp_splitter_test_dir}/remote_split
+          # Outside the repository on purpose: cmake-re mirrors the enclosing git repository.
+          -DWORKDIR=${cpp_splitter_remote_split_workdir}
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -DTOOLCHAIN=${CMAKE_SOURCE_DIR}/environments/ubuntu-clang.cmake
+          -DCMAKE_RE_DIR=${CMAKE_SOURCE_DIR}/cmake-re-dev-latest
+          -DSTAGE_DRIVERS=${CMAKE_SOURCE_DIR}/tools/stage-tipi-drivers.sh
+          -P ${cpp_splitter_test_dir}/cmake/RunRemoteSplitTest.cmake)
+set_tests_properties(launcher.remote_split_on_opal PROPERTIES
+  SKIP_REGULAR_EXPRESSION "cpp-splitter-test-skip:"
+  TIMEOUT 900)
+
 # TODO/34: chained behind another compiler launcher, the splitter must probe the real compiler
 # for system includes rather than the launcher in front of it.
 add_test(
