@@ -328,9 +328,12 @@ if(with_hashes EQUAL 0 OR NOT with_hashes EQUAL with_depfiles)
     "going back to the cluster.")
 endif()
 
-# Change a body, and nothing else. The re-slice must handle it here, without the cluster.
+# Change one body, and nothing else -- the body of the function only one of the two units
+# calls. Both units have to re-slice: the one that emits it rewrites a piece, the one that
+# merely includes it rewrites its own copy of the header. Neither should need a parse, and
+# neither should need the cluster.
 file(READ "${WORKDIR}/src/shared.hpp" shared_text)
-string(REPLACE "return 40;" "return 41;" shared_text "${shared_text}")
+string(REPLACE "return 7;" "return 8;" shared_text "${shared_text}")
 file(WRITE "${WORKDIR}/src/shared.hpp" "${shared_text}")
 
 run_build(body_edit TRUE body_log)

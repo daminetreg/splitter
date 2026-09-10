@@ -3192,7 +3192,11 @@ static void write_skipped_header_manifest(const std::string& unit_dir,
 // clang_reparseTranslationUnit() refuses a loaded unit by construction and would re-parse
 // anyway, its only shortcut being a preamble that a header edit invalidates.
 
-static const char* kHarvestMagic = "cpp-splitter-harvest 4";
+// Version 5 carries definitions no piece was emitted for, written with "-" in the piece
+// field. Bumped rather than made tolerant, so a harvest left by an older binary is refused
+// outright -- it records those definitions inside a gap, and reading it as though it did not
+// would put an edit to a kept body in the wrong place.
+static const char* kHarvestMagic = "cpp-splitter-harvest 5";
 
 struct HarvestDef {
     unsigned start = 0, end = 0;      // byte extent of the definition in its file
@@ -3258,12 +3262,18 @@ static void write_harvest(const std::string& output_dir, const std::string& unit
                           const std::vector<HarvestDef>& defs_in) {
     const std::string path = (fs::path(output_dir) / (unit_tag + ".harvest")).string();
 
-    // Only definitions that produced a piece, in file order and non-overlapping. Anything
-    // else -- a kept definition, one sharing its extent with another -- is left inside a gap,
+    // Definitions whose body is carried verbatim somewhere, in file order and
+    // non-overlapping. A definition sharing its extent with another is left inside a gap,
     // where the gap hash still proves it did not change and an edit to it simply refuses.
+    //
+    // A *kept* definition is included, with no piece. This unit emitted nothing for it, so
+    // its body lives in the unit's rewritten copy of the file, and that is what a later edit
+    // patches. Excluding them left them inside a gap, which is why an edit to one read as a
+    // change outside every definition and re-split the whole unit -- on Boost.Spirit, for the
+    // 193 of 194 units that include the edited header without emitting the function.
     std::vector<HarvestDef> defs;
     for (const auto& d : defs_in) {
-        if (d.piece.empty() || d.body_hash.empty()) continue;
+        if (d.body_hash.empty()) continue;
         if (d.end > source.size() || d.start >= d.end) continue;
         if (!defs.empty() && d.start < defs.back().end) continue;
         defs.push_back(d);
@@ -3284,7 +3294,7 @@ static void write_harvest(const std::string& output_dir, const std::string& unit
            << d.start_line << " " << d.end_line << " "
            << hash_bytes(source.substr(d.start, d.end - d.start)) << " "
            << d.piece_body_off << " " << d.body_hash << " " << d.prefix_hash << " "
-           << d.piece << "\n";
+           << (d.piece.empty() ? std::string("-") : d.piece) << "\n";
         cursor = d.end;
     }
     os << "G " << hash_bytes(source.substr(cursor)) << "\n";
@@ -3319,7 +3329,8 @@ static bool read_harvest(const fs::path& path, HarvestFile& hf) {
                  >> d.extent_hash >> d.piece_body_off >> d.body_hash >> d.prefix_hash))
             return false;
         std::getline(ds >> std::ws, d.piece);
-        if (d.piece.empty()) return false;
+        if (d.piece.empty()) return false;      // the field is never absent
+        if (d.piece == "-") d.piece.clear();    // kept: no piece was emitted for it
         hf.defs.push_back(d);
     }
     if (!std::getline(ifs, line) || line.compare(0, 2, "G ") != 0) return false;
@@ -4129,6 +4140,52 @@ static void emit_split_files(CXTranslationUnit tu,
         // definition was kept is recorded once per unit in <tag>.keeps instead of once per
         // definition in a file of its own, and CPP_SPLITTER_DUMP_HARVEST brings the old
         // per-file form back when that is what the question needs.
+        // Only a definition whose body is carried verbatim somewhere can be re-sliced.
+        // A definition whose extent is a macro invocation shared with other declarations
+        // is left out: the gap hash covering it still proves it unchanged, and an edit to
+        // it takes the slow path.
+        //
+        // A member *is* included even though it is emitted in a rebuilt out-of-line form.
+        // The rebuild replaces the declarator -- `bool C::f()` for `bool f()` -- and
+        // leaves the braces and everything in them exactly as written, so the body is
+        // still verbatim and still the tail of what is emitted. Excluding members here
+        // excluded almost every header definition worth re-slicing, side_info::collinear
+        // among them.
+        //
+        // Kept definitions are recorded too, with no piece. This unit emitted nothing for
+        // them -- nothing here needs an out-of-line copy -- so their body is carried by this
+        // unit's rewritten copy of the file instead, and that copy is what a later edit
+        // patches. Leaving them out was not merely a missed optimisation: a definition absent
+        // from the harvest falls inside a *gap*, so an edit to its body reads as a change
+        // outside every definition and the whole unit is re-split. On Boost.Spirit's suite,
+        // where 194 units include the edited header and one emits the function, that was 267
+        // re-splits against 1.
+        const size_t rel_open = (!fn.shares_extent && !fn.macro_invocation)
+                                    ? body_open_offset(fn.body)
+                                    : std::string::npos;
+        if (rel_open != std::string::npos) {
+            // The body as it stands in the source, and -- for a piece -- where that same
+            // text came to rest in it. rfind, because only the closing braces of the
+            // enclosing namespaces follow it.
+            const std::string body_region = fn.body.substr(rel_open);
+            const size_t at = kept ? std::string::npos : new_content.rfind(body_region);
+            if (kept || at != std::string::npos) {
+                HarvestDef hd;
+                hd.start = fn.start_offset;
+                hd.end = fn.end_offset;
+                hd.body_open = fn.start_offset + (unsigned)rel_open;
+                hd.start_line = fn.start_line;
+                hd.end_line = fn.end_line;
+                if (!kept) {
+                    hd.piece = out_path;
+                    hd.piece_body_off = at;
+                }
+                hd.body_hash = hash_bytes(body_region);
+                hd.prefix_hash = hash_bytes(fn.body.substr(0, rel_open));
+                harvest.push_back(hd);
+            }
+        }
+
         if (kept && !std::getenv("CPP_SPLITTER_DUMP_HARVEST")) {
             keeps << file_counter << "\t" << fn.start_line << "\t" << keep_reason(fn)
                   << "\t" << fn.signature << "\n";
@@ -4161,43 +4218,7 @@ static void emit_split_files(CXTranslationUnit tu,
             ++skipped_count;
         }
 
-        if (!kept) {
-            result.compilable_files.push_back(out_path);
-            // Only a definition whose piece carries its body verbatim can be re-sliced.
-            // A definition whose extent is a macro invocation shared with other declarations
-            // is left out: the gap hash covering it still proves it unchanged, and an edit to
-            // it takes the slow path.
-            //
-            // A member *is* included even though it is emitted in a rebuilt out-of-line form.
-            // The rebuild replaces the declarator -- `bool C::f()` for `bool f()` -- and
-            // leaves the braces and everything in them exactly as written, so the body is
-            // still verbatim and still the tail of what is emitted. Excluding members here
-            // excluded almost every header definition worth re-slicing, side_info::collinear
-            // among them.
-            const size_t rel_open = (!fn.shares_extent && !fn.macro_invocation)
-                                        ? body_open_offset(fn.body)
-                                        : std::string::npos;
-            if (rel_open != std::string::npos) {
-                // The body as it stands in the source, and where that same text came to
-                // rest in the piece. rfind, because only the closing braces of the
-                // enclosing namespaces follow it.
-                const std::string body_region = fn.body.substr(rel_open);
-                const size_t at = new_content.rfind(body_region);
-                if (at != std::string::npos) {
-                    HarvestDef hd;
-                    hd.start = fn.start_offset;
-                    hd.end = fn.end_offset;
-                    hd.body_open = fn.start_offset + (unsigned)rel_open;
-                    hd.start_line = fn.start_line;
-                    hd.end_line = fn.end_line;
-                    hd.piece = out_path;
-                    hd.piece_body_off = at;
-                    hd.body_hash = hash_bytes(body_region);
-                    hd.prefix_hash = hash_bytes(fn.body.substr(0, rel_open));
-                    harvest.push_back(hd);
-                }
-            }
-        }
+        if (!kept) result.compilable_files.push_back(out_path);
 
         if (verbose) {
             out << "  [" << file_counter << "] " << fn.signature;
@@ -4772,12 +4793,18 @@ static bool try_incremental_split(const std::string& split_dir,
     // one for every header it split.
     HarvestFile hf;
     bool found = false;
+    std::string harvest_dir;
     std::error_code ec;
     for (fs::recursive_directory_iterator it(split_dir, ec), end; it != end && !ec; it.increment(ec)) {
         if (it->path().extension() != ".harvest") continue;
         HarvestFile candidate;
         if (read_harvest(it->path(), candidate) && candidate.path == file) {
             hf = candidate;
+            // Where this file's split output was written: its pieces, its `.keeps`, and -- for
+            // a definition no piece was emitted for -- this unit's rewritten copy of the file.
+            // Taken from the harvest rather than from a piece's path, because the edited
+            // definition may be one of the kept ones and have no piece.
+            harvest_dir = it->path().parent_path().string();
             found = true;
             break;
         }
@@ -4861,17 +4888,54 @@ static bool try_incremental_split(const std::string& split_dir,
     }
 
     const std::string keeps_path =
-        (fs::path(hf.defs[hit].piece).parent_path() /
-         (fs::path(file).filename().string() + ".keeps")).string();
+        (fs::path(harvest_dir) / (fs::path(file).filename().string() + ".keeps")).string();
     // How far every line after this definition moved. The old body's line count is not
     // recoverable from a hash, so it is taken from the recorded span instead: a definition
     // beginning on start_line and spanning N newlines ends on start_line + N.
     const long shift = ((long)d.start_line + (long)count_newlines(new_extent)) -
                        (long)d.end_line;
 
-    // Everything is proven; now write. The piece first, because it is the only file whose
-    // content (rather than line numbering) changes.
-    {
+    // Everything is proven; now write. The body's new text goes in first, because it is the
+    // only content (rather than line numbering) that changes.
+    //
+    // Where it goes depends on whether this unit emitted a piece for the definition. If it did
+    // not -- nothing here needed an out-of-line copy -- the body is carried by this unit's
+    // rewritten copy of the file, and that copy is what has to be patched. The copy sits beside
+    // the harvest under the same name as the original; for a definition kept out of the unit's
+    // own source, it is the preamble.
+    if (d.piece.empty()) {
+        const std::string prefix = now.substr(d.start, d.body_open - d.start);
+        const size_t len = d.end - d.body_open;
+        const std::string stem = fs::path(file).stem().string();
+        const std::vector<std::string> candidates = {
+            (fs::path(harvest_dir) / fs::path(file).filename()).string(),
+            (fs::path(harvest_dir) / (stem + "_preamble.h")).string(),
+        };
+
+        std::string target, updated;
+        for (const auto& cand : candidates) {
+            const std::string text = read_file(cand);
+            if (text.empty()) continue;
+            const size_t q = text.find(prefix);
+            if (q == std::string::npos) continue;
+            if (text.find(prefix, q + 1) != std::string::npos)
+                return refuse("the kept definition's signature appears twice in its copy");
+            const size_t body_at = q + prefix.size();
+            if (body_at + len > text.size()) continue;
+            // The recorded length says where the old body ends, and the recorded hash proves
+            // it: no brace matching, and a wrong guess refuses rather than corrupts.
+            if (hash_bytes(text.substr(body_at, len)) != d.body_hash) continue;
+            if (!target.empty())
+                return refuse("more than one copy carries the kept definition");
+            target = cand;
+            updated = text.substr(0, body_at) + new_body + text.substr(body_at + len);
+        }
+        if (target.empty())
+            return refuse("no copy of the file carries the kept definition as harvested");
+        std::ofstream ofs(target);
+        if (!ofs.is_open()) return refuse("the kept definition's copy cannot be written");
+        ofs << updated;
+    } else {
         const std::string piece = read_file(d.piece);
         const size_t len = d.end - d.body_open;
         if (piece.size() < d.piece_body_off + len)
@@ -4919,6 +4983,7 @@ static bool try_incremental_split(const std::string& split_dir,
             if (i == hit) continue;
             const auto& o = hf.defs[i];
             if (o.start < d.start) continue;      // before the edit: nothing moved
+            if (o.piece.empty()) continue;        // kept: no piece, nothing to renumber
             std::string piece = read_file(o.piece);
             if (piece.empty()) continue;
             const std::string old_span = "(lines " + std::to_string(o.start_line) + "-" +
@@ -4978,8 +5043,7 @@ static bool try_incremental_split(const std::string& split_dir,
             o.prefix_hash = hash_bytes(now.substr(o.start, o.body_open - o.start));
             next.push_back(o);
         }
-        const fs::path dir = fs::path(d.piece).parent_path();
-        write_harvest(dir.string(), fs::path(file).filename().string(), file, now, next);
+        write_harvest(harvest_dir, fs::path(file).filename().string(), file, now, next);
     }
 
     // The cache and the input hashes are deliberately not written here. They are written by

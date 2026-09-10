@@ -145,3 +145,37 @@ file(WRITE "${WORKDIR}/${header_name}" "${text}")
 expect_refusal("the definition's signature changed" signature)
 
 message(STATUS "ok: a body-only edit is re-sliced, matches a full split, and the guards refuse")
+
+# --- a definition this unit keeps rather than emits ----------------------------------------
+#
+# The header holds a function nothing here calls. No piece is emitted for it, so it stays in
+# the unit's rewritten copy of the header -- and an edit to its body has to be re-sliced by
+# patching that copy. Getting this wrong is not a correctness bug, because refusing falls back
+# to a full split, which is right but pays a parse.
+
+file(WRITE "${WORKDIR}/${header_name}" "${baseline}")
+split(settle_kept log)
+
+file(READ "${WORKDIR}/${header_name}" kept_text)
+string(REPLACE "    return 11;" "    return 12;" kept_text "${kept_text}")
+file(WRITE "${WORKDIR}/${header_name}" "${kept_text}")
+
+split(kept log)
+if(NOT log MATCHES "re-sliced its piece without parsing")
+  message(FATAL_ERROR
+    "an edit to a body this unit keeps in its copy of the header was not re-sliced:\n${log}")
+endif()
+check_program("107 42" kept)
+snapshot(after_kept)
+
+file(REMOVE "${object}.split/split.cache")
+split(kept_full log TRUE)
+snapshot(after_kept_full)
+
+if(NOT after_kept STREQUAL after_kept_full)
+  message(FATAL_ERROR
+    "re-slicing a kept definition disagrees with a full split.\nre-sliced:\n${after_kept}\n"
+    "full:\n${after_kept_full}")
+endif()
+
+message(STATUS "ok: a definition kept in the header copy is re-sliced too, and matches")
