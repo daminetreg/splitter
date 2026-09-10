@@ -1,6 +1,9 @@
 # Boost.Spirit's test suite, split and built on Remote Build Execution
 
-One measurement set, from a single run. Nothing here is carried over from an earlier pass.
+Two measurement sets, each from a single run, each labelled with what it measured. Nothing is
+carried over from a pass older than those, and no row is combined with a row from the other
+set: comparing configurations across runs compares the cluster's cache state as much as
+anything the splitter did.
 
 ## What was built
 
@@ -82,6 +85,53 @@ differ by an order of magnitude.
 | **one body** | **no** | **136.2s** | **0** | **271** | 762 |
 | **one body** | **yes** | **74.9s** | **0** | **1** | 1575 |
 
+### With the split itself produced on the cluster, `-j500`
+
+A separate run, 10 September, measuring only this configuration
+(`REMOTE_SPLIT=1 MODES=remote`). TODO/35: with `--remote-split` the launcher shells itself out
+through `rewrapper` before parsing anything, so the libclang parse happens on a cluster worker
+and the pieces are downloaded. Everything else is unchanged — the pieces still compile as
+separate actions, and the final `ld -r` still happens here.
+
+The last column is what the splitter itself reported for that row, which is the only way to
+tell which of its four paths each unit took.
+
+| scenario | wall | fallbacks | remote | cached | peak RSS | how the 279 units were split |
+|---|---:|---:|---:|---:|---:|---|
+| full | 373.8s | 0 | 0 | 16722 | 6.9G | 279 on the cluster |
+| no-op | 20.3s | 0 | 0 | 1635 | 0.5G | none, nothing changed |
+| one source | 13.9s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
+| one header | 13.9s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
+| **one body** | **606.5s** | **0** | **4835** | 1557 | 8.4G | **1 re-sliced here, 267 on the cluster** |
+
+Peak RSS is the resident memory of this benchmark's own processes, sampled every two seconds
+and attributed by process group. A system-wide figure would be meaningless on this machine,
+which has other tenants.
+
+**The full row works and does not pay.** All 279 splits ran on the cluster with no fallback,
+and the wall time is 373.8s against the 456.0s of splitting here — within the noise of a row
+whose actions are all cache hits, and certainly not the win the motivation hoped for. The
+EngFlow profile of an earlier instance of this row says why: 279 remote splits at a mean of
+28.9s of worker time each, and **589911 blob downloads** to bring the pieces home. The parse
+moves off this machine; the output transfer replaces it.
+
+**Peak memory goes up, not down.** 6.9G on the full row against 2.9G when splitting here. The
+motivation for TODO/35 was that several hundred concurrent libclang parses are what exhausts
+this machine at `-j500`; moving the parse away does remove that, but the launchers stay
+resident while they wait on the cluster and the downloads are not free. On this evidence the
+memory argument for remote splitting does not hold.
+
+**The body row is a regression, and the reason is known to be unknown.** 606.5s against 75.5s,
+and 4835 remote actions against 1. The splitter's own log says exactly what went wrong: of the
+268 units affected by the edit, **one** re-sliced the changed body out of its recorded harvest
+and **267** went back to the cluster for a full split. Splitting the same sources here re-slices
+all of them. So a split produced on the cluster leaves something behind that a locally produced
+one does not, and the next edit pays for it.
+
+What that something is has not been established. It is *not* the missing prerequisite record
+first suspected: after this run every one of the 279 split directories holds both a
+`depfile.cache` and an `inputs.hash`. See `TODO/36`.
+
 ### On this machine alone, `-j16`
 
 No cluster, so no per-action records exist and the last two columns cannot be filled in.
@@ -146,6 +196,15 @@ the difference is 1635 cache lookups where the ordinary build needs none.
 - **One edit is not a distribution of edits.** This one has a reach-to-use ratio of 194:1. An
   edit to something used as widely as it is included would show both builds doing the same
   work.
+- **A row is only attributable if the splitter was verbose.** It reports which of its four
+  paths each unit took -- reuse, re-slice, cluster, or parse here -- and without that a row
+  that quietly declined to use the cluster and split here instead looks exactly like one that
+  worked, only slower. The driver now sets `CPP_SPLITTER_VERBOSE`; an earlier pass of the third
+  table was discarded because it could not be read.
+- **`remote-split.log` is not evidence.** It is written into the split directory by the
+  rewrapper redirect and is not there afterwards, most likely because reclient replaces the
+  output directory when it downloads it. Counting those files says nothing about whether the
+  cluster was used; the build log does.
 - **Disk is not measured here and is not small.** A split build tree for this suite runs to
   tens of gigabytes against tens of megabytes, because every piece carries the debug
   information of the preamble it includes.
@@ -155,6 +214,10 @@ the difference is 1635 cache lookups where the ordinary build needs none.
 ```sh
 BUILD_TYPE=Release CMAKE_RE_JOBS=500 ./benchmark-spirit-cmake-re.sh --distributed
 BUILD_TYPE=Release CMAKE_RE_JOBS=16  ./benchmark-spirit-cmake-re.sh --host
+
+# the third table: split on the cluster, that configuration alone
+BUILD_TYPE=Release CMAKE_RE_JOBS=500 REMOTE_SPLIT=1 MODES=remote \
+    ./benchmark-spirit-cmake-re.sh --distributed
 ```
 
 Credentials are mTLS, read from `~/engflow-mTLS` unless `ENGFLOW_MTLS_DIR` says otherwise.

@@ -241,6 +241,14 @@ if [ "$REMOTE_SPLIT" = 1 ]; then
     export CPP_SPLITTER_REMOTE_SPLIT=1
 fi
 
+# Say which of the four paths each unit took. Without this the splitter is silent, and a row
+# cannot be attributed at all: a measurement labelled "split on the cluster" that quietly
+# declined and split here instead looks exactly like one that worked, only slower. It costs a
+# few lines per unit in the build log and nothing in wall time.
+if [ "$USE_SPLITTER" = 1 ]; then
+    export CPP_SPLITTER_VERBOSE=1
+fi
+
 echo "==> source:    $SOURCE"
 echo "==> build dir: $BUILD"
 echo "==> build type: $BUILD_TYPE"
