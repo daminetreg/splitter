@@ -48,6 +48,7 @@
 #   ./benchmark-spirit-cmake-re.sh --host                           # this machine only
 #   BUILD_TYPE=Release CMAKE_RE_JOBS=500 ./benchmark-spirit-cmake-re.sh
 #   REMOTE_SPLIT=1 ./benchmark-spirit-cmake-re.sh      # split on the cluster too (TODO/35)
+#   REMOTE_SPLIT=1 MODES=remote ./benchmark-spirit-cmake-re.sh   # only the cluster-split rows
 #
 # REMOTE_SPLIT applies to the split rows only, and needs --distributed: it makes the launcher
 # shell itself out through rewrapper instead of parsing here, which is the thing worth
@@ -177,9 +178,23 @@ report() { printf '%-12s %-8s %9s %10s %-18s %8s\n' "$1" "$2" "$(human "$3")" "$
 # Three configurations rather than two when REMOTE_SPLIT is set, in one run: the point of
 # TODO/35 is splitting here against splitting on the cluster, and comparing those across two
 # runs would compare cluster cache states as much as anything else.
+#
+# MODES narrows that when only one configuration is in question and a full pass is not worth
+# half an hour -- MODES=remote measures the cluster-split rows alone. Numbers from a narrowed
+# run are comparable within themselves and should be reported as their own set, for the reason
+# just given.
 modes=(plain split)
 if [ "${REMOTE_SPLIT:-0}" = 1 ]; then
     modes=(plain split remote)
+fi
+if [ -n "${MODES:-}" ]; then
+    read -r -a modes <<< "$MODES"
+    for m in "${modes[@]}"; do
+        case "$m" in
+            plain|split|remote) ;;
+            *) echo "MODES may name plain, split and remote; got '$m'" >&2; exit 2 ;;
+        esac
+    done
 fi
 
 for mode in "${modes[@]}"; do
