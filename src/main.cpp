@@ -2568,6 +2568,7 @@ static unsigned get_parallelism() {
 }
 
 static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>& jobs,
+                                                    bool tipi_compiler_driver_in_use,
                                                     bool verbose,
                                                     std::ostream& out = std::cout) {
     std::vector<CompileResult> results(jobs.size());
@@ -2576,6 +2577,13 @@ static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>
     std::atomic<size_t> next_job{0};
 
     unsigned num_threads = std::min(static_cast<unsigned>(jobs.size()), get_parallelism());
+    const char* CMAKE_BUILD_PARALLEL_LEVEL = std::getenv("CMAKE_BUILD_PARALLEL_LEVEL"); 
+    if (CMAKE_BUILD_PARALLEL_LEVEL) {
+      num_threads = std::atoi(CMAKE_BUILD_PARALLEL_LEVEL);
+    } 
+
+    // remote execution just pass it all
+    if (tipi_compiler_driver_in_use) { num_threads = jobs.size(); }
 
     if (verbose) {
         std::lock_guard<std::mutex> lock(output_mtx);
@@ -5194,8 +5202,10 @@ static int run_as_launcher(int argc, char* argv[]) {
         return rc;
     }
 
+    bool tipi_compiler_driver_in_use = false;
     if (compiler == "tipi-compiler-driver") {
       std::cout << "BEGIN compiler_with_driver is: " << std::endl;
+      tipi_compiler_driver_in_use = true;
       auto pch_flags = other_flags;
       auto actual_compiler = *pch_flags.begin();
       pch_flags = std::vector<std::string>(pch_flags.begin()+1, pch_flags.end());
@@ -5277,7 +5287,7 @@ static int run_as_launcher(int argc, char* argv[]) {
 
     if (!split_build_failed && !parallel_jobs.empty()) {
         if (verbose) std::cerr << "[cpp-splitter] compiling " << parallel_jobs.size() << " split file(s) in parallel\n";
-        auto results = compile_parallel(parallel_jobs, verbose, std::cerr);
+        auto results = compile_parallel(parallel_jobs, tipi_compiler_driver_in_use, verbose, std::cerr);
         for (const auto& r : results) {
             if (r.exit_code != 0) {
                 std::cerr << "cpp-splitter: compilation failed for split file: " << r.source_file << "\n";
@@ -5330,7 +5340,7 @@ static int run_as_launcher(int argc, char* argv[]) {
         }
         if (!hdr_compile_jobs.empty()) {
             if (verbose) std::cerr << "[cpp-splitter] compiling " << hdr_compile_jobs.size() << " header dep file(s)\n";
-            auto hdr_results = compile_parallel(hdr_compile_jobs, verbose, std::cerr);
+            auto hdr_results = compile_parallel(hdr_compile_jobs, tipi_compiler_driver_in_use, verbose, std::cerr);
             for (const auto& r : hdr_results) {
                 if (r.exit_code != 0) {
                     std::cerr << "cpp-splitter: compilation failed for header dep: " << r.source_file << "\n";
@@ -5620,7 +5630,7 @@ int main(int argc, char* argv[]) {
         } else {
             if (skipped > 0)
                 std::cout << "  (" << skipped << " file(s) up-to-date, recompiling " << jobs.size() << ")\n";
-            auto results = compile_parallel(jobs, true);
+            auto results = compile_parallel(jobs, false /* no tipi_compiler_driver_in_use in basic mode */, true);
             for (const auto& r : results) {
                 if (r.exit_code != 0) {
                     std::cerr << "Error: compilation failed for " << r.source_file << "\n";
@@ -5669,7 +5679,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (!hdr_jobs.empty()) {
-                auto hdr_results = compile_parallel(hdr_jobs, true);
+                auto hdr_results = compile_parallel(hdr_jobs, false /* no tipi_compiler_driver_in_use in basic mode */, true);
                 for (const auto& r : hdr_results) {
                     if (r.exit_code != 0) {
                         std::cerr << "Error: compilation failed for header dep " << r.source_file << "\n";
