@@ -251,3 +251,32 @@ if(NOT after_remote STREQUAL after_local)
 endif()
 
 message(STATUS "ok: the cluster produced the split, and it matches a local one byte for byte")
+
+# --- a remote split over a populated split directory --------------------------------------
+#
+# Every phase above starts from an empty split directory, and that is the case that works.
+# reclient *merges* an -output_directories result into what is already there, so a second
+# remote split leaves behind every piece the new one did not overwrite. Piece names carry an
+# index, so a unit whose set of definitions changed ends up holding two generations at once and
+# `ld -r` reports `multiple definition of main`. The splitter then falls back to compiling the
+# unit whole -- a build that succeeds and tests nothing, which is why this phase asserts on the
+# absence of a fallback rather than on the exit code.
+#
+# Measured before the fix, on the `one body` row of Boost.Spirit's suite: 265 of 279 units.
+file(APPEND "${WORKDIR}/src/shared.hpp" "
+inline int shared_extra() { return 2; }
+")
+
+run_build(remote_again TRUE again_log)
+
+if(again_log MATCHES "fallback|falling back")
+  message(FATAL_ERROR
+    "a second remote split over a populated split directory fell back to a plain compile. The "
+    "directory has to be cleared before the action, because reclient merges rather than "
+    "replaces.\n${again_log}")
+endif()
+if(NOT again_log MATCHES "remote split: [0-9]+ piece\\(s\\) returned from the cluster")
+  message(FATAL_ERROR "the second split did not run on the cluster; see ${WORKDIR}/remote_again.log")
+endif()
+
+message(STATUS "ok: a remote split over a populated directory neither merges nor falls back")

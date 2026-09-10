@@ -4691,6 +4691,12 @@ static bool read_split_cache(const std::string& split_dir, const std::string& ha
     std::ifstream ifs((fs::path(split_dir) / "split.cache").string());
     if (!ifs.is_open()) return false;
 
+    // Start from nothing. The lists below are appended to, and this is called more than once
+    // per run on the path where one candidate cache is tried and rejected before another is
+    // read -- which listed every piece twice and made `ld -r` report every symbol as multiply
+    // defined, in the one and only object that defined it.
+    sr = SplitResult{};
+
     std::string stored;
     if (!std::getline(ifs, stored) || stored != hash) return false;
     if (!std::getline(ifs, sr.preamble_filename)) return false;
@@ -5198,6 +5204,17 @@ static bool try_remote_split(const std::string& real_compiler,
 
     // The split directory has to exist before the action runs: the remote wrapper writes into
     // it, and an output directory that never appears is an error rather than an empty result.
+    // The directory has to be emptied first, and this is not housekeeping. reclient *merges*
+    // an -output_directories result into whatever is already there, so a split directory left
+    // over from an earlier run keeps every piece the new split did not happen to overwrite.
+    // Piece names carry an index, so a unit that gained or lost a definition ends up with two
+    // generations of pieces at once, and `ld -r` then reports `multiple definition of main`.
+    // On the `one body` row of Boost.Spirit's suite that was 265 of 279 units falling back to
+    // a plain compile.
+    if (fs::exists(split_dir, self_ec)) {
+        fs::remove_all(split_dir, self_ec);
+        if (self_ec) return decline("cannot clear the existing split directory");
+    }
     fs::create_directories(split_dir, self_ec);
 
     std::string cmd = shell_quote(env.rewrapper);
