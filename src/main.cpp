@@ -5366,13 +5366,31 @@ static int run_as_launcher(int argc, char* argv[]) {
     const std::string inputs_hash = split_inputs_hash(split_dir, input_file, split_flags);
 
     SplitResult sr;
-    // Three ways to arrive at a split, in decreasing order of how much they cost.
+    // Four ways to arrive at a split, in increasing order of what they cost: reuse what is
+    // there, re-slice one body out of the recorded harvest, ask the cluster to parse, parse
+    // here.
     const bool inputs_unchanged = read_split_cache(split_dir, inputs_hash, sr);
     bool re_sliced = false;
     if (inputs_unchanged) {
         if (verbose)
             std::cerr << "[cpp-splitter] inputs unchanged, reusing the existing split\n";
         for (const auto& hdr : sr.header_obj_dirs) (void)hdr;
+    } else if (read_split_cache_any(split_dir, sr) &&
+               try_incremental_split(split_dir, input_file, split_flags, sr, verbose)) {
+        // One function body changed and its piece has been re-sliced from the recorded
+        // harvest. Nothing was parsed, but the split *did* change, so the cache and the input
+        // hashes below still have to be rewritten -- and they have to be written after
+        // rewrite_depfile(), or they record the prerequisites of the run before this one.
+        //
+        // This is tried before the remote split, and the order is load-bearing rather than a
+        // preference. Re-slicing costs no parse and no network, and it rewrites only the one
+        // piece whose body moved -- so every other piece of the unit keeps its content and its
+        // action key, and the build system has nothing to recompile. Asking the cluster first
+        // regenerates the whole split instead: measured on the `one body` row of
+        // benchmark-spirit-cmake-re.sh, that turned 1 remote compile into 4836 and the row from
+        // 77.6s into 431.6s, because all 194 units that include the edited header came back
+        // with fresh pieces.
+        re_sliced = true;
     } else if (remote_split_enabled() && chained_behind_driver &&
                // chained_behind_driver guarantees other_flags is non-empty and that its first
                // element is the real compiler; compile_flags is what remains.
@@ -5382,13 +5400,6 @@ static int run_as_launcher(int argc, char* argv[]) {
         // is unchanged and still happens as separate actions, which is what keeps a one-line
         // edit costing one compile instead of a whole unit.
         re_sliced = false;
-    } else if (read_split_cache_any(split_dir, sr) &&
-               try_incremental_split(split_dir, input_file, split_flags, sr, verbose)) {
-        // One function body changed and its piece has been re-sliced from the recorded
-        // harvest. Nothing was parsed, but the split *did* change, so the cache and the input
-        // hashes below still have to be rewritten -- and they have to be written after
-        // rewrite_depfile(), or they record the prerequisites of the run before this one.
-        re_sliced = true;
     } else {
         sr = do_split(input_file, split_dir, split_flags, verbose);
     }

@@ -138,10 +138,14 @@ actions() {
     printf '%s/%s/%s' "$r" "$c" "$l"
 }
 
+# The peak is passed between run() and report() through this file rather than a variable.
+# run() is called in a command substitution -- `t=$(run ...)` -- so it executes in a subshell
+# and any variable it sets is discarded when that subshell exits. Assigning PEAK there reported
+# 0.0G for every row of a full benchmark before this was noticed.
 PEAK_FILE="$(mktemp)"
-PEAK=0
+echo 0 > "$PEAK_FILE"
 
-run() {  # run <log> <extra args...> -> elapsed ms; sets PEAK to peak system RSS in kB
+run() {  # run <log> <extra args...> -> elapsed ms; peak RSS lands in $PEAK_FILE
     local log="$1"; shift
     rm -rf "$REPO/build/rbe-logs"
     local start end sampler
@@ -151,7 +155,6 @@ run() {  # run <log> <extra args...> -> elapsed ms; sets PEAK to peak system RSS
     "$DRIVER" "$MODE" "$@" > "$log" 2>&1 || { kill "$sampler" 2>/dev/null; echo "BUILD FAILED, see $log" >&2; exit 1; }
     end=$(ms)
     kill "$sampler" 2>/dev/null || true
-    PEAK=$(cat "$PEAK_FILE")
     # A build the OOM killer got into is not a measurement. At high -j the splitter holds a
     # libclang AST per unit alongside everything else, and the victims look like defects.
     if grep -q '^Killed\|signal 9' "$log" 2>/dev/null; then
@@ -169,7 +172,7 @@ tipi run cmake --build "$REPO/build" -j"$(nproc)" >/dev/null
 
 printf '\n%-12s %-8s %9s %10s %-18s %8s\n' scenario splitter wall fallbacks 'remote/cached/local' 'peak RSS'
 printf '%-12s %-8s %9s %10s %-18s %8s\n' ------------ -------- --------- ---------- ------------------ --------
-report() { printf '%-12s %-8s %9s %10s %-18s %8s\n' "$1" "$2" "$(human "$3")" "$4" "$5" "$(human_rss "$PEAK")"; }
+report() { printf '%-12s %-8s %9s %10s %-18s %8s\n' "$1" "$2" "$(human "$3")" "$4" "$5" "$(human_rss "$(cat "$PEAK_FILE")")"; }
 
 # Three configurations rather than two when REMOTE_SPLIT is set, in one run: the point of
 # TODO/35 is splitting here against splitting on the cluster, and comparing those across two
