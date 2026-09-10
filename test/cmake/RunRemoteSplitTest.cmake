@@ -230,16 +230,25 @@ if(after_remote STREQUAL "")
   message(FATAL_ERROR "no split output found; the snapshot would compare nothing")
 endif()
 
-# Same sources, split here instead. Removing the split trees and the objects is what makes the
-# build system run the launcher again.
-file(GLOB_RECURSE target_dirs LIST_DIRECTORIES true "${mirror_build}/CMakeFiles/*")
-foreach(d ${target_dirs})
-  if(IS_DIRECTORY "${d}" AND d MATCHES "\\.split$")
-    file(REMOVE_RECURSE "${d}")
-  elseif(d MATCHES "\\.o$")
-    file(REMOVE "${d}")
-  endif()
-endforeach()
+# Removing the split trees and the objects is what makes the build system run the launcher
+# again -- and, where a phase is about what a remote split leaves behind, what stops an earlier
+# local build's leftovers from standing in for it.
+function(clear_split_trees)
+  file(GLOB_RECURSE entries LIST_DIRECTORIES true "${mirror_build}/CMakeFiles/*")
+  foreach(d ${entries})
+    if(IS_DIRECTORY "${d}" AND d MATCHES "\\.split$")
+      file(REMOVE_RECURSE "${d}")
+    elseif(d MATCHES "\\.o$" OR d MATCHES "\\.o\\.d$")
+      # The .o.d goes too. rewrite_depfile() reads it when it is there, so one left over from
+      # an earlier phase supplies the prerequisite list that a remote split is supposed to
+      # bring home itself -- and the phase below then passes whether or not it does.
+      file(REMOVE "${d}")
+    endif()
+  endforeach()
+endfunction()
+
+# Same sources, split here instead.
+clear_split_trees()
 
 run_build(local FALSE local_log)
 snapshot(after_local)
@@ -280,3 +289,63 @@ if(NOT again_log MATCHES "remote split: [0-9]+ piece\\(s\\) returned from the cl
 endif()
 
 message(STATUS "ok: a remote split over a populated directory neither merges nor falls back")
+
+# --- what a remote split leaves behind for the next edit ----------------------------------
+#
+# The invariant: after a split produced on the cluster, a one-line body edit must re-slice here
+# and must not go back to the cluster. Re-slicing costs no parse and no network, and it rewrites
+# only the piece whose body moved, so every other piece keeps its content and its action key.
+#
+# It holds because the prerequisite list survives a remote split, which is worth spelling out
+# because it is not obvious: the launcher attaches `-MD -MF` to the unit's first *piece*
+# compile, and the pieces are compiled here even when the split was not. So the compiler writes
+# the unit's depfile as usual, rewrite_depfile() turns it into depfile.cache, and
+# write_inputs_hashes() records what each prerequisite hashed to -- none of which knows or cares
+# where the split came from.
+#
+# This phase starts from a tree only the cluster has populated, .o.d files included, because
+# leftovers from the local phase above would supply that list even if a remote split did not.
+clear_split_trees()
+run_build(fresh_remote TRUE fresh_log)
+if(NOT fresh_log MATCHES "remote split: [0-9]+ piece\\(s\\) returned from the cluster")
+  message(FATAL_ERROR "expected a remote split into an empty tree; see ${WORKDIR}/fresh_remote.log")
+endif()
+
+split_outputs(produced)
+set(with_hashes 0)
+set(with_depfiles 0)
+foreach(f ${produced})
+  if(f MATCHES "/inputs\\.hash$")
+    math(EXPR with_hashes "${with_hashes} + 1")
+  elseif(f MATCHES "/depfile\\.cache$")
+    math(EXPR with_depfiles "${with_depfiles} + 1")
+  endif()
+endforeach()
+if(with_hashes EQUAL 0 OR NOT with_hashes EQUAL with_depfiles)
+  message(FATAL_ERROR
+    "a split produced on the cluster left ${with_hashes} inputs.hash against "
+    "${with_depfiles} depfile.cache. Both are needed for the next edit to re-slice instead of "
+    "going back to the cluster.")
+endif()
+
+# Change a body, and nothing else. The re-slice must handle it here, without the cluster.
+file(READ "${WORKDIR}/src/shared.hpp" shared_text)
+string(REPLACE "return 40;" "return 41;" shared_text "${shared_text}")
+file(WRITE "${WORKDIR}/src/shared.hpp" "${shared_text}")
+
+run_build(body_edit TRUE body_log)
+
+if(body_log MATCHES "fallback|falling back")
+  message(FATAL_ERROR "the body edit fell back to a plain compile:\n${body_log}")
+endif()
+if(NOT body_log MATCHES "one body changed in")
+  message(FATAL_ERROR
+    "a one-line body edit after a remote split did not re-slice. See ${WORKDIR}/body_edit.log")
+endif()
+if(body_log MATCHES "remote split: [0-9]+ piece\\(s\\) returned from the cluster")
+  message(FATAL_ERROR
+    "the body edit went back to the cluster for a full split. Re-slicing costs no parse and "
+    "no network and has to win.\n${body_log}")
+endif()
+
+message(STATUS "ok: after a remote split, a body edit re-slices here instead of on the cluster")
