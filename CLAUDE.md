@@ -1,5 +1,20 @@
 Be super succinct and synthetic in your explanations.
 
+# Work ethic
+- Before any work add a TODO/ as .md file with the following section : Motivation, Implementation Proposal, Acceptance Criteria. 
+  - Always plan unit test for the cpp-splitter unit test suite with CTest and an example/boost-to-split build to confirm (first just filesystem and then spirit with our integration test harness with example/spirit-tests/SpiritTestsFromJamfiles.cmake.
+
+- Once work is done, commit following the emojcode to prefix commits : 
+  * :barber: `:barber:` CLEANUP: removing old thing, unuseful code, badly written variable name...
+  * :lipstick: `:lipstick:`  EDITORIAL: changes which beautify the codebase or the app
+  * :rocket: `:rocket:` RELEASE commit
+  * :book: `:book:` DOC
+  * :new: `:new:` FEATURE
+  * :wrench: `:wrench:` BUGFIX
+  * :recycle: `:recycle:` REFACTORING
+  * :gear: `:gear:` CONFIG
+  * :mag: `:mag:` TEST: unit tests changed / added
+
 # If you are not in a tipi container or a devcontainer, on linux to compile the cpp-splitter
 
 1. Create docker container if it doesn't exists
