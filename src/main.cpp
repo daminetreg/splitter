@@ -5031,6 +5031,222 @@ static std::string relocatable_linker() {
     return "ld";
 }
 
+
+// ---------------------------------------------------------------------------------------
+// TODO/35: perform the split on the Remote Build Execution cluster.
+//
+// A distributed split build sends every piece to the cluster and does the splitting here: one
+// libclang parse per translation unit, several thousand pieces written, and an `ld -r` each.
+// Measured on Boost.Spirit that local half is what a full build costs once the cache is warm --
+// 456s against the ordinary build's 32s, with nothing compiled on either side. This moves the
+// parse and the emit to the cluster too.
+//
+// Four mechanisms make it work, and every one was verified against the real cluster before any
+// of this was written, because the design rests on them:
+//
+//   -labels=type=compile,compiler=clang,lang=cpp
+//       reproxy's own C++ input processor scans the command line and computes the header
+//       closure. We do not enumerate inputs -- the same scanner that decides what a piece
+//       compile needs decides what the split needs, so the two cannot disagree.
+//   -remote_wrapper=<this binary>
+//       the scanned command stays a genuine compiler invocation, which is what the input
+//       processor expects, and the splitter is put in front of it on the worker. Confirmed
+//       that scanning still happens with a wrapper present: a header named nowhere in
+//       -inputs was found and uploaded.
+//   -output_directories=<split dir>
+//       piece names cannot be known before the parse, but the directory holding them is
+//       `<object>.o.split` and always was. Confirmed the whole tree comes home.
+//   -env_var_allowlist=CPP_SPLITTER_EMIT_ONLY
+//       -remote_wrapper takes a path and no arguments, so the mode travels in the
+//       environment. Confirmed it arrives.
+//
+// EngFlow also rejects an action with no container image, so -platform has to carry one; the
+// value is whatever cmake-re already put in RBE_platform.
+//
+// The remote step is emit-only on purpose. If it compiled and linked as well, a unit would
+// become a single action and a one-line edit inside one function would invalidate all of it --
+// which is the opposite of the property being protected: today such an edit executes one remote
+// compile where an ordinary build executes 271.
+static bool remote_split_enabled() {
+    const char* v = std::getenv("CPP_SPLITTER_REMOTE_SPLIT");
+    return v && std::string(v) == "1" && !std::getenv("CPP_SPLITTER_EMIT_ONLY");
+}
+
+// Everything the rewrapper invocation needs, or nothing. Each value comes from what cmake-re
+// already exports for tipi-compiler-driver, so there is no second configuration to keep in
+// step -- and a missing one means this build is not talking to a cluster, which is a reason to
+// split locally rather than an error.
+struct RemoteSplitEnv {
+    std::string rewrapper;
+    std::string server_address;
+    std::string exec_root;
+    std::string platform;
+    bool usable() const {
+        return !rewrapper.empty() && !server_address.empty() && !exec_root.empty() &&
+               !platform.empty();
+    }
+};
+
+static RemoteSplitEnv remote_split_env() {
+    RemoteSplitEnv e;
+    auto env = [](const char* n) {
+        const char* v = std::getenv(n);
+        return v ? std::string(v) : std::string();
+    };
+    e.rewrapper = which_on_path("rewrapper");
+    if (e.rewrapper.empty()) {
+        const std::string home = env("TIPI_HOME_DIR");
+        const std::string base = home.empty() ? "/usr/local/share/.tipi" : home;
+        std::error_code ec;
+        if (fs::is_directory(base + "/reclient", ec))
+            for (const auto& d : fs::directory_iterator(base + "/reclient", ec)) {
+                const std::string cand = (d.path() / "rewrapper").string();
+                if (fs::exists(cand, ec) && ::access(cand.c_str(), X_OK) == 0) {
+                    e.rewrapper = cand;
+                    break;
+                }
+            }
+    }
+    e.server_address = env("RBE_server_address");
+    e.exec_root = env("RBE_exec_root");
+    e.platform = env("RBE_platform");
+    return e;
+}
+
+// A path as rewrapper wants it: relative to the exec root. Returns empty when the path lies
+// outside, which is the one case this cannot express -- the caller then splits locally.
+static std::string exec_root_relative(const std::string& path, const std::string& exec_root) {
+    std::error_code ec;
+    const fs::path abs = fs::absolute(path).lexically_normal();
+    const fs::path root = fs::absolute(exec_root).lexically_normal();
+    const fs::path rel = abs.lexically_relative(root);
+    if (rel.empty() || rel.native().rfind("..", 0) == 0) return std::string();
+    return rel.string();
+}
+
+// Ask the cluster to produce the split. Returns false for every reason not to have tried, and
+// the caller then splits here; the only thing it must never do is report success without the
+// split tree actually being present.
+static bool try_remote_split(const std::string& real_compiler,
+                             const std::vector<std::string>& compile_flags,
+                             const std::string& input_file,
+                             const std::string& output_file,
+                             const std::string& split_dir,
+                             SplitResult& sr,
+                             bool verbose) {
+    auto decline = [&](const char* why) {
+        if (verbose) std::cerr << "[cpp-splitter] local split: " << why << "\n";
+        return false;
+    };
+
+    const RemoteSplitEnv env = remote_split_env();
+    if (!env.usable()) return decline("no RBE environment (RBE_server_address/exec_root/platform)");
+
+    std::error_code self_ec;
+    std::string self = fs::read_symlink("/proc/self/exe", self_ec).string();
+    if (self.empty()) return decline("cannot determine this binary's own path");
+
+    // Two different relativisations of the same file, because rewrapper documents two:
+    // -remote_wrapper is "relative to the current working directory of rewrapper", while
+    // -toolchain_inputs is "relative to the exec root". Passing the exec-root path for both
+    // made the worker die in execvp() -- it resolved the wrapper against the action's working
+    // directory, where nothing of that name exists.
+    //
+    // So stage the binary inside the working directory (which is itself under the exec root,
+    // being cmake-re's build tree) and name it each way. Keyed by content hash: written once,
+    // safe against concurrent launchers, and recognised by the cluster's cache as the same
+    // input across every unit of a build rather than re-uploaded per unit.
+    //
+    // libclang is not staged with it. The worker runs the image that
+    // environments/ubuntu-clang.pkr.js pins by digest, and the binary's RPATH points into that
+    // image's toolchain, so the library is already there at the same absolute path.
+    const fs::path cwd = fs::current_path(self_ec);
+    if (exec_root_relative(self, env.exec_root).empty()) {
+        const std::string hash = file_content_hash(self);
+        if (hash.empty()) return decline("cannot hash this binary");
+        const fs::path staged = cwd / ".cpp-splitter" / hash / "cpp-splitter";
+        if (!fs::exists(staged, self_ec)) {
+            fs::create_directories(staged.parent_path(), self_ec);
+            const fs::path tmp = staged.string() + ".tmp." + std::to_string(::getpid());
+            fs::copy_file(self, tmp, fs::copy_options::overwrite_existing, self_ec);
+            if (self_ec) return decline("cannot stage this binary under the working directory");
+            fs::permissions(tmp,
+                            fs::perms::owner_all | fs::perms::group_read |
+                                fs::perms::group_exec | fs::perms::others_read |
+                                fs::perms::others_exec,
+                            self_ec);
+            fs::rename(tmp, staged, self_ec);   // atomic: a loser of the race sees a whole file
+            if (self_ec) fs::remove(tmp, self_ec);
+        }
+        if (!fs::exists(staged, self_ec))
+            return decline("cannot stage this binary under the working directory");
+        self = staged.string();
+    }
+
+    const std::string self_cwd_rel =
+        fs::absolute(self).lexically_normal().lexically_relative(cwd.lexically_normal()).string();
+    const std::string self_rel = exec_root_relative(self, env.exec_root);
+    const std::string split_rel = exec_root_relative(split_dir, env.exec_root);
+    const std::string obj_rel = exec_root_relative(output_file, env.exec_root);
+    if (self_rel.empty()) {
+        if (verbose)
+            std::cerr << "[cpp-splitter] local split: this binary (" << self
+                      << ") is not under the exec root (" << env.exec_root << ")\n";
+        return false;
+    }
+    if (split_rel.empty() || obj_rel.empty()) return decline("the output is not under the exec root");
+
+    // The split directory has to exist before the action runs: the remote wrapper writes into
+    // it, and an output directory that never appears is an error rather than an empty result.
+    fs::create_directories(split_dir, self_ec);
+
+    std::string cmd = shell_quote(env.rewrapper);
+    cmd += " -server_address " + shell_quote(env.server_address);
+    cmd += " -exec_root " + shell_quote(env.exec_root);
+    cmd += " -labels=type=compile,compiler=clang,lang=cpp";
+    cmd += " -exec_strategy=remote";
+    cmd += " -remote_wrapper=" + shell_quote(self_cwd_rel);
+    cmd += " -toolchain_inputs=" + shell_quote(self_rel);
+    cmd += " -output_directories=" + shell_quote(split_rel);
+    cmd += " -env_var_allowlist=CPP_SPLITTER_EMIT_ONLY";
+    cmd += " -platform=" + shell_quote(env.platform);
+    cmd += " --";
+    cmd += " " + shell_quote(real_compiler);
+    for (const auto& f : compile_flags) cmd += " " + shell_quote(f);
+    cmd += " -c -o " + shell_quote(output_file) + " " + shell_quote(input_file);
+
+    // Kept rather than swallowed: when a remote action fails the reason is in rewrapper's
+    // stderr, and "the remote split failed" on its own is not a diagnosis.
+    const std::string rw_log = (fs::path(split_dir) / "remote-split.log").string();
+    cmd += " > " + shell_quote(rw_log) + " 2>&1";
+
+    if (verbose) std::cerr << "[cpp-splitter] remote split: " << cmd << "\n";
+    setenv("CPP_SPLITTER_EMIT_ONLY", "1", 1);
+    const int rc = run_command_quiet(cmd);
+    unsetenv("CPP_SPLITTER_EMIT_ONLY");
+    if (rc != 0) {
+        std::cerr << "[cpp-splitter] remote split failed (" << rc << "), splitting locally."
+                     " rewrapper said:\n";
+        std::ifstream rl(rw_log);
+        std::string line;
+        int shown = 0;
+        while (std::getline(rl, line) && shown < 8) {
+            std::cerr << "    " << line << "\n";
+            ++shown;
+        }
+        return false;
+    }
+
+    // What came back has to be a split, not an empty directory. read_split_cache() checks that
+    // every file it names exists, so this is also the check that the download was complete.
+    if (!read_split_cache(split_dir, "remote-emit", sr))
+        return decline("the remote split returned no usable result");
+    if (verbose)
+        std::cerr << "[cpp-splitter] remote split: " << sr.compilable_files.size()
+                  << " piece(s) returned from the cluster\n";
+    return true;
+}
+
 static int run_as_launcher(int argc, char* argv[]) {
     bool verbose = launcher_verbose();
     std::string compiler = argv[1];
@@ -5157,6 +5373,15 @@ static int run_as_launcher(int argc, char* argv[]) {
         if (verbose)
             std::cerr << "[cpp-splitter] inputs unchanged, reusing the existing split\n";
         for (const auto& hdr : sr.header_obj_dirs) (void)hdr;
+    } else if (remote_split_enabled() && chained_behind_driver &&
+               // chained_behind_driver guarantees other_flags is non-empty and that its first
+               // element is the real compiler; compile_flags is what remains.
+               try_remote_split(other_flags.front(), compile_flags,
+                                input_file, output_file, split_dir, sr, verbose)) {
+        // The cluster produced the pieces. Everything below -- compiling them, linking them --
+        // is unchanged and still happens as separate actions, which is what keeps a one-line
+        // edit costing one compile instead of a whole unit.
+        re_sliced = false;
     } else if (read_split_cache_any(split_dir, sr) &&
                try_incremental_split(split_dir, input_file, split_flags, sr, verbose)) {
         // One function body changed and its piece has been re-sliced from the recorded
@@ -5177,6 +5402,21 @@ static int run_as_launcher(int argc, char* argv[]) {
         }
         return cmd;
     };
+
+    // Emit-only, which is how this process runs on a worker: produce the pieces, record what
+    // was produced, and stop. Compiling and linking them is the caller's job, back on the
+    // machine that asked -- see try_remote_split() for why that separation is the whole point.
+    if (std::getenv("CPP_SPLITTER_EMIT_ONLY")) {
+        if (!sr.success) {
+            std::cerr << "cpp-splitter: --emit-only split failed for " << input_file << "\n";
+            return 1;
+        }
+        write_split_cache(split_dir, "remote-emit", sr);
+        if (verbose)
+            std::cerr << "[cpp-splitter] emit-only: " << sr.compilable_files.size()
+                      << " piece(s) written, nothing compiled\n";
+        return 0;
+    }
 
     if (!sr.success) {
         // Not gated on verbose. A fallback means the tool did nothing it exists to do, and

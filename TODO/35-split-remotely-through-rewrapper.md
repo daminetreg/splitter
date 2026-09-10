@@ -181,3 +181,65 @@ first, and only then Spirit through `example/spirit-tests/SpiritTestsFromJamfile
   wall time alone cannot distinguish work moved from work cached.
 - Peak local RSS during a `-j500` split build falls measurably, which is the second reason for
   doing this at all.
+
+## Outcome
+
+Implemented and verified against the real cluster.
+
+`remote_split_enabled()` gates the whole path on `CPP_SPLITTER_REMOTE_SPLIT`, and
+`remote_split_env()` reads `RBE_server_address`, `RBE_exec_root` and `RBE_platform` from the
+environment reproxy already exports, so the launcher borrows cmake-re's proxy rather than
+starting one. `try_remote_split()` runs before any parsing: it stages the `cpp-splitter` binary
+by content hash under `<cwd>/.cpp-splitter/<hash>/`, invokes `rewrapper` with the compile
+command as the action, and reads the returned tree through `read_split_cache()`. With
+`CPP_SPLITTER_EMIT_ONLY=1` in `-env_var_allowlist`, the copy on the worker writes the split
+tree and exits before compiling anything.
+
+Four details cost a full debugging round each and are worth keeping written down:
+
+- `-remote_wrapper` is resolved **relative to the working directory**, while
+  `-toolchain_inputs` is relative to the **exec root**. The same path in both makes the worker
+  die inside `execvp()`.
+- The binary has to live under the exec root to be uploaded at all, hence the staging copy.
+- EngFlow refuses an action with no platform: `-platform=container-image=docker://…@sha256:…`
+  is required, not optional.
+- `-labels=type=compile,compiler=clang,lang=cpp` is what makes reproxy's CPP input processor
+  scan the command and upload the header closure. Nothing else declares the inputs, and it
+  works through `-remote_wrapper`.
+
+Against the acceptance criteria:
+
+- **Dependency scanning through the labels** — confirmed before writing any of this, with a
+  probe whose only declared input was the wrapper script; reproxy found the header anyway.
+- **`--emit-only` is byte-identical and compiles nothing** — confirmed on a Boost.Filesystem
+  unit.
+- **`launcher.remote_split_on_opal`** — passes. It builds a two-unit project through
+  `cmake-re --host --distributed`, requires the `remote split: N piece(s) returned from the
+  cluster` line, requires reclient's records to show the action served by the cluster and **no**
+  local execution or fallback, then rebuilds the same sources with the feature off and compares
+  the two `.split` trees byte for byte. It skips only when there are no mTLS credentials or no
+  cmake-re, and it says so.
+- **Boost.Filesystem, 0 fallbacks** — a local split build of `BOOST_INCLUDE_LIBRARIES=filesystem`
+  is clean.
+- **Boost.Spirit's suite, 0 fallbacks, produced on the cluster** — the full ported suite built
+  through `cmake-re --host --distributed -j64` with the feature on: 549 edges, 268 programs,
+  **279 units split remotely, 0 fallbacks**, 279 `REMOTE_EXECUTION` records and 14.1 GB of split
+  trees downloaded.
+
+Three criteria are measurements rather than behaviour and are **not** yet recorded: the `full`
+and `one body` rows against the numbers in `benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md`,
+and peak local RSS at `-j500`. The benchmark has to be re-run to settle them.
+
+Two mistakes made while testing this, both of which produced a *passing* build that proved
+nothing, and which the test now guards against explicitly:
+
+- `find_program(cmake_re ... PATHS ...)` appends to the default search, so it found the
+  v0.0.87 cmake-re on `PATH` instead of the v0.0.88 in `cmake-re-dev-latest/`. Only from
+  v0.0.88 does cmake-re chain a user-supplied `CMAKE_CXX_COMPILER_LAUNCHER` ahead of
+  `tipi-compiler-driver`; the older one drops it silently, so the splitter never ran. The test
+  now reads `CMAKE_CXX_COMPILER_LAUNCHER` back out of the cache and fails if cpp-splitter is
+  not in it.
+- Removing the work directory does not force a cold build: `-B` is a symlink into cmake-re's
+  mirror and cmake-re keys the directory it points at on the configuration, so the next run
+  adopts whatever was configured there before. The test resolves the link and removes the real
+  directory.
