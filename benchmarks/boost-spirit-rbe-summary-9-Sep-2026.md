@@ -93,49 +93,51 @@ through `rewrapper` before parsing anything, so the libclang parse happens on a 
 and the pieces are downloaded. Everything else is unchanged — the pieces still compile as
 separate actions, and the final `ld -r` still happens here.
 
-The last column is what the splitter itself reported for that row, which is the only way to
-tell which of its four paths each unit took.
+**Wall is the build alone**, as CMake RE reports it, not the whole invocation: copying the
+project in, staging the drivers, mirroring the sources and configuring came to about 20s and
+used to land in every row. The two tables above still include it and are not comparable with
+this one column for column. The last column is what the splitter itself reported, which is the
+only way to tell which of its four paths each unit took.
 
-| scenario | wall | fallbacks | remote | cached | peak RSS | how the 279 units were split |
+| scenario | build | fallbacks | remote | cached | peak RSS | how the 279 units were split |
 |---|---:|---:|---:|---:|---:|---|
-| full | 334.6s | 0 | 279 | 15885 | 8.0G | 279 on the cluster |
-| no-op | 20.7s | 0 | 0 | 1635 | 0.3G | none, nothing changed |
-| one source | 13.9s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
-| one header | 13.8s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
-| **one body** | **22.6s** | **0** | **1** | 1575 | 0.4G | **268 re-sliced here, none on the cluster** |
+| full | 357.5s | 0 | 0 | 16722 | 7.0G | 279 on the cluster |
+| no-op | 12.5s | 0 | 0 | 1635 | 0.6G | none: all 279 reused their split |
+| one source | 6.1s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
+| one header | 6.1s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
+| **one body** | **33.0s** | **0** | **1** | 1575 | 0.4G | **268 re-sliced here, none on the cluster** |
 
 Peak RSS is the resident memory of this benchmark's own processes, sampled every two seconds
-and attributed by process group. A system-wide figure would be meaningless on this machine,
-which has other tenants.
+and attributed by process group. It still spans the whole invocation, which costs nothing in
+accuracy: mirroring and configuring are a couple of single-threaded processes against several
+hundred concurrent launchers. A system-wide figure would be meaningless on this machine, which
+has other tenants.
 
-**The full row is faster than splitting here while doing more.** 334.6s against 456.0s, and the
-action counts are what make that comparison worth anything: this row **executed** 279 splits on
-the cluster, where the split-here row of the table above was served entirely from cache — 0
-executions against 15885 hits. A row that did the parsing beat a row that did none.
+**The body row is the result, and it needed TODO/36 to work at all.** 33.0s, one remote compile,
+and **268 of the affected units re-sliced the changed body locally** without touching the
+cluster. Before TODO/36 the same row read **606.5s and 4835 remote actions**: a definition the
+unit keeps in its copy of the header was left out of the harvest, so an edit to it re-split the
+whole unit — on the cluster, once per affected unit. Two defects, both found by asking the
+splitter why it refused rather than inferring it. See `TODO/36`.
 
-It is still not a large win, and the EngFlow profile of an earlier instance of this row says
-why: 279 remote splits at a mean of **28.9s of worker time** each, and **589911 blob downloads**
-to bring the pieces home. The parse leaves this machine and the output transfer replaces it.
-That transfer is the thing to attack next, not the parse.
+**The full row's cost is transfer, not parsing.** All 279 splits were produced on the cluster
+with no fallback, and every action came from its cache — 0 executions against 16722 hits. The
+EngFlow profile of an earlier instance of this row says where the time goes: 279 remote splits
+at a mean of **28.9s of worker time** each, and **589911 blob downloads** to bring the pieces
+home. Compiling the pieces where they already are, rather than downloading them to compile
+here, is the thing to try next.
 
-**Peak memory is still higher, not lower.** 8.0G on the full row against 2.9G when splitting
+**Peak memory is still higher, not lower.** 7.0G on the full row against 2.9G when splitting
 here. The second half of TODO/35's motivation was that several hundred concurrent libclang
 parses are what exhausts this machine at `-j500`; moving the parse away does remove those, but
 the launchers stay resident while they wait on the cluster and the downloads are not free. On
 this evidence the memory argument for remote splitting does not hold.
 
-**The body row is the result, and it needed TODO/36 to work at all.** 22.6s, one remote compile,
-and **268 of the affected units re-sliced the changed body locally** without touching the
-cluster. It is faster than the 74.9s of splitting the same sources here, for the reason the
-whole design predicts: the re-slice is local and free, and every piece it did not change was
-already in the cluster's cache.
-
-Before TODO/36 this row read **606.5s and 4835 remote actions**, because a definition the unit
-keeps in its copy of the header was left out of the harvest and an edit to it re-split the whole
-unit — on the cluster, once per affected unit. Two defects, both found by asking the splitter
-why it refused rather than inferring it: the harvest filtered kept definitions out, and the
-guard against a kept definition nested in the edited body then matched the edited definition
-itself. See `TODO/36`.
+**Run-to-run variance is real and worth stating.** The same five rows measured an hour earlier,
+timed around the whole invocation, gave a `full` row of 334.6s **with** 279 executions rather
+than cache hits, and a `one body` row of 22.6s. A row that did the parsing beat one that did
+none, and the body row moved by half again. Wall times here are worth about two significant
+figures; the action counts and the split attribution are the stable part of the result.
 
 ### On this machine alone, `-j16`
 
@@ -201,12 +203,12 @@ the difference is 1635 cache lookups where the ordinary build needs none.
 - **One edit is not a distribution of edits.** This one has a reach-to-use ratio of 194:1. An
   edit to something used as widely as it is included would show both builds doing the same
   work.
-- **Every wall time includes the configure, not just the build.** The benchmark times one
-  invocation of `build-spirit-cmake-re.sh`, which copies the project in, stages the tipi
-  drivers, has CMake RE mirror the sources, configures, and only then builds. The `no-op` row
-  builds nothing and still reads 20.7s, so that is roughly the floor every row carries: the
-  `full` row's 334.6s is about 315s of building on top of it. Rows are comparable with each
-  other, which is what they are for, but none of them is a build time.
+- **The first two tables' wall times include the configure; the third's do not.** The benchmark
+  used to time one whole invocation of `build-spirit-cmake-re.sh` -- copying the project in,
+  staging the drivers, mirroring the sources, configuring, and then building -- which added
+  about 20s to every row. The driver now reports its own build phase and the benchmark reads
+  that, so the cluster-split table is build-only. The two `-j500` and `-j16` tables above
+  predate the change: compare within a table, not across.
 - **A row is only attributable if the splitter was verbose.** It reports which of its four
   paths each unit took -- reuse, re-slice, cluster, or parse here -- and without that a row
   that quietly declined to use the cluster and split here instead looks exactly like one that
