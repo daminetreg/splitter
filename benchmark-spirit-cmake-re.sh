@@ -124,11 +124,14 @@ sample_rss() {   # sample_rss <output file>; runs until killed
 }
 human_rss() { awk -v v="$1" 'BEGIN { printf "%6.1fG", v/1048576 }'; }
 
-ms() { date +%s%3N; }
 human() { awk -v v="$1" 'BEGIN { printf "%7.1fs", v/1000 }'; }
 
 # Reclient keeps no record of where an action ran unless it is asked to, so build-spirit-cmake-re.sh
 # points RBE_proxy_log_dir here. Read the records rather than trusting the wall clock.
+#
+# The wall column is the build only. Peak RSS still spans the whole invocation, which costs
+# nothing in accuracy: mirroring and configuring are a couple of single-threaded processes
+# against several hundred concurrent launchers.
 actions() {
     local files=( "$REPO"/build/rbe-logs/*.rrpl )
     if [ ! -e "${files[0]}" ]; then printf 'none'; return; fi
@@ -146,15 +149,13 @@ actions() {
 PEAK_FILE="$(mktemp)"
 echo 0 > "$PEAK_FILE"
 
-run() {  # run <log> <extra args...> -> elapsed ms; peak RSS lands in $PEAK_FILE
+run() {  # run <log> <extra args...> -> the build's elapsed ms; peak RSS lands in $PEAK_FILE
     local log="$1"; shift
     rm -rf "$REPO/build/rbe-logs"
-    local start end sampler
+    local sampler
     echo 0 > "$PEAK_FILE"
     sample_rss "$PEAK_FILE" & sampler=$!
-    start=$(ms)
     "$DRIVER" "$MODE" "$@" > "$log" 2>&1 || { kill "$sampler" 2>/dev/null; echo "BUILD FAILED, see $log" >&2; exit 1; }
-    end=$(ms)
     kill "$sampler" 2>/dev/null || true
     # A build the OOM killer got into is not a measurement. At high -j the splitter holds a
     # libclang AST per unit alongside everything else, and the victims look like defects.
@@ -162,7 +163,20 @@ run() {  # run <log> <extra args...> -> elapsed ms; peak RSS lands in $PEAK_FILE
         echo "OOM kills during $log -- this is not a measurement" >&2
         exit 1
     fi
-    echo $((end - start))
+    # The build alone, as the driver timed it. Copying the project in, mirroring the sources
+    # and configuring are real cost but they are not the build, and they were adding about 20s
+    # to every row -- enough that the no-op row was almost entirely them.
+    #
+    # A missing marker is an error rather than a fallback to the whole invocation: the two
+    # differ by that 20s, and silently reporting one as the other is exactly the confusion this
+    # removes.
+    local ms_line
+    ms_line="$(sed -n 's/^==> build wall ms: \([0-9]\+\)$/\1/p' "$log" | tail -1)"
+    if [ -z "$ms_line" ]; then
+        echo "no '==> build wall ms:' line in $log -- the driver did not report a build time" >&2
+        exit 1
+    fi
+    echo "$ms_line"
 }
 
 fallbacks() { grep -c 'falling back' "$1" 2>/dev/null || true; }

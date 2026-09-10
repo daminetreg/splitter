@@ -281,8 +281,19 @@ echo "==> configure"
 
 # `--build` has to be the first argument: cmake-re dispatches on it to pick the subcommand, and
 # putting --host ahead of it is a usage error rather than a flag ordering nicety.
+#
+# Timed here rather than around this whole script, and reported on a line the benchmark parses.
+# Everything above -- copying the project in, staging the drivers, mirroring the sources,
+# configuring -- is real cost but it is not the build, and on this corpus it is about 20s that
+# was landing in every measured row.
 echo "==> build"
-"$CMAKE_RE" --build "$BUILD" "${MODE_FLAGS[@]}" -j "$JOBS"
+build_start_ms="$(date +%s%3N)"
+build_status=0
+# `|| build_status=$?` rather than reading $? on the next line: this script runs under `set -e`,
+# which would exit before the assignment and take the timing line with it.
+"$CMAKE_RE" --build "$BUILD" "${MODE_FLAGS[@]}" -j "$JOBS" || build_status=$?
+echo "==> build wall ms: $(( $(date +%s%3N) - build_start_ms ))"
+[ "$build_status" -eq 0 ] || exit "$build_status"
 
 # -B is a symlink into the mirror rather than a directory, so anything reporting on it has to
 # resolve it first. cmake-re builds out of its own copy of the source tree, which is why the
