@@ -31,3 +31,17 @@ You can just use the compilation commands bellow.
 # Compilation Commands
 3. Configure the splitter with `cmake -GNinja -S . -B build/ -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake`
 4. Build the splitter with `cmake --build build/ -j32`
+
+
+# When running benchmarks with `cmake-re --host --distributed`
+
+cmake-re outputs :
+```
+Invocation ID: 4e136242-bb77-482a-b563-37b619a446d4
+Proxy started successfully.
+Remote execution proxy started sucessfully
+```
+
+You can download after the build the EngFlow profile with cURL using the same mTLS key than for the build to authenticate on : https://${RBE_service}/api/profiling/v1/instances/default/invocations/4e136242-bb77-482a-b563-37b619a446d4
+
+The download will land a chrome tracing file which can be analyzed with perfetto.
