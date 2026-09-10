@@ -98,39 +98,44 @@ tell which of its four paths each unit took.
 
 | scenario | wall | fallbacks | remote | cached | peak RSS | how the 279 units were split |
 |---|---:|---:|---:|---:|---:|---|
-| full | 373.8s | 0 | 0 | 16722 | 6.9G | 279 on the cluster |
-| no-op | 20.3s | 0 | 0 | 1635 | 0.5G | none, nothing changed |
+| full | 334.6s | 0 | 279 | 15885 | 8.0G | 279 on the cluster |
+| no-op | 20.7s | 0 | 0 | 1635 | 0.3G | none, nothing changed |
 | one source | 13.9s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
-| one header | 13.9s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
-| **one body** | **606.5s** | **0** | **4835** | 1557 | 8.4G | **1 re-sliced here, 267 on the cluster** |
+| one header | 13.8s | 0 | 0 | 0 | 0.3G | none, not re-mirrored |
+| **one body** | **22.6s** | **0** | **1** | 1575 | 0.4G | **268 re-sliced here, none on the cluster** |
 
 Peak RSS is the resident memory of this benchmark's own processes, sampled every two seconds
 and attributed by process group. A system-wide figure would be meaningless on this machine,
 which has other tenants.
 
-**The full row works and does not pay.** All 279 splits ran on the cluster with no fallback,
-and the wall time is 373.8s against the 456.0s of splitting here — within the noise of a row
-whose actions are all cache hits, and certainly not the win the motivation hoped for. The
-EngFlow profile of an earlier instance of this row says why: 279 remote splits at a mean of
-28.9s of worker time each, and **589911 blob downloads** to bring the pieces home. The parse
-moves off this machine; the output transfer replaces it.
+**The full row is faster than splitting here while doing more.** 334.6s against 456.0s, and the
+action counts are what make that comparison worth anything: this row **executed** 279 splits on
+the cluster, where the split-here row of the table above was served entirely from cache — 0
+executions against 15885 hits. A row that did the parsing beat a row that did none.
 
-**Peak memory goes up, not down.** 6.9G on the full row against 2.9G when splitting here. The
-motivation for TODO/35 was that several hundred concurrent libclang parses are what exhausts
-this machine at `-j500`; moving the parse away does remove that, but the launchers stay
-resident while they wait on the cluster and the downloads are not free. On this evidence the
-memory argument for remote splitting does not hold.
+It is still not a large win, and the EngFlow profile of an earlier instance of this row says
+why: 279 remote splits at a mean of **28.9s of worker time** each, and **589911 blob downloads**
+to bring the pieces home. The parse leaves this machine and the output transfer replaces it.
+That transfer is the thing to attack next, not the parse.
 
-**The body row is a regression, and the reason is known to be unknown.** 606.5s against 75.5s,
-and 4835 remote actions against 1. The splitter's own log says exactly what went wrong: of the
-268 units affected by the edit, **one** re-sliced the changed body out of its recorded harvest
-and **267** went back to the cluster for a full split. Splitting the same sources here re-slices
-all of them. So a split produced on the cluster leaves something behind that a locally produced
-one does not, and the next edit pays for it.
+**Peak memory is still higher, not lower.** 8.0G on the full row against 2.9G when splitting
+here. The second half of TODO/35's motivation was that several hundred concurrent libclang
+parses are what exhausts this machine at `-j500`; moving the parse away does remove those, but
+the launchers stay resident while they wait on the cluster and the downloads are not free. On
+this evidence the memory argument for remote splitting does not hold.
 
-What that something is has not been established. It is *not* the missing prerequisite record
-first suspected: after this run every one of the 279 split directories holds both a
-`depfile.cache` and an `inputs.hash`. See `TODO/36`.
+**The body row is the result, and it needed TODO/36 to work at all.** 22.6s, one remote compile,
+and **268 of the affected units re-sliced the changed body locally** without touching the
+cluster. It is faster than the 74.9s of splitting the same sources here, for the reason the
+whole design predicts: the re-slice is local and free, and every piece it did not change was
+already in the cluster's cache.
+
+Before TODO/36 this row read **606.5s and 4835 remote actions**, because a definition the unit
+keeps in its copy of the header was left out of the harvest and an edit to it re-split the whole
+unit — on the cluster, once per affected unit. Two defects, both found by asking the splitter
+why it refused rather than inferring it: the harvest filtered kept definitions out, and the
+guard against a kept definition nested in the edited body then matched the edited definition
+itself. See `TODO/36`.
 
 ### On this machine alone, `-j16`
 

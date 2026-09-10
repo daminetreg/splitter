@@ -60,6 +60,25 @@ thing that found it was asking the splitter why it refused rather than guessing 
 
 Done, and all four criteria hold. 34/34 tests pass.
 
+**Two defects, not one.** Recording kept definitions in the harvest exposed a second: the guard
+against a definition kept in the preamble sitting *inside* the edited body reads the `.keeps`
+file, and a kept definition appears both there and — now — in the harvest, so it matched itself
+and the fast path refused work it had just proven safe. It is strictly-inside now. The local
+fixture missed it at first because its edit kept the line count the same and the guard only runs
+when something moved; the edit adds a line now, which also puts renumbering around a kept
+definition under the byte-identity check.
+
+**Confirmed on Boost.Spirit's suite**, `one body`, split on the cluster at `-j500`:
+
+| | wall | remote actions | how the affected units were split |
+|---|---:|---:|---|
+| before | 606.5s | 4835 | 1 re-sliced, 267 re-split on the cluster |
+| after | **22.6s** | **1** | **268 re-sliced here, none on the cluster** |
+
+Faster than the 74.9s of splitting the same sources locally, which is what the design predicts:
+the re-slice is local and free, and every piece it did not change was already in the cluster's
+cache. Numbers in `benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md`.
+
 The fix is the four steps above. The repro is local and takes 0.6s — deliberately not Boost.
 Spirit, which is where the symptom was found but far too slow and far too indirect to develop
 against. Reproducing it small also showed it was never about remote splitting at all: the same
