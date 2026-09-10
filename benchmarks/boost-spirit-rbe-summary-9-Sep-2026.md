@@ -201,6 +201,12 @@ the difference is 1635 cache lookups where the ordinary build needs none.
 - **One edit is not a distribution of edits.** This one has a reach-to-use ratio of 194:1. An
   edit to something used as widely as it is included would show both builds doing the same
   work.
+- **Every wall time includes the configure, not just the build.** The benchmark times one
+  invocation of `build-spirit-cmake-re.sh`, which copies the project in, stages the tipi
+  drivers, has CMake RE mirror the sources, configures, and only then builds. The `no-op` row
+  builds nothing and still reads 20.7s, so that is roughly the floor every row carries: the
+  `full` row's 334.6s is about 315s of building on top of it. Rows are comparable with each
+  other, which is what they are for, but none of them is a build time.
 - **A row is only attributable if the splitter was verbose.** It reports which of its four
   paths each unit took -- reuse, re-slice, cluster, or parse here -- and without that a row
   that quietly declined to use the cluster and split here instead looks exactly like one that
