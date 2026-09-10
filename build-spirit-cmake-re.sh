@@ -68,12 +68,17 @@ if [ -z "$CMAKE_RE" ]; then
 fi
 SOURCE="$REPO/example/boost-to-split/cmake-re"
 USE_SPLITTER=0
+REMOTE_SPLIT=0
 DISTRIBUTED=0
 CLEAN=0
 
 for arg in "$@"; do
     case "$arg" in
         --split) USE_SPLITTER=1 ;;
+        # TODO/35: produce the split on the cluster instead of on this machine. Only means
+        # anything together with --split --distributed, since it needs cpp-splitter in the
+        # build and reproxy's environment to borrow.
+        --remote-split) REMOTE_SPLIT=1 ;;
         --distributed) DISTRIBUTED=1 ;;
         --clean) CLEAN=1 ;;
         --host) ;;   # the default, and accepted so the two can be written together
@@ -228,12 +233,21 @@ if [ "$USE_SPLITTER" = 1 ]; then
     launcher_args+=("-DCMAKE_CXX_COMPILER_LAUNCHER=$REPO/build/cpp-splitter")
 fi
 
+if [ "$REMOTE_SPLIT" = 1 ]; then
+    if [ "$USE_SPLITTER" != 1 ] || [ "$DISTRIBUTED" != 1 ]; then
+        echo "--remote-split needs --split and --distributed" >&2
+        exit 2
+    fi
+    export CPP_SPLITTER_REMOTE_SPLIT=1
+fi
+
 echo "==> source:    $SOURCE"
 echo "==> build dir: $BUILD"
 echo "==> build type: $BUILD_TYPE"
 echo "==> jobs:      $JOBS"
 echo "==> mode:      ${MODE_FLAGS[*]}"
 echo "==> splitter:  $([ "$USE_SPLITTER" = 1 ] && echo yes || echo no)"
+echo "==> split on:  $([ "$REMOTE_SPLIT" = 1 ] && echo cluster || echo "this machine")"
 
 # Removing -B is not enough to force a cold build. cmake-re keys its real build directory on
 # the configuration, so an identical configure lands back on the same one and ninja reports
