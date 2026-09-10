@@ -44,24 +44,50 @@ everything downstream is unchanged. Gate it on `chained_behind_driver` (already 
 front of it. Add `CPP_SPLITTER_REMOTE_SPLIT=1` to opt in while this is experimental, and an
 `_IN_REMOTE_SPLIT` marker in the child's environment so the remote invocation cannot recurse.
 
-### `-inputs`: the guess is right, and there are two ways to satisfy it
+### `-inputs`: let reproxy's dependency scanner compute them
 
 A split needs exactly what compiling that translation unit needs — the source and its include
-closure. Nothing more, since `--emit-only` neither compiles nor links.
+closure. Nothing more, since `--emit-only` neither compiles nor links. So the right move is not
+to compute that list ourselves but to ask for the same scanning an ordinary C++ compile gets:
 
-**Baseline: declare them ourselves.** Run `<compiler> -M -MG <flags> <source>` first, parse the
-make rule, and hand the list to rewrapper via `-input_list_paths=<file>` with
-`-labels=type=tool` (the label that does no scanning and takes the caller's list). A `-M` run is
-a preprocess: far cheaper than the parse it replaces, and the only new local cost. Note there is
-no `-M` path in the tool today — `detect_system_includes()` and `probe_driver_standard()` are
-the only preprocessor invocations and both run against `/dev/null`.
+```
+-labels=type=compile,compiler=clang,lang=cpp
+```
 
-**Optimisation to try second: let reproxy discover them.** `-labels=type=compile` makes reproxy
-run its own dependency scanner (`scandeps_server`) over a *compiler* command line, which is
-what the C++ path normally uses instead of an explicit list. Our command is `cpp-splitter`, so
-the action would have to be presented as a compile of the source with the real compiler and the
-splitter injected by `-remote_wrapper` (the flag exists; its exact semantics are unverified).
-This removes the `-M` run entirely. Do not build on it until it is demonstrated.
+Those labels select reproxy's `CPPInputProcessor`, which runs the bundled `scandeps_server`
+over the command line and produces the transitive header set. It is the same machinery
+`tipi-compiler-driver` already relies on for every piece compile in the build, so the inputs a
+split declares come from the same source of truth as the inputs its pieces declare.
+
+**The obstacle is argv[0].** The processor expects to be scanning a *compiler* invocation, and
+our command begins with `cpp-splitter`. The way out is `-remote_wrapper`: hand rewrapper the
+plain compile line — `<compiler> <flags> -c -o <obj> <source>` — so the scanner sees a genuine
+clang command, and let the wrapper put the splitter in front of it on the worker:
+
+```
+rewrapper -labels=type=compile,compiler=clang,lang=cpp \
+          -exec_strategy=remote \
+          -remote_wrapper=<abs path to cpp-splitter, with --emit-only> \
+          -toolchain_inputs=<abs path to cpp-splitter> \
+          -output_directories=<split_dir> \
+          -- <compiler> <flags> -c -o <obj> <source>
+```
+
+This is the first thing to prove, because the whole approach rests on it. Two questions to
+settle by experiment before writing anything else:
+
+1. Does the CPP input processor accept the command line when a `-remote_wrapper` is present, or
+   does the wrapper have to be part of the scanned command?
+2. Does `-remote_wrapper` take arguments of its own (`--emit-only`), or only a program path? If
+   only a path, the mode has to be selected by environment instead — `-env_var_allowlist` is
+   the knob for getting a variable to the worker.
+
+**Fallback if the processor will not scan a wrapped command.** Declare the closure ourselves:
+run `<compiler> -M -MG <flags> <source>`, parse the make rule, and pass it via
+`-input_list_paths` with `-labels=type=tool`, the label that does no scanning and takes the
+caller's list. A `-M` run is a preprocess and far cheaper than the parse it replaces, but it is
+a second dependency computation that can disagree with the one reclient does for the pieces —
+which is exactly the class of bug this project keeps finding. Prefer the scanner.
 
 ### `-output_directories`: also right, and necessary
 
@@ -135,6 +161,8 @@ first, and only then Spirit through `example/spirit-tests/SpiritTestsFromJamfile
 
 ## Acceptance Criteria
 
+- The CPP input processor scans the command and returns the same header closure a piece compile
+  gets — demonstrated before any of the rest is built, since the design rests on it.
 - `cpp-splitter --emit-only` writes the same split tree as a normal run and compiles nothing:
   byte-identical `.split` contents against a run without the flag, checked on a
   Boost.Filesystem unit.
