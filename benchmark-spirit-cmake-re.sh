@@ -171,12 +171,20 @@ printf '\n%-12s %-8s %9s %10s %-18s %8s\n' scenario splitter wall fallbacks 'rem
 printf '%-12s %-8s %9s %10s %-18s %8s\n' ------------ -------- --------- ---------- ------------------ --------
 report() { printf '%-12s %-8s %9s %10s %-18s %8s\n' "$1" "$2" "$(human "$3")" "$4" "$5" "$(human_rss "$PEAK")"; }
 
-for mode in plain split; do
+# Three configurations rather than two when REMOTE_SPLIT is set, in one run: the point of
+# TODO/35 is splitting here against splitting on the cluster, and comparing those across two
+# runs would compare cluster cache states as much as anything else.
+modes=(plain split)
+if [ "${REMOTE_SPLIT:-0}" = 1 ]; then
+    modes=(plain split remote)
+fi
+
+for mode in "${modes[@]}"; do
     args=(); label=no
-    if [ "$mode" = split ]; then
-        args=(--split); label=yes
-        if [ "${REMOTE_SPLIT:-0}" = 1 ]; then args+=(--remote-split); label=remote; fi
-    fi
+    case "$mode" in
+        split)  args=(--split); label=yes ;;
+        remote) args=(--split --remote-split); label=cluster ;;
+    esac
     L=/tmp/bench-cmake-re-$mode
 
     t=$(run "$L-full.log" --clean "${args[@]}")
