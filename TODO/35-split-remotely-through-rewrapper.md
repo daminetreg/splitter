@@ -94,26 +94,43 @@ flag exists and takes paths relative to `-exec_root`.
    mirror, which exists on both sides, so this should hold, and it is the first thing to check
    when output differs.
 
-### Unit test: assert the contract, not the cluster
+### Test it against the cluster, not against a stub
 
-A fixture cannot depend on an RBE cluster, and it does not need to. What is risky here is *what
-we tell the execution engine*; that is checkable locally.
+A stub `rewrapper` would only prove we format a command line the way we intended. It cannot
+show that the inputs we declared were sufficient, that the outputs came back, or that the
+sandbox reproduced what a local split produces — and those are the three things that can
+actually be wrong. The test runs against `opal.cluster.engflow.com:443`.
 
-`launcher.remote_split_contract` — put a stub `rewrapper` first on `PATH` that appends its argv
-to a file and then execs the command it was given, so the split still happens and the object
-still links. Then assert on the recorded argv:
+`launcher.remote_split_on_opal` — a CTest test over a deliberately tiny project, two
+translation units behind one shared header, configured with `cmake-re --distributed` and
+`CPP_SPLITTER_REMOTE_SPLIT=1`.
 
-- `-labels=type=tool` is present;
-- `-output_directories` names exactly `<object>.o.split`;
-- `-input_list_paths` names a file that contains the source **and** the header it includes;
-- `-toolchain_inputs` names the `cpp-splitter` binary;
-- the program the split object produces still prints the expected value.
+**Gating.** It needs mTLS credentials and a reachable cluster, so it must not fail on a machine
+that has neither. Report `SKIP_RETURN_CODE` when `$ENGFLOW_MTLS_DIR` (default `~/engflow-mTLS`)
+holds no readable certificate and key, or when the endpoint does not answer. Skipped and passing
+are different states and the log must say which.
 
-The stub is the same technique as `launcher.chained_behind_driver`, which uses an `exec "$@"`
-stub to stand in for `tipi-compiler-driver`. It discriminates: with the feature off, no
-`rewrapper` invocation is recorded at all.
+**What it asserts, in order of how much each is worth:**
 
-Then, per the harness ladder: `example/boost-to-split` with `BOOST_INCLUDE_LIBRARIES=filesystem`
+1. **The split tree came back byte-identical** to `cpp-splitter --emit-only` run locally on the
+   same sources. This is the assertion that matters: it covers the declared inputs being
+   sufficient, `-output_directories` bringing everything home, and the sandbox not perturbing
+   the absolute paths baked into the preamble and the `#line` directives.
+2. **The split really executed remotely.** `RBE_proxy_log_dir` is already set by
+   `build-spirit-cmake-re.sh`; read the records back with
+   `reclient/<rev>/dumpstats --proxy_log_dir=<dir>` and require a `REMOTE_EXECUTION` for the
+   action whose command names `cpp-splitter`. Without this the test passes just as well when the
+   feature silently fell back to splitting here, which is precisely the failure mode to catch.
+3. **No fallbacks**, and the linked programs print what a plain build's do.
+
+**Corroboration from the cluster's own side.** cmake-re prints an `Invocation ID`; the profile
+is downloadable with the same mTLS key at
+`https://${RBE_service}/api/profiling/v1/instances/default/invocations/<id>` and opens in
+Perfetto. The split actions should appear there as remote work. Worth doing by hand when the
+numbers look wrong; not worth asserting on in a test, since it adds a second network dependency
+to prove something `dumpstats` already proves locally.
+
+Then the harness ladder: `example/boost-to-split` with `BOOST_INCLUDE_LIBRARIES=filesystem`
 first, and only then Spirit through `example/spirit-tests/SpiritTestsFromJamfiles.cmake`.
 
 ## Acceptance Criteria
@@ -121,8 +138,10 @@ first, and only then Spirit through `example/spirit-tests/SpiritTestsFromJamfile
 - `cpp-splitter --emit-only` writes the same split tree as a normal run and compiles nothing:
   byte-identical `.split` contents against a run without the flag, checked on a
   Boost.Filesystem unit.
-- `launcher.remote_split_contract` passes, and fails when `CPP_SPLITTER_REMOTE_SPLIT` is unset —
-  a fixture that cannot fail is worse than none.
+- `launcher.remote_split_on_opal` passes against the real cluster, and skips — visibly, not
+  silently — where there are no credentials. It must fail when `CPP_SPLITTER_REMOTE_SPLIT` is
+  unset, and it must fail when the split ran locally, which is what the `REMOTE_EXECUTION`
+  record on the `cpp-splitter` action is there to detect.
 - With the feature enabled and a real cluster, Boost.Filesystem builds through
   `cmake-re --distributed` with **0 fallbacks** and the library passes its nine assertions.
 - Boost.Spirit's 277 programs build with **0 fallbacks**, and the split `.split` trees are
