@@ -4962,6 +4962,12 @@ static bool try_incremental_split(const std::string& split_dir,
     // class declared local to the body. Whether its line moved depends on where in the body
     // the edit landed, which is more than the recorded span can answer, so refuse rather than
     // shift it wrongly. Checked before anything is written.
+    //
+    // Strictly inside: an entry recorded at the edited definition's own start line is not a
+    // definition nested in its body. It is usually that definition itself, since a kept one
+    // appears both here and in the harvest, and reading it as nested made the fast path refuse
+    // its own work -- on 112 of Boost.Spirit's units. Anything else sharing that line sits at
+    // or before the signature, so the edit below it does not move it either.
     if (shift != 0 && fs::exists(keeps_path)) {
         std::istringstream ks(read_file(keeps_path));
         std::string l;
@@ -4971,7 +4977,7 @@ static bool try_incremental_split(const std::string& split_dir,
             if (t2 == std::string::npos) continue;
             long n = 0;
             try { n = std::stol(l.substr(t1 + 1, t2 - t1 - 1)); } catch (...) { continue; }
-            if (n >= (long)d.start_line && n <= (long)d.end_line)
+            if (n > (long)d.start_line && n <= (long)d.end_line)
                 return refuse("a definition kept in the preamble sits inside the edited body");
         }
     }

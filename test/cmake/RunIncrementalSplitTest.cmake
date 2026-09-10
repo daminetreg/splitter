@@ -156,8 +156,15 @@ message(STATUS "ok: a body-only edit is re-sliced, matches a full split, and the
 file(WRITE "${WORKDIR}/${header_name}" "${baseline}")
 split(settle_kept log)
 
+# The edit adds a line, so everything below it moves. That matters here beyond the usual
+# renumbering: the guard against a kept definition sitting inside the edited body reads the
+# `.keeps` file, and a kept definition that is *itself* the one being edited is listed there at
+# its own start line. Reading that as "inside" made the fast path refuse its own work, on 112
+# of Boost.Spirit's units. An edit that keeps the line count would not notice -- the guard only
+# runs when something moved.
 file(READ "${WORKDIR}/${header_name}" kept_text)
-string(REPLACE "    return 11;" "    return 12;" kept_text "${kept_text}")
+string(REPLACE "    return 11;" "    int kept_bump = 1;\n    return 11 + kept_bump;"
+       kept_text "${kept_text}")
 file(WRITE "${WORKDIR}/${header_name}" "${kept_text}")
 
 split(kept log)
