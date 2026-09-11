@@ -1,10 +1,9 @@
 # cpp-splitter
 
 `cpp-splitter` reads a C++ translation unit through libclang and rewrites it as one piece per
-function definition behind a shared preamble, so the pieces compile in parallel -- locally or
-on a remote build execution cluster -- and are linked back (`ld -r`) into the single object the
-build system asked for. It runs standalone on one file, or transparently as a
-`CMAKE_CXX_COMPILER_LAUNCHER` in front of the real compiler; see [DOCS.md](DOCS.md) and
+function definition behind a shared preamble, so the pieces compile in parallel (locally or
+on a remote build execution cluster) and are linked back (`{mold,ld,lld} -r`) into the single object the
+build system asked for. It runs transparently as a `CMAKE_CXX_COMPILER_LAUNCHER` in front of the real compiler; see [DOCS.md](DOCS.md) and
 [blog.md](blog.md) for how and why.
 
 ## Building
