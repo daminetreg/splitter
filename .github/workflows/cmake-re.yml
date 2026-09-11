@@ -87,9 +87,10 @@ jobs:
 
       # reclient wants the mTLS pair as files, so the secrets are written out under the
       # runner's temp directory and the RBE_* variables name them. Empty secrets -- a fork's
-      # pull request -- write nothing, leave the variables unset, and the test skips.
+      # pull request -- write empty files, which are removed again, the variables stay unset
+      # and the test skips. (`secrets` cannot be read in a step's `if`, hence the check on
+      # the files.)
       - name: Stage RBE credentials
-        if: ${{ secrets.RBE_TLS_CLIENT_AUTH_CERT != '' && secrets.RBE_TLS_CLIENT_AUTH_KEY != '' }}
         run: |
           install -d -m 700 "$RUNNER_TEMP/rbe-mtls"
           cat > "$RUNNER_TEMP/rbe-mtls/engflow.crt" <<'EOF_CERT'
@@ -99,8 +100,13 @@ jobs:
           ${{ secrets.RBE_TLS_CLIENT_AUTH_KEY }}
           EOF_KEY
           chmod 600 "$RUNNER_TEMP/rbe-mtls/engflow.key"
-          echo "RBE_tls_client_auth_cert=$RUNNER_TEMP/rbe-mtls/engflow.crt" >> "$GITHUB_ENV"
-          echo "RBE_tls_client_auth_key=$RUNNER_TEMP/rbe-mtls/engflow.key" >> "$GITHUB_ENV"
+          if grep -q . "$RUNNER_TEMP/rbe-mtls/engflow.crt" && grep -q . "$RUNNER_TEMP/rbe-mtls/engflow.key"; then
+            echo "RBE_tls_client_auth_cert=$RUNNER_TEMP/rbe-mtls/engflow.crt" >> "$GITHUB_ENV"
+            echo "RBE_tls_client_auth_key=$RUNNER_TEMP/rbe-mtls/engflow.key" >> "$GITHUB_ENV"
+          else
+            rm -rf "$RUNNER_TEMP/rbe-mtls"
+            echo "no RBE credentials in this run; launcher.remote_split_on_rbe will skip"
+          fi
 
       - name: Test
         env:
