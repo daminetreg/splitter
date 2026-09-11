@@ -51,18 +51,18 @@ jobs:
       # time goes on a cold run.
       - name: Configure
         run: |
-          cmake -GNinja -S . -B build \
+          tipi run cmake -GNinja -S . -B build \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake
 
       - name: Build
-        run: cmake --build build -j$(nproc)
+        run: tipi run cmake --build build -j$(nproc)
 
       # 31 fixtures. Each splits a small translation unit through the launcher, compiles the
       # pieces, links them and runs the program, so a failure here is a real defect rather
       # than a flaky environment.
       - name: Test
-        run: ctest --test-dir build --output-on-failure -j$(nproc)
+        run: tipi run ctest --test-dir build --output-on-failure -j$(nproc)
 
       # The fixtures leave their split trees behind, and a failure is usually diagnosed by
       # reading the generated pieces rather than the assertion message.
