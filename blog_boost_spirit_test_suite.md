@@ -45,7 +45,7 @@ happens here. The parse is the only thing that moves.
 What one translation unit goes through, end to end:
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph local["Developer machine"]
         direction TB
         src["unit.cpp + the headers it includes"]
