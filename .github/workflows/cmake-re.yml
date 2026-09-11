@@ -74,6 +74,16 @@ jobs:
           cmake-re --version
           ctest-re --version
 
+      # cmake-re's mirror and build trees, Boost included. Keyed on what decides their
+      # content; an older entry is still a warm start, cmake-re rebuilds what differs.
+      - name: Restore the build cache
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/share/.tipi/v*.w/
+          key: tipi-work-linux-container-${{ hashFiles('CMakeLists.txt', 'environments/**') }}
+          restore-keys: |
+            tipi-work-linux-container-
+
       # Downloads hfc and Boost 1.85 through HermeticFetchContent, so this step is where the
       # time goes on a cold run.
       - name: Configure
@@ -148,6 +158,15 @@ jobs:
           "$(brew --prefix llvm)/bin/clang" --version
           /usr/bin/clang++ --version
 
+      # Same as the Linux job: cmake-re's work tree on the host.
+      - name: Restore the build cache
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/share/.tipi/v*.w/
+          key: tipi-work-macos-host-${{ hashFiles('CMakeLists.txt', 'environments/**') }}
+          restore-keys: |
+            tipi-work-macos-host-
+
       - name: Configure
         run: |
           cmake-re --host -S . -B build/cmake-re-macos-apple-clang \
@@ -189,6 +208,15 @@ jobs:
       # refuses to look at. Configure reads the revision, so it has to be allowed.
       - name: Trust the workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # hfc and Boost, which HermeticFetchContent keeps under thirdparty/cache.
+      - name: Restore the build cache
+        uses: actions/cache@v4
+        with:
+          path: thirdparty/cache
+          key: thirdparty-cache-plain-cmake-${{ hashFiles('CMakeLists.txt', 'environments/**') }}
+          restore-keys: |
+            thirdparty-cache-plain-cmake-
 
       # Downloads hfc and Boost 1.85 through HermeticFetchContent, so this step is where the
       # time goes on a cold run.
