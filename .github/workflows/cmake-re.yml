@@ -79,7 +79,7 @@ jobs:
       - name: Restore the build cache
         uses: actions/cache@v4
         with:
-          path: /usr/local/share/.tipi/v*.w/
+          path: /usr/local/share/.tipi/v*.w/*/thirdparty/cache
           key: tipi-work-linux-container-${{ hashFiles('CMakeLists.txt', 'environments/**') }}
           restore-keys: |
             tipi-work-linux-container-
@@ -162,7 +162,7 @@ jobs:
       - name: Restore the build cache
         uses: actions/cache@v4
         with:
-          path: /usr/local/share/.tipi/v*.w/
+          path: /usr/local/share/.tipi/v*.w/*/thirdparty/cache
           key: tipi-work-macos-host-${{ hashFiles('CMakeLists.txt', 'environments/**') }}
           restore-keys: |
             tipi-work-macos-host-
