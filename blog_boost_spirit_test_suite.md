@@ -158,12 +158,28 @@ header copy in place.
 The one-line body edit, build time:
 
 ```mermaid
-xychart-beta
-    title "One body edit in a header included by 194 units — build time in seconds"
-    x-axis ["local, plain (-j16)", "local, split (-j16)", "cluster, split there (-j500)"]
-    y-axis "seconds" 0 --> 70
-    bar [57.5, 14.2, 33.0]
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: '#f3f3f3, #8de7f9'
+---
+xychart
+    title "One header function body edit — build time (s)"
+    x-axis ["Plain (local, -j16)", "Plain (distributed, -j500)", "Split (local, -j16)", "Split (distributed, -j500)"]
+    y-axis "build time (s)" 0 --> 300
+
+    %% neutral base
+    bar [57.5, 287.4, 14.2, 0]
+
+    %% the split produced on the cluster, highlighted
+    bar [-300, -300, -300, 33.0]
 ```
+
+All four are build-phase times. The distributed plain figure is from a run of that
+configuration alone, in which the row executed 271 compiles on the cluster; it is the row most
+sensitive to cluster load, having read between 118s and 287s across runs while executing the
+same 271 compiles.
 
 On one machine, splitting turns a 57.5s rebuild of 194 units into a 14.2s re-slice and one
 compile. On a build farm it turns 271 executed compiles into one. Producing the split on the

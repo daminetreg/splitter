@@ -204,8 +204,9 @@ the difference is 1635 cache lookups where the ordinary build needs none.
   parsed all 279 units here and its `one body` row re-sliced 268, which is consistent with the
   times.
 - **The body row is noisy on the ordinary side.** It executes 271 real compiles and cluster
-  load moves that substantially between runs. The action counts, 271 against 1, are the stable
-  part of the result.
+  load moves that substantially between runs: 136.2s in the first table, and 287.4s when
+  re-measured on 11 September with build-only timing (`MODES=plain`, 271 executions, 762 cache
+  hits). The action counts, 271 against 1, are the stable part of the result.
 - **One edit is not a distribution of edits.** This one has a reach-to-use ratio of 194:1. An
   edit to something used as widely as it is included would show both builds doing the same
   work.
