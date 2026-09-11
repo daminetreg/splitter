@@ -1,77 +1,81 @@
-export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
-tipi run clang++ -std=c++17 src/main.cpp -I/Users/daminetreg/workspace/tipi/hermetic-fetchcontent.release-archive/build/_deps/Boost-install/include -I/usr/local/share/.tipi/clang/a7e6968/include -L/usr/local/share/.tipi/clang/a7e6968/lib/ -Wl,-rpath,/usr/local/share/.tipi/clang/a7e6968/lib/ -lclang  -o cpp-splitter
+# cpp-splitter
 
+`cpp-splitter` reads a C++ translation unit through libclang and rewrites it as one piece per
+function definition behind a shared preamble, so the pieces compile in parallel -- locally or
+on a remote build execution cluster -- and are linked back (`ld -r`) into the single object the
+build system asked for. It runs standalone on one file, or transparently as a
+`CMAKE_CXX_COMPILER_LAUNCHER` in front of the real compiler; see [DOCS.md](DOCS.md) and
+[blog.md](blog.md) for how and why.
 
-# On linux
+## Building
+
+Both hosts build through [CMake RE](https://tipi.build/documentation/0000-getting-started-cmake)
+(`cmake-re`, ships `ctest-re`), which brings its own cmake, ninja and clang 13:
 
 ```sh
-mkdir -p ../`whoami`-tipi-workdir-vT.w
-mkdir -p ../generalized-toolchains
-docker run --init --detach --name `whoami`-tipi  -u`id -u`:`id -g` --group-add tipi -e TIPI_CACHE_CONSUME_ONLY=ON -e TIPI_CACHE_FORCE_ENABLE=OFF -e HOME -v $HOME:$HOME:rw \
-  --mount type=bind,source=$PWD/../`whoami`-tipi-workdir-vT.w,target=/usr/local/share/.tipi/vT.w/ \
-  --mount type=bind,source=$PWD/../generalized-toolchains,target=/usr/local/share/.tipi/environments/generalized/v1/ \
-  -v $PWD:$PWD:rw -w $PWD \
-  tipibuild/tipi-ubuntu-2404:v0.0.82 \
-  sleep infinity
-
-docker exec -u 0 `whoami`-tipi useradd -d $HOME -u `id -u` `whoami`
-
-# This launches a container interactive shell
-docker exec -it `whoami`-tipi tipi run /bin/bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+export TIPI_DISABLE_AR_RANLIB_DRIVER=ON TIPI_CACHE_CONSUME_ONLY=ON TIPI_CACHE_FORCE_ENABLE=OFF
 ```
 
-## Compile splitter
+The first configure fetches and builds Boost 1.85 through HermeticFetchContent and takes a few
+minutes; later ones reuse it.
+
+### macOS
+
+Host build with the clang 13 tipi installs at `/usr/local/share/.tipi/clang/a7e6968`
+(x86_64; the installer sets up Rosetta on Apple silicon):
+
 ```sh
-sudo apt install libclang-dev
-g++ -std=c++17 -Wall -Wextra -O2 src/main.cpp -o cpp-splitter -I /usr/local/share/.tipi/clang/4f846ee/include/ -lclang -L /usr/local/share/.tipi/clang/4f846ee/lib -Wl,-rpath,/usr/local/share/.tipi/clang/4f846ee/lib
+cmake-re --host -S . -B build/cmake-re-macos-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake
+cmake-re --build build/cmake-re-macos-clang --host -j8
+ctest-re --test-dir build/cmake-re-macos-clang --output-on-failure -j8
 ```
 
-## RBE
+The same Mac can also run the Linux build below: `cmake-re` starts the image through Docker
+Desktop (>= 27.2.0) and mounts the tree into it.
+
+### Linux
+
+Containerized in `tipibuild/tipi-ubuntu-2404:v0.0.87`, the image `environments/ubuntu-clang.*`
+pins by digest -- the same one CI, the devcontainer and the benchmarks use. Needs docker
+>= 27.2.0:
+
 ```sh
-export RBE_service=opal.cluster.engflow.com:443
-export RBE_tls_client_auth_key=$HOME/engflow-mTLS/engflow.key
-export RBE_tls_client_auth_cert=$HOME/engflow-mTLS/engflow.crt
-
-# Remote caching only not remote execution
-export RBE_exec_strategy=local
-
-# Configure scandeps cache
-mkdir -p $PWD/.scandeps_cache
-export RBE_cache_dir=$PWD/.scandeps_cache
-export RBE_deps_cache_max_mb=512
-export RBE_enable_deps_cache="true"
-
-export RBE_exec_root=$PWD
-export RBE_platform="InputRootAbsolutePath=$PWD,container-image=docker://tipibuild/tipi-ubuntu-2404@sha256:5441e0ae56f6bdbd915c42ce7d84ad3f84787a62b8c487e77aa935ee7acb47e5"
-export RBE_server_address=unix://$PWD/unix-sock-reproxy
-export RBE_canonicalize_working_dir="False"
-export RBE_reproxy_wait_seconds=5
-export RBE_service_no_auth="true"
-export RBE_use_application_default_credentials="true"
-
-export RBE_compression_threshold=0
-
-# Generate a new UUID for the session
-export RBE_invocation_id=$(uuidgen)
-
-export RBE_proxy_log_dir=$PWD
-
-# Configure + Build remote ccache'd
-export CMAKE_C_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
-export CMAKE_CXX_COMPILER_LAUNCHER="/home/daminetreg/workspace/cpp-splitter/cpp-splitter;tipi-compiler-driver"
-
-bootstrap -server_address $RBE_server_address -shutdown
-bootstrap -server_address $RBE_server_address -logtostderr -v 43
-cmake -S . -B ./build -G Ninja
-
-# Enable caching post configure (configure checks are randomly stored, do generally not benefit from caching)
-export TIPI_INTERCALATED_COMPILER_LAUNCHER=rewrapper
-
-cmake --build ./build-cached -j12 --target clean
-cmake --build ./build-cached -j12
-bootstrap -server_address $RBE_server_address -shutdown
-
-echo "EngFlow Build Profile: https://${RBE_service}/api/profiling/v1/instances/${RBE_instance:-default}/invocations/${RBE_invocation_id}"
-
-
+cmake-re -S . -B build/cmake-re-ubuntu-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
+cmake-re --build build/cmake-re-ubuntu-clang -j8
+cmake-re --build build/cmake-re-ubuntu-clang --run-test all --test-jobs 8
 ```
+
+The tests run inside the container through `--run-test`: `ctest-re` executes on the host,
+where a Linux `cpp-splitter` cannot.
+
+Already inside that image (the devcontainer, or `tipi run /bin/bash` in a container started by
+hand -- see [CLAUDE.md](CLAUDE.md)), plain cmake works too:
+
+```sh
+cmake -GNinja -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake
+cmake --build build -j8
+ctest --test-dir build --output-on-failure -j8
+```
+
+`--build` must be the first argument to `cmake-re`. `build/<name>` is a symlink into
+cmake-re's mirror of the tree. `launcher.remote_split_on_opal` skips unless it finds EngFlow
+mTLS credentials in `~/engflow-mTLS` (or `ENGFLOW_MTLS_DIR`) on a Linux host.
+
+## Using it
+
+Standalone, split one file, compile the pieces and link them:
+
+```sh
+./build/cmake-re-ubuntu-clang/cpp-splitter path/to/unit.cpp out/ --compile -o out/program --cxx clang++
+```
+
+As a compiler launcher in any CMake project:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=/abs/path/to/cpp-splitter
+```
+
+Behind `cmake-re --distributed`, the split itself runs on the RBE cluster; TODO/35 and
+`build-spirit-cmake-re.sh` show the setup. Results of the Boost measurements are in
+`benchmarks/`.
