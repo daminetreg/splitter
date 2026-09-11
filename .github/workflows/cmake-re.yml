@@ -95,6 +95,15 @@ jobs:
       - name: Build
         run: cmake-re --build build/cmake-re-ubuntu-clang --host -j$(nproc)
 
+      # For the draft release below. Runs where the image's clang is: it is linked against
+      # /usr/local/share/.tipi/clang/4f846ee/lib/libclang.so by rpath.
+      - name: Upload cpp-splitter
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-splitter-linux-x86_64
+          path: build/cmake-re-ubuntu-clang/cpp-splitter
+          if-no-files-found: error
+
       # reclient wants the mTLS pair as files, so the secrets are written out under the
       # runner's temp directory and the RBE_* variables name them. Empty secrets -- a fork's
       # pull request -- write empty files, which are removed again, the variables stay unset
@@ -176,6 +185,14 @@ jobs:
       - name: Build
         run: cmake-re --build build/cmake-re-macos-apple-clang --host -j$(sysctl -n hw.ncpu)
 
+      # For the draft release below. arm64, linked against Homebrew's libclang.dylib by rpath.
+      - name: Upload cpp-splitter
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-splitter-macos-arm64
+          path: build/cmake-re-macos-apple-clang/cpp-splitter
+          if-no-files-found: error
+
       - name: Test
         run: ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j$(sysctl -n hw.ncpu)
 
@@ -246,3 +263,48 @@ jobs:
             build/Testing/
             build/test-output/
           retention-days: 7
+
+  # One rolling draft release, "main-draft", holding the two binaries of the latest green
+  # main. Recreated on every push so it never holds a stale pair; publish it by giving it the
+  # tag it should carry and un-drafting it. Pull requests do not get here: they have no
+  # write token, and a draft from a branch would be no one's.
+  draft-release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [cmake-re-linux-container-build-and-test, cmake-re-macos-host-build-and-test, plain-cmake-build-and-test]
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cpp-splitter-*
+          path: dist
+
+      # download-artifact puts each artifact in a directory of its name; the assets take
+      # that name so the two are told apart in the release.
+      - name: Lay out the assets
+        run: |
+          mv dist/cpp-splitter-linux-x86_64/cpp-splitter dist/cpp-splitter-linux-x86_64.bin
+          mv dist/cpp-splitter-macos-arm64/cpp-splitter dist/cpp-splitter-macos-arm64.bin
+          chmod +x dist/*.bin
+          ls -l dist
+
+      - name: Recreate the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for id in $(gh api "repos/$GH_REPO/releases" --jq '.[] | select(.draft and .tag_name == "main-draft") | .id'); do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          gh release create main-draft --draft \
+            --title "cpp-splitter ${GITHUB_SHA::7} (draft)" \
+            --notes "Built from ${GITHUB_SHA} by the cmake-re workflow.
+
+          - cpp-splitter-linux-x86_64.bin: Debug build from tipibuild/tipi-ubuntu-2404:v0.0.87, needs that image's clang at /usr/local/share/.tipi/clang/4f846ee (libclang.so by rpath).
+          - cpp-splitter-macos-arm64.bin: Debug build with Apple clang, needs Homebrew llvm (libclang.dylib by rpath).
+
+          Rename the tag before publishing." \
+            dist/cpp-splitter-linux-x86_64.bin dist/cpp-splitter-macos-arm64.bin
