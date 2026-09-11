@@ -31,10 +31,22 @@
 
 name: cmake-re
 
+# Documentation changes nothing this workflow builds or tests, so a push or pull request that
+# touches only Markdown, benchmarks/ or TODO/ does not run it. Those two directories hold only
+# Markdown; the scripts that produce the benchmarks live at the top level and are not excluded.
+# The list is written twice because the two triggers cannot share it.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'benchmarks/**'
+      - 'TODO/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'benchmarks/**'
+      - 'TODO/**'
   workflow_dispatch:
 
 concurrency:
