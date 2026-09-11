@@ -59,8 +59,17 @@ cmake-re --build build/cmake-re-ubuntu-clang --run-test all --test-jobs 8
 The tests run inside the container through `--run-test`: `ctest-re` executes on the host,
 where a Linux `cpp-splitter` cannot.
 
-Already inside that image (the devcontainer, or `tipi run /bin/bash` in a container started by
-hand -- see [CLAUDE.md](CLAUDE.md)), plain cmake works too:
+Already inside that image (the devcontainer, a GitHub `container:` job, or `tipi run /bin/bash`
+in a container started by hand -- see [CLAUDE.md](CLAUDE.md)), build on the host instead, which
+is what CI does:
+
+```sh
+cmake-re --host -S . -B build/cmake-re-ubuntu-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
+cmake-re --build build/cmake-re-ubuntu-clang --host -j8
+ctest-re --test-dir build/cmake-re-ubuntu-clang --output-on-failure -j8
+```
+
+Plain cmake works there too:
 
 ```sh
 cmake -GNinja -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake

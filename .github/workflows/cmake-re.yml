@@ -5,9 +5,15 @@
 # build that CLAUDE.md describes -- so the two things a developer runs on a Mac are the two
 # things CI runs.
 #
-#   linux-container   cmake-re in tipibuild/tipi-ubuntu-2404 (environments/ubuntu-clang.*),
-#                     started by cmake-re from docker on the runner. Same compiler, same
-#                     standard and the same 31 fixtures as build-and-test.yml.
+#   linux-container   cmake-re --host inside tipibuild/tipi-ubuntu-2404:v0.0.87, the job's own
+#                     container, with environments/ubuntu-clang.cmake. Same compiler, same
+#                     standard and the same 31 fixtures as build-and-test.yml. Not cmake-re's
+#                     containerized mode: from a runner that mode has to push the checkout
+#                     into a second container over ssh, and on a shallow checkout of a
+#                     private repository the checkout there failed to resolve the commit --
+#                     and cmake-re exited 0 on that crash, so the job stayed green. Every
+#                     cmake-re step here therefore also checks that what it was meant to
+#                     produce exists.
 #   macos-host        cmake-re --host with the clang the runner ships, Apple's, and libclang
 #                     from Homebrew's llvm (environments/macos-apple-clang.cmake). The
 #                     installer does not bring tipi's clang to the runner, so the
@@ -45,42 +51,39 @@ jobs:
   linux-container:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    container:
+      image: tipibuild/tipi-ubuntu-2404:v0.0.87
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Install CMake RE
+      # The container runs as root while the checkout is owned by the runner user, which git
+      # refuses to look at. cmake-re mirrors the repository, so it has to be allowed.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory '*'
+
+      # The image ships cmake-re; this is the version the rest of the job is pinned to.
+      - name: Verify CMake RE
         run: |
-          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
           cmake-re --version
           ctest-re --version
-
-      # cmake-re starts the build container through docker, and needs one recent enough to
-      # pull an image by digest into a bind-mounted work tree.
-      - name: Check docker
-        run: |
-          docker --version
-          version="$(docker version --format '{{.Server.Version}}')"
-          if [ "$(printf '%s\n27.2.0\n' "$version" | sort -V | head -n1)" != "27.2.0" ]; then
-            echo "docker $version is older than 27.2.0" >&2
-            exit 1
-          fi
 
       # Downloads hfc and Boost 1.85 through HermeticFetchContent, so this step is where the
       # time goes on a cold run.
       - name: Configure
         run: |
-          cmake-re -S . -B build/cmake-re-ubuntu-clang \
+          cmake-re --host -S . -B build/cmake-re-ubuntu-clang \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
+          test -f build/cmake-re-ubuntu-clang/CMakeCache.txt
 
       - name: Build
-        run: cmake-re --build build/cmake-re-ubuntu-clang -j$(nproc)
+        run: |
+          cmake-re --build build/cmake-re-ubuntu-clang --host -j$(nproc)
+          test -x build/cmake-re-ubuntu-clang/cpp-splitter
 
-      # Inside the container, where the binary and the toolchain it was linked against live.
-      # ctest-re v0.0.87 runs on the host, and a Linux cpp-splitter is nothing to it.
       - name: Test
-        run: cmake-re --build build/cmake-re-ubuntu-clang --run-test all --test-jobs $(nproc)
+        run: ctest-re --test-dir build/cmake-re-ubuntu-clang --output-on-failure -j$(nproc)
 
       # The fixtures leave their split trees behind, and a failure is usually diagnosed by
       # reading the generated pieces rather than the assertion message.
@@ -122,9 +125,12 @@ jobs:
           cmake-re --host -S . -B build/cmake-re-macos-apple-clang \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_TOOLCHAIN_FILE=environments/macos-apple-clang.cmake
+          test -f build/cmake-re-macos-apple-clang/CMakeCache.txt
 
       - name: Build
-        run: cmake-re --build build/cmake-re-macos-apple-clang --host -j$(sysctl -n hw.ncpu)
+        run: |
+          cmake-re --build build/cmake-re-macos-apple-clang --host -j$(sysctl -n hw.ncpu)
+          test -x build/cmake-re-macos-apple-clang/cpp-splitter
 
       - name: Test
         run: ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j$(sysctl -n hw.ncpu)
