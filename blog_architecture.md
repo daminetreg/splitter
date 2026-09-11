@@ -1,504 +1,364 @@
-# Splitting C++ One Function at a Time: an Architecture, and the Library That Wrote It
+# cpp-splitter: architecture
 
-## The naive idea
+`cpp-splitter` is a `CMAKE_CXX_COMPILER_LAUNCHER`. The build system invokes it in place of the
+compiler; it parses the translation unit once with libclang, writes one `.cpp` per function
+definition, compiles those pieces, and joins their objects with `ld -r` into the object the
+build asked for. This document describes each transformation on `test/use_mylib.cpp`, the
+fixture behind `split.use_mylib`, and records in a 💡 block after each section which measurements
+and failures led to the current form, with the commits.
 
-C++ builds are slow because the translation unit is the unit of work. Change one
-function in a 3000-line `.cpp` and the compiler re-parses every header it includes,
-re-instantiates every template, and re-emits everything.
-
-The naive idea: what if the unit of work were the *function*?
-
-Parse the source with libclang, find every function definition, write each one into its
-own tiny `.cpp`, compile those in parallel, and staple the objects back together with
-`ld -r` into the single `.o` the build system expects. Drop the tool in as
-`CMAKE_CXX_COMPILER_LAUNCHER` and nothing upstream needs to know.
-
-```
-      foo.cpp
-         |
-    [ libclang ]
-         |
-    +----+----+----+
-    |    |    |    |
-  fn_1 fn_2 fn_3 fn_4          one .cpp per function
-    |    |    |    |
-   .o   .o   .o   .o           compiled in parallel
-    +----+----+----+
-         |
-      [ ld -r ]
-         |
-       foo.o                   what the build system asked for
+```mermaid
+flowchart LR
+    src["use_mylib.cpp<br/>+ mylib.h"] --> launcher["cpp-splitter<br/>as compiler launcher"]
+    launcher --> decide{"split.cache<br/>and inputs.hash<br/>match?"}
+    decide -- "yes" --> reuse["reuse the split tree"]
+    decide -- "no, one body changed" --> reslice["re-slice that body<br/>from the harvest"]
+    decide -- "no" --> parse["libclang parse<br/>(here, or on the cluster)"]
+    parse --> emit["write: preamble · definitions header<br/>mirrored headers · pieces · harvest"]
+    reuse --> compile
+    reslice --> compile
+    emit --> compile["compile each piece<br/>(only those whose content changed)"]
+    compile --> link["ld -r → use_mylib.o"]
 ```
 
-Each piece needs the declarations the original file had — the includes, the classes, the
-typedefs. So the splitter also emits a **preamble**: the original source with the
-function bodies carved out. Every piece includes it.
-
-```
-  foo.cpp                        foo_preamble.h
-  ---------                      --------------
-  #include <vector>              #include <vector>
-  struct S { ... };      ==>     struct S { ... };
-  int a() { X }                  int a();        <- body removed, declaration left
-  int b() { Y }                  int b();
-
-                                 foo_1_a.cpp:  #include "foo_preamble.h"
-                                               int a() { X }
-```
-
-That is the whole architecture. It is also almost entirely wrong, and the rest of this
-post is about the ways real C++ found to prove it.
-
----
-
-## Step 1: the preamble is a cache, not a convenience
-
-The first problem is obvious in hindsight. If every piece includes the preamble, and the
-preamble includes `<vector>` and `<boost/filesystem/path.hpp>`, then splitting a file
-into 50 functions parses those headers 50 times. The "parallel" build is slower than the
-serial one it replaced.
-
-The fix is a precompiled header. The preamble is generated once, compiled to a PCH, and
-every piece picks it up.
-
-```
-  foo_preamble.h --[ compile ]--> foo_preamble.h.gch/<content-hash>.gch
-                                            |
-                       +--------------------+--------------------+
-                       |                    |                    |
-                   foo_1_a.cpp          foo_2_b.cpp          foo_3_c.cpp
-```
-
-Two decisions worth recording.
-
-**PCHs are named by content hash, not timestamp.** `<preamble>.gch/<hash>.gch` exists if
-and only if that exact preamble has been compiled. No staleness logic, no clock skew, and
-the artifact is distributable — it can be shipped to a remote build node or a cache
-without a coordinating server.
-
-**There are two PCH systems, for two different consumers.** A GCC-style `.gch` for the
-real compiler building the pieces, and a libclang `.pch` for the splitter's own parsing.
-They serve different tools and have different lifetimes.
-
-There is a trap here that took a while to find. The preamble is *this very file* with the
-bodies carved out, so it declares every class and typedef the file declares. Feeding its
-PCH back in while parsing that same file redefines all of them. The first run got away
-with it because no preamble existed yet; from the second run on the parse was wrecked,
-the visitor found almost nothing, and the stale-output pruning deleted the previous run's
-work. A twelve-function file became a one-function file. The preamble's PCH is for
-compiling the pieces, never for re-parsing their origin.
-
----
-
-## Step 2: from one preamble to many
-
-A `.cpp` in a modern C++ project barely contains any code. The code is in the headers —
-inline functions, class members defined in-class, templates. Splitting only the `.cpp`
-splits the tip of the iceberg.
-
-So the splitter follows `clang_getInclusions()` and splits the headers too. Each header
-gets *its own* preamble — a rewritten copy of itself with the bodies removed — and its
-own pieces. One translation unit now produces a small tree of preambles.
-
-```
-      foo.cpp
-         |
-    [ libclang ]  ..... one parse .....
-         |
-    +----+-------------------------------+
-    |                                    |
-  foo's own functions            each included header
-    |                                    |
-  foo_preamble.h                  include/boost/filesystem/path.hpp        <- rewritten
-  foo_1_a.cpp                     include/boost/filesystem/path.hpp_1_append.cpp
-  foo_2_b.cpp                     include/boost/filesystem/path.hpp_2_compare.cpp
-    |                             include/boost/system/detail/error_code.hpp
-    |                             include/boost/system/detail/error_code.hpp_1_what.cpp
-    |                                    |
-    +---------------[ ld -r ]------------+
-                        |
-                      foo.o
-```
-
-Headers were originally re-parsed standalone to find out what they defined. That requires
-every header to be parseable on its own, which many are not, and costs one full libclang
-parse per header per including source — 2769 of them across twelve translation units on
-the example below.
-
-**Decision: harvest from the parent translation unit.** The parent already contains every
-function defined in every header it includes, parsed in the right macro and inclusion
-context. One AST walk yields the inventory for the source *and* for every header it should
-split. Header re-parses went to zero and wall time dropped from 46.6s to 26.5s.
-
-This is where the design gets interesting, because a header is not a `.cpp`. It is
-included by many translation units, it may not be self-contained, and the things in it
-have linkage rules a `.cpp` never exercises.
-
----
-
-## The benchmark
-
-Everything below was found by pointing the splitter at **Boost.Filesystem** — twelve
-translation units pulling in Boost.System, Boost.Atomic, Boost.SmartPtr, Boost.Iterator,
-Boost.Scope and a large slice of Boost.Config.
-
-The progression, measured on that example:
-
-| stage | TUs linking from split objects | fallbacks | program linked against the result |
-|---|---|---|---|
-| initial | 2 of 12 | 9 | fails |
-| member out-lining | 3 of 12 | 8 | fails |
-| includer context for header pieces | 10 of 12 | 1 | 19 undefined refs |
-| emit-reachability | 10 of 12 | 1 | **links, 9/9 assertions** |
-| layered preamble | **12 of 12** | **0** | **links, 9/9 assertions** |
-
-Each row is an architectural decision forced by a specific linkage rule. Here they are.
-
----
-
-## Case 1: a member function is not a free function
-
-A member defined inside its class body:
+## 1. The input
 
 ```cpp
-class Widget {
-public:
-    int value() const { return v_; }
-};
+// mylib.h
+#pragma once
+#include <string>
+#include <vector>
+#include <numeric>
+#include <algorithm>
+
+inline int add(int a, int b) { return a + b; }
+inline int multiply(int a, int b) { return a * b; }
+inline std::string greet(const std::string& name) { return "Hello, " + name + "!"; }
+inline double average(const std::vector<double>& values) { /* ... */ }
+
+template<typename T>
+T max_of(T a, T b) { return (a > b) ? a : b; }
 ```
-
-Carved out verbatim into a piece, this is not valid code. `const` is illegal on a
-non-member, `this` is unavailable, and a constructor's member-initialiser list parses as a
-base-initialiser on a free function.
-
-The piece has to be *rewritten*, not moved:
-
-```
-   in-class                          out-of-line piece
-   --------                          -----------------
-   int value() const        ==>      auto Widget::value() const -> int
-   { return v_; }                    { return v_; }
-
-   preamble keeps:                   int value() const;   <- declaration, inside the class
-```
-
-**Return types move to a trailing return type.** A leading return type is looked up in the
-*enclosing namespace* once out-of-line, so a class-scoped name like `result_type` or
-`iterator` stops resolving. A trailing return type is looked up in class scope. One
-rewrite fixes every such name at once.
-
-**The type text comes from libclang, not the source span.** The span before the function
-name also holds function specifiers, which are routinely macros — `BOOST_FORCEINLINE` —
-and are textually indistinguishable from a type name.
-
-**The test for "defined in-class" is the *lexical* parent, not the semantic one.** A
-definition already written out-of-line (`void path::foo() {}`) also has a class as its
-semantic parent. Getting this wrong emitted a stray declaration for every one of them:
-2900 errors.
-
-Some members cannot be moved at all and stay in the header: members of class templates,
-explicit specializations, virtuals (whose `override` is usually a macro), and constructors
-and destructors — which are not one symbol but a *family*, C1/C2/C3 and D0/D1/D2, where
-the compiler decides which members of it to emit. Splitting one emitted the base-object
-constructor while every caller asked for the complete-object one, and the link failed on a
-symbol that `nm -C` cheerfully reported as present, because both variants demangle to the
-same text.
-
----
-
-## Case 2: a split header is not self-contained
-
-`boost/system/detail/std_category_impl.hpp` is written to be included only after
-`error_condition` is complete. Compile a piece of it that includes only that header and
-you get `calling 'default_error_condition' with incomplete return type`.
-
-**Decision: a piece taken from a header includes the translation unit's preamble first.**
-That replays the include prefix the header was actually seen behind.
-
-```
-   include/boost/system/detail/std_category_impl.hpp_1_equivalent.cpp
-   -----------------------------------------------------------------
-   #include "operations_preamble.h"      <- the includer's context, replayed
-   #include "std_category_impl.hpp"      <- the header itself
-   inline bool std_category::equivalent(...) { ... }
-```
-
-This exposed a second bug immediately. The split tree was appended *after* the project's
-own `-I` flags, so an original header won the lookup over its rewritten copy — bringing
-back the definitions that had been moved into pieces. 1008 `redefinition of` errors, every
-translation unit falling back. The split directory and its mirrored include root now come
-first.
-
-And a third: a quote include resolves relative to the including file, but the preamble no
-longer sits in the source's directory, so a sibling header could not be found. The unit's
-source directory is now an implicit include directory.
-
----
-
-## Case 3: a flat output directory shadows the wrong header
-
-Split headers were originally written flat, one file per basename. Boost has many repeated
-basenames.
-
-```
-   libs/filesystem/src/atomic_ref.hpp              --+
-                                                     +--> atomic_ref.hpp   <- one wins
-   libs/atomic/include/boost/atomic/atomic_ref.hpp --+
-```
-
-The survivor then shadowed the real header for *every* consumer, because the split
-directory is on the include path. Here it produced a compile error; with two
-compatible-looking headers it would have produced a silently miscompiled object.
-
-**Decision: mirror each header at the path it was included as.**
-
-```
-   <split_dir>/
-     foo_preamble.h
-     foo_1_a.cpp
-     include/
-       boost/filesystem/path.hpp          <- rewritten, at its real relative path
-       boost/atomic/atomic_ref.hpp
-       atomic_ref.hpp                     <- the other one, no longer colliding
-```
-
-Resolved by longest-matching `-I` directory, with a collision guard that fails loudly if
-two sources ever map to one output path.
-
-The same flat layout had a second facet. A source and a header sharing a stem (`path.cpp`
-and `path.hpp`) shared one piece-naming scheme, and the stale-output pruning deleted all 54
-of `path.cpp`'s pieces as "stale" because they were not in `path.hpp`'s list of 154. Pieces
-are now named by full file name, not stem.
-
----
-
-## Case 4: preprocessor context is part of the definition
-
-A definition inside `#if !defined(BOOST_NO_CXX17_HDR_STRING_VIEW)`, emitted
-unconditionally, is a definition referring to a type that may not exist.
-
-**Decision: capture the conditional stack active at the definition and replay it around
-the piece.**
-
-```
-   piece for path(std::basic_string_view<value_type> const&)
-   ---------------------------------------------------------
-   #include "portability_preamble.h"
-   #include "path.hpp"
-   #if !defined(BOOST_NO_CXX17_HDR_STRING_VIEW)      <- replayed
-   namespace boost { namespace filesystem {
-   inline path::path(std::basic_string_view<value_type> const& s) : m_pathname(s) {}
-   } }
-   #endif
-```
-
-With the file's own include guard excluded — its macro is already defined by the time the
-piece compiles, so replaying it would delete the body — and `#elif C` rewritten to
-`#if C`, since a piece opens its own conditional rather than continuing someone else's.
-
-A related one: a macro `#define`d before a body and `#undef`d later in the same header —
-Boost.Assert does exactly this with `BOOST_ASSERT_SNPRINTF` — cannot be moved at all,
-because the piece includes the whole header first and the `#undef` has already run.
-
----
-
-## Case 5: split only what the compiler would actually emit
-
-This is the subtlest, and the one that finally made the library link.
-
-Boost.Filesystem hides a block of inline forwarders behind a guard:
 
 ```cpp
-// To avoid ODR violation, these functions are not defined when the library itself is built.
-#if !defined(BOOST_FILESYSTEM_SOURCE)
-    BOOST_FORCEINLINE path& path::append(...)
-    BOOST_FORCEINLINE path  path::generic_path() const
-    ...
+// use_mylib.cpp
+#include "mylib.h"
+#include <iostream>
+
+int main() {
+    std::cout << add(3, 4) << multiply(5, 6) << greet("World") << average({1.0, 2.0}) << max_of(10, 20);
+    return 0;
+}
+```
+
+The build system runs `cpp-splitter clang++ -I. -MD -MF use_mylib.o.d -c -o use_mylib.o
+use_mylib.cpp`. The tool leaves `use_mylib.o` at that path and writes everything else under
+`use_mylib.o.split/`:
+
+```
+use_mylib.o.split/
+├── use_mylib.cpp_prefix.h                 the unit's include directives
+├── use_mylib.cpp_prefix.h.pch/<hash>.pch  libclang PCH of them, for the parse
+├── use_mylib_preamble.h                   declarations + vague-linkage definitions
+├── use_mylib_preamble.h.gch/<hash>.gch    clang PCH of it, for the pieces
+├── use_mylib.cpp_definitions.h            definitions that may exist in one object only
+├── use_mylib.cpp_0_definitions.cpp        the one piece that includes them
+├── use_mylib.cpp.harvest / .keeps         what was moved, what was kept, and why
+├── include/mylib.h                        rewritten copy: bodies replaced by declarations
+├── include/mylib.h.split / .harvest / .keeps
+├── include/mylib.h_1_add.cpp … _4_average.cpp   one piece per split definition
+├── split.cache · inputs.hash · depfile.cache      what this split was computed from
+└── *.o                                    one object per piece
+```
+
+## 2. The parse
+
+The include directives at the top of the unit are copied to `use_mylib.cpp_prefix.h` and
+compiled to a libclang PCH named by the content hash of that file plus a `.deps` list of the
+headers it reached. libclang then parses `use_mylib.cpp` once against that PCH. The parse
+yields, per file the unit read: every function and variable definition with its byte extent,
+its enclosing conditionals and namespaces, and whether the unit emits it; and the list of
+included files from `clang_getInclusions()`.
+
+> 💡 **Rationale.** The first versions parsed the unit without a PCH and re-parsed on every
+> invocation; on Boost.Filesystem an incremental build compiled nothing and its entire cost
+> was re-parsing three units with libclang (`bb80614c`). A libclang PCH of the include prefix was added in `595d66a6` and keyed on
+> content rather than timestamp in `b03d1743`. Feeding the pieces' preamble PCH into the
+> unit's own parse produced an AST that did not match the source; the two PCHs were separated
+> in `e0b8c9e5`. A header edited behind an unchanged prefix left the PCH stale and every
+> affected parse failed with `CXError_ASTReadError`, so the PCH records what it was built from
+> and is rebuilt when any of that is newer (`c620c206`). A split server that kept ASTs
+> resident was removed in `19416e05` once the PCH made it unnecessary.
+
+## 3. Classification
+
+Each definition is either split into a piece or kept where it is. Kept, with the reason
+written to `<file>.keeps`:
+
+| reason | example in the fixture |
+|---|---|
+| the program's entry point | `main()` |
+| function template, or member of a class template | `max_of<T>` |
+| virtual, constructor, destructor, conversion operator | — |
+| internal linkage defined in a header | — |
+| not emitted by this translation unit | — |
+| a macro the file later `#undef`s is needed by the body | — |
+| the definition's extent is shared with another declaration in one macro invocation | — |
+
+The fixture's `.keeps` files:
+
+```
+use_mylib.cpp.keeps:   1  4   the program's entry point   int main()
+include/mylib.h.keeps: 5  25  function template           T max_of(T, T)
+```
+
+Whether the unit emits a definition is decided from the parse: a definition is emitted if it
+is reachable from something with external linkage the unit defines, or is itself such a
+thing.
+
+> 💡 **Rationale.** Boost.Filesystem's library is built with `-DBOOST_FILESYSTEM_SOURCE`,
+> under which a block of inline forwarders is declared and never defined. Splitting them into
+> pieces marked `__attribute__((used))` turned declarations the build never wanted into
+> references nothing resolved: 19 undefined symbols at link. Splitting only what the unit
+> would emit (`ca0078ba`, `ef4288bb`) is what made the library link. Templates cannot be
+> instantiated ahead of time and stay in place; virtuals, constructors and destructors stay
+> because moving them out of line strips `override` and member-initialiser lists that are
+> usually macros (`36b96200`, `f9918e38`). `main` was split until `a5390c07`. Internal-linkage
+> definitions in a header were split until `eb9642c6`; each piece would have had its own copy.
+> A definition under a `#define … #undef` pair cannot be moved because the piece includes the
+> whole header first and the `#undef` has already run (`372cc850`). Definitions produced by one
+> macro expansion move as a whole invocation or not at all (`e42ae768`, `182d4e1e`).
+
+## 4. The preamble, in two layers
+
+`use_mylib_preamble.h` is the unit with its bodies removed: includes, then a declaration for
+every split definition.
+
+```cpp
+#pragma once
+#include "mylib.h"
+#include <iostream>
+
+int main();
+```
+
+It is compiled once to `use_mylib_preamble.h.gch/<hash>.gch`. Every piece includes it by
+name; clang finds the `.gch` directory next to the header and uses the matching PCH.
+
+Definitions that may exist in only one object — `main` here; any non-inline definition with
+external linkage that is kept — go to `use_mylib.cpp_definitions.h`, which exactly one piece
+includes:
+
+```cpp
+// use_mylib.cpp_definitions.h
+#pragma once
+#include "use_mylib_preamble.h"
+
+int main() { /* body verbatim */ }
+```
+
+```cpp
+// use_mylib.cpp_0_definitions.cpp
+#include "use_mylib.cpp_definitions.h"
+```
+
+> 💡 **Rationale.** With one preamble, 50 pieces of a unit that included Boost each re-parsed
+> Boost: the parallel build was slower than the serial one it replaced. The `.gch` was added in
+> `5cd3b642` and named by content hash in `b03d1743`, so the same preamble is compiled once
+> and never judged stale by a clock. The second layer came from `filesystem_error`'s virtual
+> destructor: kept in the preamble and non-inline with external linkage, it was emitted by
+> every piece — `multiple definition of filesystem_error::~filesystem_error()`. Layering the
+> preamble by linkage (`99a3847c`) took Boost.Filesystem from 3 of 12 units linking to 12 of
+> 12. Variables followed the same rule in `7fe712ac`; from C++17 a namespace-scope variable is
+> instead kept in place and marked `inline` (`22711366`, `3decf3fa`).
+
+## 5. Headers: mirrored copies and their pieces
+
+`mylib.h` is included by the unit and defines functions the unit emits, so it is split too.
+Its rewritten copy is written at `include/mylib.h` — the path it was included as, under the
+split directory's own include root — with each split body replaced by a declaration and the
+kept template left in place:
+
+```cpp
+// include/mylib.h
+#pragma once
+#include <string>
+#include <vector>
+#include <numeric>
+#include <algorithm>
+
+int add(int a, int b);
+int multiply(int a, int b);
+std::string greet(const std::string& name);
+double average(const std::vector<double>& values);
+
+template<typename T>
+T max_of(T a, T b) { return (a > b) ? a : b; }
+```
+
+`include/mylib.h.split` names the original and the four pieces produced from it. Each piece
+includes the **unit's** preamble first, then the rewritten header, then carries the
+definition with `__attribute__((used))` and a `#line` directive back to the original:
+
+```cpp
+// include/mylib.h_1_add.cpp
+#include "use_mylib_preamble.h"
+#include "mylib.h"
+
+__attribute__((used))
+#line 7 "/…/mylib.h"
+inline int add(int a, int b) {
+    return a + b;
+}
+```
+
+The pieces are compiled with `-I<split>/ -I<split>/include` ahead of the project's own
+include directories, so `#include "mylib.h"` resolves to the rewritten copy.
+
+> 💡 **Rationale.** In the fixture, four of the five definitions the unit emits are in
+> `mylib.h`, not in `use_mylib.cpp`; on the Boost corpora the ratio is higher. Following `clang_getInclusions()` and splitting project headers, not system ones, came in
+> `86e69891`. Compiling a header's piece against only that header failed on
+> `boost/system/detail/std_category_impl.hpp`, which is written to be included after
+> `error_condition` is complete; the piece includes its includer's preamble first
+> (`37d1879a`). Split headers were first written flat by basename; Boost has two
+> `atomic_ref.hpp`, one shadowed the other for every consumer, and the copy moved to the
+> included path (`7b2a7052`). The split include root was appended after the project's `-I`
+> flags, so an original header won over its rewritten copy and brought the moved definitions
+> back: 1008 `redefinition` errors. It now comes first. A quoted include inside a rewritten
+> header resolved relative to the mirror, where the sibling did not exist (`9b542e03`).
+> `inline` is inserted where the original lacks it, and `__attribute__((used))` forces the
+> symbol, because a piece for an inline function otherwise emitted nothing (`e1716026`);
+> `always_inline` is dropped when re-emitting (`da84892d`).
+
+## 6. Members, and preprocessor context
+
+A member defined in its class is emitted out of line with a trailing return type, and the
+class keeps a declaration in its place. From `test/member_functions.cpp`:
+
+```cpp
+// in the class                                    // the piece
+int value() const { return value_; }               namespace demo {
+                                                   #line 22 "/…/member_functions.cpp"
+// in the preamble                                 auto Widget::value() const -> int { return value_; }
+int value() const;                                 }
+```
+
+A definition inside `#if` blocks is emitted inside the same blocks. From Boost.Filesystem:
+
+```cpp
+#include "portability_preamble.h"
+#include "path.hpp"
+#if !defined(BOOST_NO_CXX17_HDR_STRING_VIEW)
+namespace boost { namespace filesystem {
+inline path::path(std::basic_string_view<value_type> const& s) : m_pathname(s) {}
+} }
 #endif
 ```
 
-The library is built *with* `-DBOOST_FILESYSTEM_SOURCE`. Inside it, those functions are
-declared and never defined — deliberately, so that only user code carries them. That is
-harmless normally: the functions that *call* them are inline too, nobody odr-uses them,
-they are never emitted, and the calls never materialise. The unsplit library defines none
-of them either.
+The file's own include guard is excluded — its macro is defined by the time the piece
+compiles — and `#elif C` becomes `#if C`, since a piece opens its own conditional.
 
-Splitting breaks the balance. Every split piece is forced into existence with
-`__attribute__((used))`, so a body the build never wanted becomes real code, and its calls
-to those forwarders become references nothing resolves. Nineteen undefined symbols at
-final link.
+> 💡 **Rationale.** A member carved out verbatim is not valid outside its class: `const` is
+> ill-formed on a non-member and a constructor's initialiser list parses as a base-initialiser.
+> `f9918e38` emits members out of line. A leading return type is looked up in the enclosing
+> namespace once out of line, so class-scoped names such as `iterator` stopped resolving; the
+> trailing form is looked up in class scope. Conditionals were replayed after a definition
+> inside `#if !defined(BOOST_NO_CXX17_HDR_STRING_VIEW)` was emitted unconditionally and
+> referred to a type that did not exist (`2f1b9b65` covers the case where the condition is no
+> longer true once the header is included in the piece). Multi-line conditionals and a
+> `//` comment on the declarator's last line each had a fixture and a fix (`test/`).
 
-There is no property of the declaration to test — from inside the library those functions
-look exactly like ordinary ones defined in another object. Counting every reference in the
-translation unit is not enough either: a call inside a body that is itself never emitted
-does not make its target needed.
+## 7. Reuse and re-slice
 
-**Decision: split only what the translation unit actually emits.**
+After a split, three records are written beside the pieces:
 
-```
-   roots  =  non-inline definitions with external linkage
-             + namespace-scope initialisers (they run regardless)
-                              |
-                    [ BFS over the call graph ]
-                              |
-             reachable set  =  what the compiler will emit
-                              |
-        split a definition only if it lands in that set;
-        everything else stays in the header, costing nothing
-```
+- `depfile.cache` — the compiler's `-MF` output, rewritten so that each rewritten header copy
+  is followed by the original it came from; the build system receives the same list.
+- `inputs.hash` — the content hash of every prerequisite in it.
+- `split.cache` — a hash over the source, the flags and every prerequisite's content, plus the
+  list of files the split produced.
+- `<file>.harvest` — for each file, every definition's byte extent, the offset of its body,
+  hashes of the body and of the signature, hashes of the gaps between definitions, and the
+  piece that carries it (`-` if kept).
 
-The two error directions are not symmetric, and that asymmetry is the whole design
-rationale. *Missing* a root leaves a function in the header that could have been split —
-less splitting, nothing broken. *Over-including* produces dangling references. So the roots
-are kept deliberately narrow.
+On the next invocation the launcher takes the first of these that applies:
 
-Undefined references went from 19 to zero, and the build got faster (23.7s to 16.5s),
-because less is forced into existence.
-
----
-
-## Case 6: the preamble is included many times
-
-The last one. Every piece includes the preamble, so everything the preamble carries is
-compiled once *per piece*. Fine for declarations. Fine for vague linkage — that is exactly
-what `inline` is for. Not fine for an ordinary definition with external linkage.
-
-`filesystem_error`'s virtual destructor is kept in the preamble on purpose: moving a
-virtual out-of-line means stripping an `override` that is usually a macro. It is also
-non-inline with external linkage. Every piece emitted it:
-
-```
-exception_preamble.h:54: multiple definition of `filesystem_error::~filesystem_error()'
-exception_preamble.h:54: multiple definition of `typeinfo for filesystem_error'
+```mermaid
+flowchart TB
+    start["launcher invoked"] --> h{"split.cache hash<br/>matches?"}
+    h -- "yes" --> reuse["reuse: recompile nothing<br/>touch the object"]
+    h -- "no" --> one{"inputs.hash: exactly one<br/>prerequisite changed, and<br/>only inside one recorded body?"}
+    one -- "yes" --> reslice["re-slice: splice the new body into<br/>its piece or its kept copy,<br/>renumber #line after it, rewrite the harvest"]
+    one -- "no" --> remote{"CPP_SPLITTER_REMOTE_SPLIT<br/>and an RBE environment?"}
+    remote -- "yes" --> cluster["rewrapper: split on a worker,<br/>download the tree"]
+    remote -- "no" --> parse["libclang parse here"]
 ```
 
-**Decision: layer the preamble by linkage.**
+A re-slice writes exactly what a full split would write for the same edit; the test
+`launcher.incremental_body_edit` hashes every generated file after a re-slice and after a
+forced full split of the same edit and requires the two sets to be equal.
 
-```
-   +--------------------------------------------+
-   |  foo_preamble.h              (tier one)    |   declarations
-   |    classes, enums, typedefs                |   + vague-linkage definitions
-   |    inline / template / constexpr / static  |   INCLUDED BY EVERY PIECE
-   +--------------------------------------------+
-             ^            ^             ^
-             |            |             |
-       foo_1_a.cpp   foo_2_b.cpp   foo_3_c.cpp
-             |
-             | #include            (exactly one piece does this)
-             v
-   +--------------------------------------------+
-   |  foo_definitions.h           (tier two)    |   must appear exactly once
-   |    non-inline, external linkage            |   INCLUDED BY ONE PIECE
-   +--------------------------------------------+
-```
+> 💡 **Rationale.** A build system re-runs the launcher whenever a prerequisite's timestamp
+> moves, and each run re-parsed: a `touch` of one header re-parsed every unit that included it
+> to produce byte-identical output. Hashing the split's inputs (`262eb53d`) made that a
+> comparison. The depfile named the rewritten copies, so an edit to a real header rebuilt
+> nothing until `94018fb3` mapped them back. With reuse in place, an edit to one body still
+> re-parsed every affected unit; on Boost.Geometry the parse was measured as the whole cost of
+> that row (`2446bca4`), and `71cc0b23` added the re-slice. It applied only to definitions the
+> unit had emitted a piece for; a definition the unit keeps in its header copy fell inside a
+> gap and the edit read as a change outside every definition. On Boost.Spirit that was 267 of
+> 268 units re-splitting (`8c434275`, `3044a13b`).
 
-Tier one keeps a declaration where the definition was — nothing for a member, which its
-class already declares; a forward declaration for a free function. Tier-two text is
-re-wrapped in the namespaces it was lifted out of.
+## 8. The link
 
-This is better than out-lining those definitions, for three reasons:
+The pieces' objects are joined with `ld -r -o use_mylib.o <pieces>`. When the splitter runs
+behind `tipi-compiler-driver`, the link is handed to `tipi-linker-driver` and becomes a cached
+action like the compiles. `CPP_SPLITTER_LINKER` selects `ld`, `mold` or `ld.lld`; all three
+take `-r`.
 
-- **It leaves the source text alone**, so the macro-spelled `override` problem never
-  arises and the keep-virtuals rule stops conflicting with this one.
-- **The key-function consequence falls out for free.** The vtable and typeinfo follow the
-  first non-inline virtual, so they land in whichever piece includes tier two — exactly one
-  object, by construction rather than by a rule someone has to remember.
-- **It generalises to namespace-scope variables**, which out-lining cannot reach at all: a
-  variable cannot become a function piece.
+> 💡 **Rationale.** `ld -r` produces an ordinary object, so nothing downstream of the launcher
+> changes (`16d589c2`). Benchmarked in `684734e1`; `mold` allowed in `ad90bca3`. When the object
+> was up to date the link was skipped and the object left older than its inputs, so the build
+> system rebuilt it every time; `d2663f98` touches it. The link joined the distributed build in
+> `a13ae165`, with ~800 cache hits on Boost.Spirit where 193 units relinked identically.
 
-"Safe to include many times" becomes a property of *how the preamble is built*, rather than
-something every keep rule has to get right independently.
+## 9. Producing the split on the cluster
 
-With that, Boost.Filesystem splits **12 of 12 translation units, zero fallbacks**, no
-`multiple definition` anywhere, `filesystem_error`'s typeinfo appearing exactly as often as
-in an unsplit build, and a program linked against the result passing the same nine
-filesystem assertions as one linked against a normal build.
+With `CPP_SPLITTER_REMOTE_SPLIT=1` and reproxy's environment present, the launcher invokes
+`rewrapper` with the unit's compile command as the action and itself as `-remote_wrapper`,
+labelled `type=compile` so that reproxy's C++ input processor determines and uploads the
+header closure. The worker runs the same binary, staged into the exec root by content hash,
+with `CPP_SPLITTER_EMIT_ONLY=1`: it parses, writes the split tree, and exits. The tree returns
+through `-output_directories`; compiling and linking proceed as above.
 
----
-
-## The architecture, assembled
-
-```
-   foo.cpp
-      |
-      |  [ 1 ]  ONE libclang parse of the translation unit
-      v
-   +---------------------------------------------------------------+
-   |  harvest: every definition, bucketed by defining file          |
-   |  emit-graph: roots -> reachable set (what will be emitted)     |
-   +---------------------------------------------------------------+
-      |
-      |  [ 2 ]  per unit (the .cpp, and each header it should split)
-      v
-   +---------------------------------------------------------------+
-   |  classify each definition                                      |
-   |    keep in header?   template / virtual / ctor / unnamed-ns /  |
-   |                      constexpr / always-inline / not emitted   |
-   |    vague linkage?    inline / template / internal linkage      |
-   +---------------------------------------------------------------+
-      |
-      +--> tier one preamble  (declarations + vague-linkage defs)  --> .pch
-      +--> tier two defs      (external-linkage defs, once only)
-      +--> one piece per split definition
-             #include tier one
-             #include includer's preamble   (header pieces only)
-             #include tier two              (exactly one piece)
-             replayed #if context
-             rewritten out-of-line definition
-      |
-      |  [ 3 ]  compile pieces in parallel, ld -r
-      v
-   foo.o
+```mermaid
+flowchart LR
+    subgraph local["Developer machine"]
+        direction TB
+        launcher["cpp-splitter"] --> rw["rewrapper<br/>action = the compile command"]
+        rw --> reproxy["reproxy scans inputs"]
+        tree[".split tree"] --> pieces["piece compiles and ld -r,<br/>each a rewrapper action"]
+    end
+    subgraph cluster["RBE cluster"]
+        worker["cpp-splitter --emit-only<br/>libclang parse"]
+        cache["action cache"]
+    end
+    reproxy --> worker
+    worker -- "-output_directories" --> tree
+    pieces --> cache
 ```
 
-Every box in that diagram exists because a specific C++ linkage rule made the simpler
-version wrong.
-
----
-
-## Why Boost.Filesystem is the right benchmark
-
-Almost every architectural decision above was forced by Boost.Filesystem, and almost none
-of them by the small hand-written fixtures added alongside. Several times a fixture was
-written to reproduce a Boost failure and simply refused to fail, because the specific
-combination of linkage properties that produced it did not occur.
-
-The reason is that Boost.Filesystem happens to exercise nearly every linkage and symbol
-category C++ has, in one modestly-sized library:
-
-- **Internal linkage** — anonymous-namespace helpers, and `static` free functions that
-  must be renamed to survive being split across objects at all.
-- **Vague linkage** — inline functions, function templates, class templates, explicit
-  specializations: definitions that may legally appear in every object.
-- **External linkage** — `BOOST_FILESYSTEM_DECL` definitions that must appear in exactly
-  one.
-- **`available_externally`** — `BOOST_FORCEINLINE` functions emitted in *no* object at
-  all, meant to be inlined at every call site, and impossible to link against.
-- **Symbol families** — constructors (C1/C2/C3) and destructors (D0/D1/D2), where a split
-  definition can emit one variant while callers need another, and the demangled names are
-  identical so the tooling lies to you.
-- **Key functions** — virtual members that drag the vtable and typeinfo to wherever they
-  are emitted.
-- **Inline namespaces** — `BOOST_FILESYSTEM_VERSION_NAMESPACE` versioning, with `using`
-  declarations naming functions whose definitions have moved.
-- **Conditional definitions** — the `#if !defined(BOOST_FILESYSTEM_SOURCE)` block that
-  exists in user code and deliberately does not exist in the library.
-- **Header/footer pairs** — `detail/header.hpp` and `detail/footer.hpp`, files written
-  without include guards, meant never to stand alone.
-- **Implementation includes** — `utf8_codecvt_facet.ipp`, an entire translation unit's
-  worth of code in a file that is not called a header and has no guard.
-- **Macro-spelled everything** — `BOOST_FORCEINLINE`, `BOOST_OVERRIDE`,
-  `BOOST_SYSTEM_CONSTEXPR`, `BOOST_UTF8_DECL`: specifiers that no amount of text matching
-  will find, and that only the AST can answer.
-
-A tool that splits C++ into one function per object file is, in effect, a simultaneous
-stress test of every one of those rules — because splitting takes each definition out of
-the context that made its linkage correct, and the tool's entire job is putting that
-context back. Boost.Filesystem is small enough to iterate on in under twenty seconds and
-rich enough that essentially every category shows up, usually in a form where the naive
-implementation looks like it works.
-
-It has been less a test case than a specification.
-
-The naive idea — one function, one object file — turned out to be about two percent of the
-work. The other ninety-eight percent is linkage.
+> 💡 **Rationale.** On Boost.Spirit's suite at `-j500` the parses, not the compiles, were what
+> the machine ran out of. TODO/35 (`9f4c819c`) moved the parse; `c7077971` implements it. Four
+> details each cost a debugging round: `-remote_wrapper` is resolved relative to the working
+> directory while `-toolchain_inputs` is relative to the exec root; the binary must lie under
+> the exec root to be uploaded; EngFlow refuses an action without a platform; and
+> `-labels=type=compile` is what makes reproxy scan the command for inputs (`16984b35`).
+> reclient merges `-output_directories` into an existing directory rather than replacing it,
+> and `read_split_cache()` appended to a populated result, so a second split over a populated
+> directory listed every piece twice at `ld -r`; both fixed in `cf7b97e3`. The re-slice is
+> tried before the remote split (`51409dd4`): a needless remote split is a round trip per unit
+> and regenerates every piece's action key. Measured in
+> `benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md`: the body edit executes one compile
+> with 268 units re-slicing locally; the cold build's remaining cost is transferring the split
+> trees back, not parsing.
