@@ -1,6 +1,6 @@
 # Boost.Spirit's test suite, split and built on Remote Build Execution
 
-Two measurement sets, each from a single run, each labelled with what it measured. Nothing is
+Three measurement sets, each from a single run, each labelled with what it measured. Nothing is
 carried over from a pass older than those, and no row is combined with a row from the other
 set: comparing configurations across runs compares the cluster's cache state as much as
 anything the splitter did.
@@ -141,20 +141,26 @@ figures; the action counts and the split attribution are the stable part of the 
 
 ### On this machine alone, `-j16`
 
-No cluster, so no per-action records exist and the last two columns cannot be filled in.
+Re-measured 11 September with the driver timing its own build phase, so these are build times,
+comparable with the cluster-split table above and not with the first `-j500` table. No cluster,
+so no per-action records exist; the last column is what the splitter reported instead.
 
-| scenario | splitter | wall | fallbacks |
-|---|---|---:|---:|
-| full | no | 64.2s | 0 |
-| full | yes | 654.5s | 0 |
-| no-op | no | 12.0s | 0 |
-| no-op | yes | 17.5s | 0 |
-| one source | no | 11.8s | 0 |
-| one source | yes | 13.6s | 0 |
-| one header | no | 11.8s | 0 |
-| one header | yes | 13.7s | 0 |
-| one body | no | 63.2s | 0 |
-| one body | yes | 90.2s | 0 |
+| scenario | splitter | build | fallbacks | how the 279 units were split |
+|---|---|---:|---:|---|
+| full | no | 57.8s | 0 | — |
+| full | yes | 654.6s | 0 | 279 parsed and split here |
+| no-op | no | 5.7s | 0 | — |
+| no-op | yes | 11.4s | 0 | none: all 279 reused their split |
+| one source | no | 5.6s | 0 | — |
+| one source | yes | 6.0s | 0 | none, not re-mirrored |
+| one header | no | 5.7s | 0 | — |
+| one header | yes | 6.0s | 0 | none, not re-mirrored |
+| **one body** | **no** | **57.5s** | 0 | — |
+| **one body** | **yes** | **14.2s** | 0 | **268 re-sliced here, no parse** |
+
+The peak-RSS column is omitted for this table: under `--host` the build's processes were not
+in the benchmark's process group and the sampler saw only the driver (0.3G on every row), so
+the figure would be the sampler's blind spot rather than the build's memory.
 
 **Nothing falls back to a plain compile on any row, in either mode.**
 
@@ -175,8 +181,13 @@ they compare is bookkeeping: 1641 cache lookups against 15885, 32.1s against 456
 the standing cost of carrying 9.7x more actions, paid on a build where nothing needed
 compiling.
 
-**On one machine the cold full build costs 10.2x**, 64.2s against 654.5s. One object per
+**On one machine the cold full build costs 11.3x**, 57.8s against 654.6s. One object per
 function is strictly more work, and without a farm or a cache there is nothing to absorb it.
+
+**On one machine the body edit is 4.0x faster**, 57.5s against 14.2s. The plain build
+recompiles the 194 units that include the header; the split build re-slices the edited body in
+268 places without a parse and recompiles one piece. Before TODO/36 this row read 90.2s, because
+the 193 units that keep the definition in their header copy could not re-slice and re-parsed.
 
 **The touch rows behave as designed.** Both configurations do nothing: CMake RE mirrors sources
 by content, so a file whose bytes did not change is not re-mirrored. The splitter adds about
@@ -187,16 +198,11 @@ the difference is 1635 cache lookups where the ordinary build needs none.
 
 ## Caveats
 
-- **`--host` rows cannot distinguish work from cache.** Without a cluster there are no
-  per-action records, so a fast row there cannot be shown to have compiled anything. An earlier
-  pass in this same configuration reported the full split build at 78.5s rather than 654.5s;
-  the difference is far too large to be the code change between them, and the likely
-  explanation is a warm cache the driver could still reach. Treat the `-j16` table as
-  indicative and the cluster table as measured.
-- **The `one body` row under `--host` is not incremental.** It reads 90.2s against a 654.5s
-  full build, but a content change makes CMake RE re-execute the whole graph, and with no cache
-  there is nothing to absorb the parts that did not really change. It is a partial rebuild
-  wearing an incremental label.
+- **`--host` rows have no per-action records.** Without a cluster nothing says whether a row
+  compiled or was served from a cache the driver could reach, so the splitter's own report of
+  which path each unit took is the only attribution available for that table. Its `full` row
+  parsed all 279 units here and its `one body` row re-sliced 268, which is consistent with the
+  times.
 - **The body row is noisy on the ordinary side.** It executes 271 real compiles and cluster
   load moves that substantially between runs. The action counts, 271 against 1, are the stable
   part of the result.
@@ -207,8 +213,8 @@ the difference is 1635 cache lookups where the ordinary build needs none.
   used to time one whole invocation of `build-spirit-cmake-re.sh` -- copying the project in,
   staging the drivers, mirroring the sources, configuring, and then building -- which added
   about 20s to every row. The driver now reports its own build phase and the benchmark reads
-  that, so the cluster-split table is build-only. The two `-j500` and `-j16` tables above
-  predate the change: compare within a table, not across.
+  that, so the cluster-split and `-j16` tables are build-only. The first `-j500` table predates
+  the change: compare it within itself, not against the other two.
 - **A row is only attributable if the splitter was verbose.** It reports which of its four
   paths each unit took -- reuse, re-slice, cluster, or parse here -- and without that a row
   that quietly declined to use the cluster and split here instead looks exactly like one that
