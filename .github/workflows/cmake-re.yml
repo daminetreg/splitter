@@ -11,9 +11,8 @@
 #                     containerized mode: from a runner that mode has to push the checkout
 #                     into a second container over ssh, and on a shallow checkout of a
 #                     private repository the checkout there failed to resolve the commit --
-#                     and cmake-re exited 0 on that crash, so the job stayed green. Every
-#                     cmake-re step here therefore also checks that what it was meant to
-#                     produce exists.
+#                     and cmake-re exited 0 on that crash, so the job stayed green. --host
+#                     returns the real exit status.
 #   macos-host        cmake-re --host with the clang the runner ships, Apple's, and libclang
 #                     from Homebrew's llvm (environments/macos-apple-clang.cmake). The
 #                     installer does not bring tipi's clang to the runner, so the
@@ -75,12 +74,9 @@ jobs:
           cmake-re --host -S . -B build/cmake-re-ubuntu-clang \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
-          test -f build/cmake-re-ubuntu-clang/CMakeCache.txt
 
       - name: Build
-        run: |
-          cmake-re --build build/cmake-re-ubuntu-clang --host -j$(nproc)
-          test -x build/cmake-re-ubuntu-clang/cpp-splitter
+        run: cmake-re --build build/cmake-re-ubuntu-clang --host -j$(nproc)
 
       - name: Test
         run: ctest-re --test-dir build/cmake-re-ubuntu-clang --output-on-failure -j$(nproc)
@@ -125,12 +121,9 @@ jobs:
           cmake-re --host -S . -B build/cmake-re-macos-apple-clang \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_TOOLCHAIN_FILE=environments/macos-apple-clang.cmake
-          test -f build/cmake-re-macos-apple-clang/CMakeCache.txt
 
       - name: Build
-        run: |
-          cmake-re --build build/cmake-re-macos-apple-clang --host -j$(sysctl -n hw.ncpu)
-          test -x build/cmake-re-macos-apple-clang/cpp-splitter
+        run: cmake-re --build build/cmake-re-macos-apple-clang --host -j$(sysctl -n hw.ncpu)
 
       - name: Test
         run: ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j$(sysctl -n hw.ncpu)
