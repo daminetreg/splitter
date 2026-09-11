@@ -76,7 +76,7 @@ cmake-re --host -S . -B build/cmake-re-macos-apple-clang -DCMAKE_BUILD_TYPE=Debu
 cmake-re --build build/cmake-re-macos-apple-clang --host -j8
 ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j8
 ```
-`--build` must be the first argument. `launcher.remote_split_on_opal` skips on macOS: it needs the Linux toolchain.
+`--build` must be the first argument. `launcher.remote_split_on_rbe` skips on macOS: it needs the Linux toolchain.
 
 # When running benchmarks with `cmake-re --host --distributed`
 

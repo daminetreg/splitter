@@ -19,8 +19,11 @@
 #                     tipi-clang toolchain a developer uses locally (macos-clang.cmake) is
 #                     not what runs here.
 #
-# launcher.remote_split_on_opal skips in both: it talks to a real RBE cluster and there are no
-# credentials here.
+# launcher.remote_split_on_rbe talks to a real RBE cluster. The Linux job hands it the
+# RBE_SERVICE, RBE_TLS_CLIENT_AUTH_CERT and RBE_TLS_CLIENT_AUTH_KEY secrets as the variables
+# reclient reads; without them (a pull request from a fork gets none) it skips, as it does
+# on macOS, where the Linux toolchain it needs is not available. It also skips while the
+# image's cmake-re is v0.0.87, which cannot chain the launcher; see the driver.
 
 name: cmake-re
 
@@ -47,7 +50,7 @@ env:
   TIPI_DISABLE_AR_RANLIB_DRIVER: "ON"
 
 jobs:
-  linux-container:
+cmake-re-macos-host-build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
@@ -78,7 +81,28 @@ jobs:
       - name: Build
         run: cmake-re --build build/cmake-re-ubuntu-clang --host -j$(nproc)
 
+      # reclient wants the mTLS pair as files, so the secrets are written out under the
+      # runner's temp directory and the RBE_* variables name them. Empty secrets -- a fork's
+      # pull request -- leave the variables empty and the test skips.
+      - name: Stage RBE credentials
+        env:
+          RBE_TLS_CLIENT_AUTH_CERT: ${{ secrets.RBE_TLS_CLIENT_AUTH_CERT }}
+          RBE_TLS_CLIENT_AUTH_KEY: ${{ secrets.RBE_TLS_CLIENT_AUTH_KEY }}
+        run: |
+          if [ -n "$RBE_TLS_CLIENT_AUTH_CERT" ] && [ -n "$RBE_TLS_CLIENT_AUTH_KEY" ]; then
+            install -d -m 700 "$RUNNER_TEMP/rbe-mtls"
+            printf '%s\n' "$RBE_TLS_CLIENT_AUTH_CERT" > "$RUNNER_TEMP/rbe-mtls/engflow.crt"
+            printf '%s\n' "$RBE_TLS_CLIENT_AUTH_KEY" > "$RUNNER_TEMP/rbe-mtls/engflow.key"
+            chmod 600 "$RUNNER_TEMP/rbe-mtls/engflow.key"
+            echo "RBE_tls_client_auth_cert=$RUNNER_TEMP/rbe-mtls/engflow.crt" >> "$GITHUB_ENV"
+            echo "RBE_tls_client_auth_key=$RUNNER_TEMP/rbe-mtls/engflow.key" >> "$GITHUB_ENV"
+          else
+            echo "no RBE credentials in this run; launcher.remote_split_on_rbe will skip"
+          fi
+
       - name: Test
+        env:
+          RBE_service: ${{ secrets.RBE_SERVICE }}
         run: ctest-re --test-dir build/cmake-re-ubuntu-clang --output-on-failure -j$(nproc)
 
       # The fixtures leave their split trees behind, and a failure is usually diagnosed by
@@ -93,7 +117,7 @@ jobs:
             build/cmake-re-ubuntu-clang/test-output/
           retention-days: 7
 
-  macos-host:
+cmake-re-macos-host-build-and-test:
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -136,4 +160,53 @@ jobs:
           path: |
             build/cmake-re-macos-apple-clang/Testing/
             build/cmake-re-macos-apple-clang/test-output/
+          retention-days: 7
+
+plain-cmake-build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: tipibuild/tipi-ubuntu-2404:v0.0.87
+      # The tipi cache is a shared service the local setup mounts credentials for. CI has
+      # neither, so say so rather than letting it try and fail slowly.
+      env:
+        TIPI_CACHE_CONSUME_ONLY: "ON"
+        TIPI_CACHE_FORCE_ENABLE: "OFF"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # The container runs as root while the checkout is owned by the runner user, which git
+      # refuses to look at. Configure reads the revision, so it has to be allowed.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Downloads hfc and Boost 1.85 through HermeticFetchContent, so this step is where the
+      # time goes on a cold run.
+      - name: Configure
+        run: |
+          tipi run cmake -GNinja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake
+
+      - name: Build
+        run: tipi run cmake --build build -j$(nproc)
+
+      # 31 fixtures. Each splits a small translation unit through the launcher, compiles the
+      # pieces, links them and runs the program, so a failure here is a real defect rather
+      # than a flaky environment.
+      - name: Test
+        run: tipi run ctest --test-dir build --output-on-failure -j$(nproc)
+
+      # The fixtures leave their split trees behind, and a failure is usually diagnosed by
+      # reading the generated pieces rather than the assertion message.
+      - name: Upload test output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-output
+          path: |
+            build/Testing/
+            build/test-output/
           retention-days: 7

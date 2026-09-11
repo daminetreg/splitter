@@ -33,16 +33,21 @@ if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
   return()
 endif()
 
-if(NOT DEFINED ENV{ENGFLOW_MTLS_DIR})
-  set(mtls "$ENV{HOME}/engflow-mTLS")
-else()
-  set(mtls "$ENV{ENGFLOW_MTLS_DIR}")
-endif()
-if(NOT EXISTS "${mtls}/engflow.crt" OR NOT EXISTS "${mtls}/engflow.key")
-  message(STATUS "${skip_marker} no mTLS credentials in ${mtls}")
-  message(STATUS "      set ENGFLOW_MTLS_DIR to a directory holding engflow.crt and engflow.key")
-  return()
-endif()
+# The cluster and the credentials come from the three variables reclient itself reads, so
+# what this test talks to is exactly what `cmake-re --distributed` would. The workflow sets
+# them from repository secrets; locally, point them at the EngFlow mTLS pair.
+foreach(var RBE_service RBE_tls_client_auth_cert RBE_tls_client_auth_key)
+  if("$ENV{${var}}" STREQUAL "")
+    message(STATUS "${skip_marker} ${var} is not set")
+    message(STATUS "      set RBE_service, RBE_tls_client_auth_cert and RBE_tls_client_auth_key to run this test")
+    return()
+  endif()
+endforeach()
+foreach(var RBE_tls_client_auth_cert RBE_tls_client_auth_key)
+  if(NOT EXISTS "$ENV{${var}}")
+    message(FATAL_ERROR "${var} names '$ENV{${var}}', which does not exist")
+  endif()
+endforeach()
 
 # CMAKE_RE_DIR first and on its own: `find_program(... PATHS)` appends, so it would have found
 # whichever cmake-re is on PATH -- and only from v0.0.88 does cmake-re chain a user-specified
@@ -55,6 +60,21 @@ endif()
 if(NOT cmake_re)
   message(STATUS "${skip_marker} no cmake-re binary found")
   return()
+endif()
+
+# Only from v0.0.88 does cmake-re chain a user-supplied CMAKE_CXX_COMPILER_LAUNCHER ahead of
+# its own driver; v0.0.87 -- the one the image ships -- silently drops it, and a build without
+# the launcher would prove nothing about the splitter. The check on the configured cache below
+# catches that outright, but with the credentials present and an old cmake-re there is no way
+# to run this test, which is a skip, not a defect.
+execute_process(COMMAND "${cmake_re}" --version
+                OUTPUT_VARIABLE cmake_re_version ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(cmake_re_version MATCHES "v([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+  set(cmake_re_semver "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+  if(cmake_re_semver VERSION_LESS "0.0.88")
+    message(STATUS "${skip_marker} ${cmake_re} is v${cmake_re_semver}; chaining the launcher needs v0.0.88")
+    return()
+  endif()
 endif()
 
 # --- run ----------------------------------------------------------------------------------
@@ -102,14 +122,11 @@ endif()
 set(common_env
   "TIPI_DISABLE_AR_RANLIB_DRIVER=ON" "TIPI_CACHE_CONSUME_ONLY=ON" "TIPI_CACHE_FORCE_ENABLE=OFF"
   "RBE_service=$ENV{RBE_service}" "RBE_service_no_auth=true"
-  "RBE_tls_client_auth_cert=${mtls}/engflow.crt"
-  "RBE_tls_client_auth_key=${mtls}/engflow.key"
+  "RBE_tls_client_auth_cert=$ENV{RBE_tls_client_auth_cert}"
+  "RBE_tls_client_auth_key=$ENV{RBE_tls_client_auth_key}"
   "RBE_proxy_log_dir=${WORKDIR}/logs"
   "CPP_SPLITTER_VERBOSE=1"
   "PATH=${path_with_drivers}")
-if("$ENV{RBE_service}" STREQUAL "")
-  list(APPEND common_env "RBE_service=opal.cluster.engflow.com:443")
-endif()
 
 function(run_build label remote out_log)
   set(env ${common_env})

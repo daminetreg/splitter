@@ -78,8 +78,11 @@ ctest --test-dir build --output-on-failure -j8
 ```
 
 `--build` must be the first argument to `cmake-re`. `build/<name>` is a symlink into
-cmake-re's mirror of the tree. `launcher.remote_split_on_opal` skips unless it finds EngFlow
-mTLS credentials in `~/engflow-mTLS` (or `ENGFLOW_MTLS_DIR`) on a Linux host.
+cmake-re's mirror of the tree. `launcher.remote_split_on_rbe` runs only on a Linux host with
+cmake-re >= v0.0.88 and `RBE_service`, `RBE_tls_client_auth_cert` and `RBE_tls_client_auth_key`
+set -- the variables reclient reads, the last two naming the EngFlow mTLS pair -- and skips
+otherwise. CI sets them from the `RBE_SERVICE`, `RBE_TLS_CLIENT_AUTH_CERT` and
+`RBE_TLS_CLIENT_AUTH_KEY` secrets.
 
 ## Using it
 

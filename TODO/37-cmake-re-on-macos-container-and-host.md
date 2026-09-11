@@ -57,7 +57,7 @@ cmake-re removes the by-hand part twice over:
 - From this macOS host, `cmake-re -S . -B build/cmake-re-ubuntu-clang
   -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake` configures and builds cpp-splitter
   in the container, and `--run-test all` passes the suite there (the same 31 fixtures as
-  `build-and-test.yml`; `launcher.remote_split_on_opal` skips without credentials).
+  `build-and-test.yml`; `launcher.remote_split_on_rbe` skips without credentials).
 - From this macOS host, `cmake-re --host -S . -B build/cmake-re-macos-clang
   -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake` builds cpp-splitter against tipi's
   clang 13 and `ctest-re` passes the same suite.

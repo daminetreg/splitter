@@ -232,12 +232,12 @@ add_test(
 # the system rather than the environment.
 execute_process(COMMAND id -u OUTPUT_VARIABLE cpp_splitter_uid OUTPUT_STRIP_TRAILING_WHITESPACE)
 set(cpp_splitter_remote_split_workdir "/tmp/cpp-splitter-remote-split-${cpp_splitter_uid}"
-    CACHE PATH "Work directory for launcher.remote_split_on_opal; must be outside any git repo")
+    CACHE PATH "Work directory for launcher.remote_split_on_rbe; must be outside any git repo")
 
 # TODO/35: the split itself is produced on the RBE cluster. Talks to a real cluster and skips
 # when there are no credentials -- see the driver for why a stub would not be worth having.
 add_test(
-  NAME launcher.remote_split_on_opal
+  NAME launcher.remote_split_on_rbe
   COMMAND ${CMAKE_COMMAND}
           -DSPLITTER=$<TARGET_FILE:cpp-splitter>
           -DPROJECTDIR=${cpp_splitter_test_dir}/remote_split
@@ -248,7 +248,7 @@ add_test(
           -DCMAKE_RE_DIR=${CMAKE_SOURCE_DIR}/cmake-re-dev-latest
           -DSTAGE_DRIVERS=${CMAKE_SOURCE_DIR}/tools/stage-tipi-drivers.sh
           -P ${cpp_splitter_test_dir}/cmake/RunRemoteSplitTest.cmake)
-set_tests_properties(launcher.remote_split_on_opal PROPERTIES
+set_tests_properties(launcher.remote_split_on_rbe PROPERTIES
   SKIP_REGULAR_EXPRESSION "cpp-splitter-test-skip:"
   TIMEOUT 900)
 
