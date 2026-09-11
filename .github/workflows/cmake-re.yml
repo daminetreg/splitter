@@ -283,12 +283,16 @@ jobs:
           path: dist
 
       # download-artifact puts each artifact in a directory of its name; the assets take
-      # that name so the two are told apart in the release.
+      # that name so the two are told apart in the release. The file has to leave the
+      # directory before the directory can give up its name.
       - name: Lay out the assets
         run: |
-          mv dist/cpp-splitter-linux-x86_64/cpp-splitter dist/cpp-splitter-linux-x86_64.bin
-          mv dist/cpp-splitter-macos-arm64/cpp-splitter dist/cpp-splitter-macos-arm64.bin
-          chmod +x dist/*.bin
+          for name in cpp-splitter-linux-x86_64 cpp-splitter-macos-arm64; do
+            mv "dist/$name/cpp-splitter" "dist/$name.tmp"
+            rmdir "dist/$name"
+            mv "dist/$name.tmp" "dist/$name"
+          done
+          chmod +x dist/cpp-splitter-*
           ls -l dist
 
       - name: Recreate the draft release
@@ -303,8 +307,8 @@ jobs:
             --title "cpp-splitter ${GITHUB_SHA::7} (draft)" \
             --notes "Built from ${GITHUB_SHA} by the cmake-re workflow.
 
-          - cpp-splitter-linux-x86_64.bin: Debug build from tipibuild/tipi-ubuntu-2404:v0.0.87, needs that image's clang at /usr/local/share/.tipi/clang/4f846ee (libclang.so by rpath).
-          - cpp-splitter-macos-arm64.bin: Debug build with Apple clang, needs Homebrew llvm (libclang.dylib by rpath).
+          - cpp-splitter-linux-x86_64: Debug build from tipibuild/tipi-ubuntu-2404:v0.0.87, needs that image's clang at /usr/local/share/.tipi/clang/4f846ee (libclang.so by rpath).
+          - cpp-splitter-macos-arm64: Debug build with Apple clang, needs Homebrew llvm (libclang.dylib by rpath).
 
           Rename the tag before publishing." \
-            dist/cpp-splitter-linux-x86_64.bin dist/cpp-splitter-macos-arm64.bin
+            dist/cpp-splitter-linux-x86_64 dist/cpp-splitter-macos-arm64
