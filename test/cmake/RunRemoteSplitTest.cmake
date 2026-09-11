@@ -25,6 +25,14 @@ set(skip_marker "cpp-splitter-test-skip:")
 
 # --- can this run at all? -----------------------------------------------------------------
 
+# The probe is configured with the ubuntu-clang toolchain through `cmake-re --host`, and that
+# toolchain refuses any host but Linux: the drivers it stages and the splitter it runs are
+# the image's. On a macOS host there is nothing to talk to either.
+if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+  message(STATUS "${skip_marker} the ubuntu-clang toolchain needs a Linux host; this is ${CMAKE_HOST_SYSTEM_NAME}")
+  return()
+endif()
+
 if(NOT DEFINED ENV{ENGFLOW_MTLS_DIR})
   set(mtls "$ENV{HOME}/engflow-mTLS")
 else()

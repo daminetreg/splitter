@@ -1,0 +1,130 @@
+# Build cpp-splitter and run its ctest suite through CMake RE, on both hosts it supports.
+#
+# Additive next to build-and-test.yml, which stays the reference: that one runs plain cmake
+# inside the tipi image. This one lets cmake-re drive the image itself, and adds the macOS host
+# build that CLAUDE.md describes -- so the two things a developer runs on a Mac are the two
+# things CI runs.
+#
+#   linux-container   cmake-re in tipibuild/tipi-ubuntu-2404 (environments/ubuntu-clang.*),
+#                     started by cmake-re from docker on the runner. Same compiler, same
+#                     standard and the same 31 fixtures as build-and-test.yml.
+#   macos-host        cmake-re --host with tipi's own clang 13 for macOS
+#                     (environments/macos-clang.cmake). x86_64 binaries under Rosetta on the
+#                     arm64 runner; the installer sets Rosetta up.
+#
+# launcher.remote_split_on_opal skips in both: it talks to a real RBE cluster and there are no
+# credentials here.
+
+name: cmake-re
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The release this was validated with; the installer tracks master otherwise.
+  TIPI_INSTALL_VERSION: v0.0.87
+  # The tipi cache is a shared service the local setup mounts credentials for. CI has
+  # neither, so say so rather than letting it try and fail slowly.
+  TIPI_CACHE_CONSUME_ONLY: "ON"
+  TIPI_CACHE_FORCE_ENABLE: "OFF"
+  TIPI_DISABLE_AR_RANLIB_DRIVER: "ON"
+
+jobs:
+  linux-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install CMake RE
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+          cmake-re --version
+          ctest-re --version
+
+      # cmake-re starts the build container through docker, and needs one recent enough to
+      # pull an image by digest into a bind-mounted work tree.
+      - name: Check docker
+        run: |
+          docker --version
+          version="$(docker version --format '{{.Server.Version}}')"
+          if [ "$(printf '%s\n27.2.0\n' "$version" | sort -V | head -n1)" != "27.2.0" ]; then
+            echo "docker $version is older than 27.2.0" >&2
+            exit 1
+          fi
+
+      # Downloads hfc and Boost 1.85 through HermeticFetchContent, so this step is where the
+      # time goes on a cold run.
+      - name: Configure
+        run: |
+          cmake-re -S . -B build/cmake-re-ubuntu-clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
+
+      - name: Build
+        run: cmake-re --build build/cmake-re-ubuntu-clang -j$(nproc)
+
+      # Inside the container, where the binary and the toolchain it was linked against live.
+      # ctest-re v0.0.87 runs on the host, and a Linux cpp-splitter is nothing to it.
+      - name: Test
+        run: cmake-re --build build/cmake-re-ubuntu-clang --run-test all --test-jobs $(nproc)
+
+      # The fixtures leave their split trees behind, and a failure is usually diagnosed by
+      # reading the generated pieces rather than the assertion message.
+      - name: Upload test output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-output-linux-container
+          path: |
+            build/cmake-re-ubuntu-clang/Testing/
+            build/cmake-re-ubuntu-clang/test-output/
+          retention-days: 7
+
+  macos-host:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # On an arm64 runner the installer also installs Rosetta, which tipi's x86_64 clang
+      # needs. It is a no-op where Rosetta is already present.
+      - name: Install CMake RE
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+          cmake-re --version
+          ctest-re --version
+
+      - name: Configure
+        run: |
+          cmake-re --host -S . -B build/cmake-re-macos-clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake
+
+      - name: Build
+        run: cmake-re --build build/cmake-re-macos-clang --host -j$(sysctl -n hw.ncpu)
+
+      - name: Test
+        run: ctest-re --test-dir build/cmake-re-macos-clang --output-on-failure -j$(sysctl -n hw.ncpu)
+
+      - name: Upload test output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-output-macos-host
+          path: |
+            build/cmake-re-macos-clang/Testing/
+            build/cmake-re-macos-clang/test-output/
+          retention-days: 7

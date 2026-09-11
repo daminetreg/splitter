@@ -48,6 +48,28 @@ You can just use the compilation commands bellow.
 4. Build the splitter with `cmake --build build/ -j32`
 
 
+# Building with cmake-re (works from macOS, no manual container)
+
+Export first, whichever of the two you run:
+```sh
+export TIPI_DISABLE_AR_RANLIB_DRIVER=ON TIPI_CACHE_CONSUME_ONLY=ON TIPI_CACHE_FORCE_ENABLE=OFF
+```
+
+Linux build in the tipi image, started by cmake-re through docker (needs docker >= 27.2.0):
+```sh
+cmake-re -S . -B build/cmake-re-ubuntu-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
+cmake-re --build build/cmake-re-ubuntu-clang -j8
+cmake-re --build build/cmake-re-ubuntu-clang --run-test all --test-jobs 8   # in the container; ctest-re would run on the host
+```
+
+macOS host build with tipi's clang 13 (`/usr/local/share/.tipi/clang/a7e6968`, x86_64 under Rosetta):
+```sh
+cmake-re --host -S . -B build/cmake-re-macos-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake
+cmake-re --build build/cmake-re-macos-clang --host -j8
+ctest-re --test-dir build/cmake-re-macos-clang --output-on-failure -j8
+```
+`--build` must be the first argument. `launcher.remote_split_on_opal` skips on macOS: it needs the Linux toolchain.
+
 # When running benchmarks with `cmake-re --host --distributed`
 
 cmake-re outputs :

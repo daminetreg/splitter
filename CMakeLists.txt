@@ -3,8 +3,19 @@ project(sample_app CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# The toolchain root is two levels up from the compiler: /usr/local/share/.tipi/clang/<sha1>.
+# It holds the libclang the splitter links and, on Linux, the libc++ it is linked against.
+get_filename_component(clang_toolchain_root "${CMAKE_CXX_COMPILER}" DIRECTORY)
+get_filename_component(clang_toolchain_root "${clang_toolchain_root}" DIRECTORY)
+
 set(CMAKE_CXX_FLAGS " ${CMAKE_CXX_FLAGS} -stdlib=libc++ ")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld -stdlib=libc++ -static-libstdc++ -static-libgcc /usr/local/share/.tipi/clang/4f846ee/lib/libc++.a /usr/local/share/.tipi/clang/4f846ee/lib/libc++abi.a")
+if(APPLE)
+  # tipi's macOS libclang.dylib is itself linked against the system libc++, so the splitter
+  # links the same one and needs nothing static from the toolchain.
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++")
+else()
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld -stdlib=libc++ -static-libstdc++ -static-libgcc ${clang_toolchain_root}/lib/libc++.a ${clang_toolchain_root}/lib/libc++abi.a")
+endif()
 
 #add_executable(sample_app sample.cpp)
 
@@ -77,12 +88,10 @@ FetchContent_MakeHermetic(
 HermeticFetchContent_MakeAvailableAtBuildTime(Boost)
 
 
-get_filename_component(clang_toolchain_root "${CMAKE_CXX_COMPILER}" DIRECTORY)
-get_filename_component(clang_toolchain_root "${clang_toolchain_root}" DIRECTORY)
-
 add_executable(cpp-splitter src/main.cpp)
 target_include_directories(cpp-splitter PRIVATE "${clang_toolchain_root}/include")
-target_link_libraries(cpp-splitter Boost::headers "${clang_toolchain_root}/lib/libclang.so")
+target_link_libraries(cpp-splitter Boost::headers
+  "${clang_toolchain_root}/lib/libclang${CMAKE_SHARED_LIBRARY_SUFFIX}")
 set_target_properties(cpp-splitter PROPERTIES BUILD_RPATH "${clang_toolchain_root}/lib")
 # --- Tests ----------------------------------------------------------------------------
 #
@@ -319,3 +328,20 @@ set_tests_properties(
   launcher.header_edit_behind_pch launcher.inline_variable_placement
   launcher.static_variable
   PROPERTIES TIMEOUT 300)
+
+# The drivers hand ${CXX} to cpp-splitter, which runs it bare: no -isysroot, none of the
+# toolchain's CMAKE_CXX_FLAGS. CMake adds those to its own compiles but not to theirs. tipi's
+# clang is not Apple's and has no idea where the SDK is unless SDKROOT says so -- without it
+# not even <wchar.h> is found -- and the SDK's math.h needs the shim that
+# environments/macos-clang.cmake puts on the flags, which clang also takes from
+# CPLUS_INCLUDE_PATH. cpp-splitter probes the compiler for its include path, so the libclang
+# parse sees the shim the same way the compile does.
+if(APPLE)
+  set(cpp_splitter_test_environment "SDKROOT=${CMAKE_OSX_SYSROOT}")
+  if(DEFINED CMAKE_RE_MACOS_CLANG_SDK_SHIM)
+    list(APPEND cpp_splitter_test_environment "CPLUS_INCLUDE_PATH=${CMAKE_RE_MACOS_CLANG_SDK_SHIM}")
+  endif()
+  get_property(cpp_splitter_all_tests DIRECTORY PROPERTY TESTS)
+  set_tests_properties(${cpp_splitter_all_tests} PROPERTIES
+    ENVIRONMENT "${cpp_splitter_test_environment}")
+endif()
