@@ -1,5 +1,7 @@
 # cpp-splitter
 
+[![cmake-re](https://github.com/daminetreg/splitter/actions/workflows/cmake-re.yml/badge.svg?branch=main)](https://github.com/daminetreg/splitter/actions/workflows/cmake-re.yml)
+
 `cpp-splitter` reads a C++ translation unit through libclang and rewrites it as one piece per
 function definition behind a shared preamble, so the pieces compile in parallel (locally or
 on a remote build execution cluster) and are linked back (`{mold,ld,lld} -r`) into the single object the
@@ -19,7 +21,9 @@ export TIPI_DISABLE_AR_RANLIB_DRIVER=ON TIPI_CACHE_CONSUME_ONLY=ON TIPI_CACHE_FO
 The first configure fetches and builds Boost 1.85 through HermeticFetchContent and takes a few
 minutes; later ones reuse it.
 
-### macOS
+<details>
+<summary><b>macOS</b> — host build with tipi's clang or Apple's, and the Linux image through Docker</summary>
+
 
 Host build with the clang 13 tipi installs at `/usr/local/share/.tipi/clang/a7e6968`
 (x86_64; the installer sets up Rosetta on Apple silicon):
@@ -44,7 +48,11 @@ ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j8
 The same Mac can also run the Linux build below: `cmake-re` starts the image through Docker
 Desktop (>= 27.2.0) and mounts the tree into it.
 
-### Linux
+</details>
+
+<details>
+<summary><b>Linux</b> — in the tipi image, through cmake-re or plain cmake</summary>
+
 
 Containerized in `tipibuild/tipi-ubuntu-2404:v0.0.87`, the image `environments/ubuntu-clang.*`
 pins by digest -- the same one CI, the devcontainer and the benchmarks use. Needs docker
@@ -83,6 +91,8 @@ cmake-re >= v0.0.88 and `RBE_service`, `RBE_tls_client_auth_cert` and `RBE_tls_c
 set -- the variables reclient reads, the last two naming the EngFlow mTLS pair -- and skips
 otherwise. CI sets them from the `RBE_SERVICE`, `RBE_TLS_CLIENT_AUTH_CERT` and
 `RBE_TLS_CLIENT_AUTH_KEY` secrets.
+
+</details>
 
 ## Using it
 
