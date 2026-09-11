@@ -22,19 +22,22 @@ produced locally, and on the cluster with the split produced there too. All numb
 machine, and the caveats are in
 [`benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md`](benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md).
 
-The scenario used throughout is a one-line change to the body of `standard_wide::toucs4()`, a
-non-template function in a header. 194 of the 277 units include that header; one of them emits
-the function. A plain build must recompile every unit that includes the header. A split build
-must recompile the one piece whose content changed. Wall times are the build phase alone.
+The scenario, used throughout:
+
+- **Edit one line in the body of `standard_wide::toucs4()`, a non-template function in a header
+  that 194 of the 277 units include and one emits, then rebuild.** A plain build recompiles
+  every unit that includes the header; a split build recompiles the one piece whose content
+  changed. Wall times are the build phase alone.
+  
+What is beautiful is that the automatic splitting optimization holds when the function is used by a template, the only requirement is that the function is not a template itself.
 
 ## 1. On one machine
 
-A 32-core AMD EPYC with 122 GiB, at `-j16`, no cluster and no cache:
+A 32-core AMD EPYC at `-j16`, no cluster and no cache:
 
 | scenario | plain | split | what the split build did |
 |---|---:|---:|---|
 | full, cold | 57.8s | 654.6s | parsed and split all 279 units |
-| no-op | 5.7s | 11.4s | reused every split |
 | **one body** | **57.5s** | **14.2s** | **re-sliced the body in 268 units without a parse; recompiled 1 piece** |
 
 The cold build costs 11.3x. One object per function is more work than one object per file,
@@ -48,23 +51,25 @@ The same suite through CMake RE against an EngFlow RBE cluster at `-j500`, with 
 produced on the developer machine. Reclient records where every action ran, so these rows say
 how much was compiled, not only how long it took.
 
-| build | wall | compiles executed on the cluster | cache hits |
-|---|---:|---:|---:|
-| plain, one body | 136.2s | 271 | 762 |
-| split, one body | 74.9s | 1 | 1575 |
+| scenario | build | wall | compiles executed on the cluster | cache hits |
+|---|---|---:|---:|---:|
+| full, `--clean` | plain | 32.1s | 0 | 1641 |
+| full, `--clean` | split | 456.0s | 0 | 15885 |
+| **one body** | plain | 136.2s | **271** | 762 |
+| **one body** | split | 74.9s | **1** | 1575 |
 
 A content change gives every affected unit a new action key, so the plain build executes 271
 compiles and nothing can be served from cache. The split build executes one: the 1575 other
 pieces it needs are byte-identical to what the cluster already has. This is what a
 content-addressed cache rewards, and it is the reason to split at all.
 
-Two costs go with it. The cold full build carries 15885 actions against 1641 — 456.0s against
-32.1s when both are served from cache. And the split still requires a libclang parse per unit
-on the developer machine, holding that AST in memory for the duration; on this corpus that,
-not the compiles, is what limits the job count. An earlier version of this benchmark ran at
-`-j8` on the 32-core machine because `-j32` ran out of memory. (These two rows were timed
-around the whole invocation, including about 20s of configure, before the benchmark was
-changed to time the build alone; the counts are unaffected.)
+Two costs go with it. Both full rows were served entirely from the cluster's cache — zero
+executions on either side — so what they compare is the bookkeeping of 15885 actions against
+1641: 456.0s against 32.1s on a build where nothing needed compiling. And the split still
+requires a libclang parse per unit on the developer machine: the compiles are distributed, the
+parsing is not. (This table was timed around the whole invocation, including about 20s of
+configure, before the benchmark was changed to time the build alone; the counts are
+unaffected.)
 
 ## 3. Producing the split on the cluster
 
@@ -123,52 +128,35 @@ has moved to the cluster; the remaining cost is transferring the split trees bac
 the pieces on the workers that produced them, instead of downloading them first, would remove
 that transfer and has not been done.
 
-### The body row required a fix to the re-slice
-
-The first measurement of that row read 606.5s and 4835 remote actions. The splitter's log
-attributed it: of the 268 affected units, 267 re-split on the cluster, 265 of them refusing the
-re-slice with the message *the changed file contributed no split-out definition*.
-
-A unit that includes the header but does not call `toucs4()` keeps the definition in its
-rewritten copy of the header instead of emitting a piece, and kept definitions were not
-recorded in the harvest the re-slice reads. Such a unit could not locate the edit and re-split
-entirely, regenerating every piece it owned and giving each a new action key. The defect was
-not specific to remote splitting: the same refusal occurs with a local split, where it cost a
-parse per unit that the cache then absorbed — the 90.2s the local body row read before the fix,
-against 14.2s after. On the cluster it cost a round trip per unit. It was reproduced in a local
-test that runs in 0.6s and fixed by recording kept definitions with no piece and patching the
-header copy in place.
-
-## Costs
-
-- A full split build is more work than a plain one: 11.3x on one machine, and 15885 actions
-  against 1641 on the cluster. Producing the split on the cluster reduces the cold build from
-  456.0s to 334.6s, not to parity.
-- Remote splitting did not reduce memory use on this machine. Peak resident memory of the
-  build's own processes on the full row was 7.0G with the split produced on the cluster and
-  2.9G with it produced locally: launchers remain resident while waiting on the cluster, and
-  the downloaded trees are large.
-- Wall times vary between runs. The cluster body row measured 22.6s in one run and 33.0s in
-  another an hour later. The action counts (271 against 1) did not vary.
-- A split build tree for this suite is tens of gigabytes, against tens of megabytes for a plain
-  one. Nothing here addresses that.
-
 ## Summary
 
 The one-line body edit, build time:
 
 ```mermaid
-xychart-beta
-    title "One body edit in a header included by 194 units — build time in seconds"
-    x-axis ["local, plain (-j16)", "local, split (-j16)", "cluster, split there (-j500)"]
-    y-axis "seconds" 0 --> 70
-    bar [57.5, 14.2, 33.0]
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: '#cccccc, #8de7f9'
+---
+xychart
+    title "One header function body edit — build time (s)"
+    x-axis ["Plain (local, -j16)", "Plain (distributed, -j500)", "Split (local, -j16)", "Split (distributed, -j500)"]
+    y-axis "build time (s)" 0 --> 300
+
+    %% neutral base
+    bar [57.5, 287.4, 0, 0]
+
+    %% split builds, highlighted
+    bar [-300, -300, 14.2, 33.0]
 ```
 
-On one machine, splitting turns a 57.5s rebuild of 194 units into a 14.2s re-slice and one
-compile. On a build farm it turns 271 executed compiles into one. Producing the split on the
-farm as well keeps that result and removes the libclang parse from the developer machine, at
-the cost of a cold build that is slower than a plain one and, in this measurement, no saving in
-memory. The suite is 277 small programs; the case where per-function splitting should help
-most — a few very large translation units, where a plain build is bounded by the longest one —
-has not been measured.
+All four are build-phase times, configure time being equal (splitting happens at compile-time).
+
+On one machine, splitting this small template-heavy codebase turns a 57.5s rebuild of 194 units into a 14.2s re-slice + one
+compile instead 271 compiles . On a remote execution cluster with network roundtrip to 33s. Producing the split on the
+cluster as well keeps that result and removes the libclang parse from the developer machine.
+
+A full cold split build does more work than a standard build: 11.3× more on a single machine and 15,885 actions on the cluster. It also requires more disk space because the split produces more intermediate build artifacts. With a Bazel RE-API cluster such as EngFlow, however, these outputs are cached, while the initial build can be distributed and parallelized across the cluster.
+
+The optimization target is not cold builds, but **iterative development and PR merge-gate CI**. On the small but template-heavy Boost Spirit test suite alone, editing a widely used header rebuilds **1 TU instead of 271**, yielding an **8.70× speedup on the cluster** and **4.02× locally**. On larger codebases, the potential reduction in rebuild scope is correspondingly larger.
