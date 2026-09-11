@@ -28,6 +28,8 @@ The scenario, used throughout:
   that 194 of the 277 units include and one emits, then rebuild.** A plain build recompiles
   every unit that includes the header; a split build recompiles the one piece whose content
   changed. Wall times are the build phase alone.
+  
+What is beautiful is that the automatic splitting optimization holds when the function is used by a template, the only requirement is that the function is not a template itself.
 
 ## 1. On one machine
 
