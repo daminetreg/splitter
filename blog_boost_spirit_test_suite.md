@@ -36,7 +36,6 @@ A 32-core AMD EPYC at `-j16`, no cluster and no cache:
 | scenario | plain | split | what the split build did |
 |---|---:|---:|---|
 | full, cold | 57.8s | 654.6s | parsed and split all 279 units |
-| no-op | 5.7s | 11.4s | reused every split |
 | **one body** | **57.5s** | **14.2s** | **re-sliced the body in 268 units without a parse; recompiled 1 piece** |
 
 The cold build costs 11.3x. One object per function is more work than one object per file,
@@ -50,21 +49,25 @@ The same suite through CMake RE against an EngFlow RBE cluster at `-j500`, with 
 produced on the developer machine. Reclient records where every action ran, so these rows say
 how much was compiled, not only how long it took.
 
-| build | wall | compiles executed on the cluster | cache hits |
-|---|---:|---:|---:|
-| plain, one body | 136.2s | 271 | 762 |
-| split, one body | 74.9s | 1 | 1575 |
+| scenario | build | wall | compiles executed on the cluster | cache hits |
+|---|---|---:|---:|---:|
+| full, `--clean` | plain | 32.1s | 0 | 1641 |
+| full, `--clean` | split | 456.0s | 0 | 15885 |
+| **one body** | plain | 136.2s | **271** | 762 |
+| **one body** | split | 74.9s | **1** | 1575 |
 
 A content change gives every affected unit a new action key, so the plain build executes 271
 compiles and nothing can be served from cache. The split build executes one: the 1575 other
 pieces it needs are byte-identical to what the cluster already has. This is what a
 content-addressed cache rewards, and it is the reason to split at all.
 
-Two costs go with it. The cold full build carries 15885 actions against 1641 — 456.0s against
-32.1s when both are served from cache. And the split still requires a libclang parse per unit
-on the developer machine: the compiles are distributed, the parsing is not. (These two rows
-were timed around the whole invocation, including about 20s of configure, before the benchmark
-was changed to time the build alone; the counts are unaffected.)
+Two costs go with it. Both full rows were served entirely from the cluster's cache — zero
+executions on either side — so what they compare is the bookkeeping of 15885 actions against
+1641: 456.0s against 32.1s on a build where nothing needed compiling. And the split still
+requires a libclang parse per unit on the developer machine: the compiles are distributed, the
+parsing is not. (This table was timed around the whole invocation, including about 20s of
+configure, before the benchmark was changed to time the build alone; the counts are
+unaffected.)
 
 ## 3. Producing the split on the cluster
 
