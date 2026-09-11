@@ -5,6 +5,16 @@ libclang, writes one `.cpp` per function definition, compiles those pieces, and 
 into the object the build system asked for with `ld -r`. When a function body changes, only the
 piece containing it is recompiled.
 
+> 💡 **`ld -r`** is the linker's relocatable (partial) link mode. Instead of producing an
+> executable or shared library, it combines several object files into a single object file:
+> sections of the same name are concatenated, symbols are merged, and relocations are kept
+> unresolved rather than applied. The output is an ordinary `.o` that a later link consumes
+> exactly as it would consume one produced by a single compile. This is what lets the splitter
+> stay invisible to the build system: it compiles N pieces, runs `ld -r -o unit.o piece_1.o …
+> piece_N.o`, and the build sees the one `unit.o` it asked for, with the same name, in the same
+> place, usable in the same archives and link lines. GNU ld, lld and mold all implement it with
+> the same flag.
+
 This post reports its effect on Boost.Spirit's test suite: the 277 programs the Jamfiles of
 `qi`, `karma`, `lex`, `x3` and `support` declare, built with CMake RE against an EngFlow RBE
 cluster at `-j500`, in Release. Two configurations are compared with a plain build: the split
@@ -16,8 +26,8 @@ machine, and the caveats are in
 
 The scenario changes one line in the body of `standard_wide::toucs4()`, a non-template
 function in a header. 194 of the 277 units include that header; one of them emits the
-function. A plain build must recompile every unit that includes the header. A split build must
-recompile the one piece whose content changed.
+function. A plain build must recompile every unit that includes the header. A split build just 
+recompiles the one piece whose content changed.
 
 | build | wall | compiles executed on the cluster | what the affected units did |
 |---|---:|---:|---|
