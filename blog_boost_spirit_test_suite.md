@@ -39,8 +39,9 @@ box for exactly that reason.
 So the launcher can now shell itself out through `rewrapper` before parsing anything. The split
 becomes one remote action per unit; reproxy's own C++ input processor scans the compile command
 and uploads the header closure, the worker writes the split tree, and it comes back with
-`-output_directories`. The pieces still compile as separate actions and the final `ld -r` still
-happens here. The parse is the only thing that moves.
+`-output_directories`. The pieces still compile as separate actions, and the `ld -r` that joins
+them back into the requested object goes through `tipi-linker-driver` as one more action, cached
+like any other. Nothing about the build changes except where the parse happens.
 
 What one translation unit goes through, end to end:
 
@@ -56,28 +57,32 @@ flowchart LR
         tree[".split tree comes back<br/>one .cpp per function · preamble · harvest"]
         driver["tipi-compiler-driver<br/>one compile per piece"]
         rw2["rewrapper × N<br/>inputs scanned per piece"]
-        link["ld -r → unit.o<br/>the object the build asked for"]
+        linker["tipi-linker-driver → rewrapper<br/>the relocatable link as one more action"]
+        obj["unit.o<br/>the object the build asked for"]
     end
     subgraph cluster["EngFlow RBE cluster"]
         direction TB
         worker["worker · cpp-splitter --emit-only<br/>libclang parses the unit once<br/>writes the split, compiles nothing"]
         cache["action cache<br/>keyed on content"]
         compile["workers × N<br/>clang++ -c piece.cpp"]
+        link["worker · ld -r<br/>joins the pieces into unit.o"]
     end
     src --> edge --> launcher --> rw1 --> reproxy
     reproxy -- "inputs" --> worker
     worker -- "-output_directories" --> tree
     tree --> driver --> rw2 --> cache
-    cache -- "hit: object served" --> link
-    cache -- "miss" --> compile --> link
+    cache -- "hit: object served" --> linker
+    cache -- "miss" --> compile --> linker
+    linker -- "the pieces" --> link
+    link -- "cached when none of them changed" --> obj
 ```
 
 The split action is labelled `type=compile`, so reproxy treats it exactly like a compile: it
 works out the inputs itself and nothing has to declare them. The worker runs the same
 `cpp-splitter` binary, staged into the exec root by content hash, with `--emit-only` telling it
 to write the split tree and stop. Everything after the tree comes back is the ordinary
-distributed build — each piece is an action of its own, and an edit that changes one piece
-changes one action key.
+distributed build — each piece is an action of its own, and so is the `ld -r` that joins them,
+so an edit that changes one piece changes one compile's key and one link's.
 
 **A cold full build** of all 277 programs, split on the cluster, took **334.6s** with all 279
 splits executed remotely and nothing falling back — against 456.0s for the same split produced
