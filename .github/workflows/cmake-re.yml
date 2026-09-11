@@ -5,12 +5,19 @@
 # build that CLAUDE.md describes -- so the two things a developer runs on a Mac are the two
 # things CI runs.
 #
-#   linux-container   cmake-re in tipibuild/tipi-ubuntu-2404 (environments/ubuntu-clang.*),
-#                     started by cmake-re from docker on the runner. Same compiler, same
-#                     standard and the same 31 fixtures as build-and-test.yml.
-#   macos-host        cmake-re --host with tipi's own clang 13 for macOS
-#                     (environments/macos-clang.cmake). x86_64 binaries under Rosetta on the
-#                     arm64 runner; the installer sets Rosetta up.
+#   linux-*   cmake-re in tipibuild/tipi-ubuntu-2404 (environments/ubuntu-clang.*), started
+#             by cmake-re from docker on the runner. Same compiler, same standard and the
+#             same 31 fixtures as build-and-test.yml.
+#   macos-*   cmake-re --host with tipi's own clang 13 for macOS
+#             (environments/macos-clang.cmake). x86_64 binaries under Rosetta on the arm64
+#             runner; the installer sets Rosetta up.
+#
+# Configure, build and test are separate jobs so the graph shows which phase failed. Each job
+# is a fresh runner and the cmake-re build tree lives in its mirror under /usr/local/share,
+# so a later phase repeats the earlier ones rather than shipping that tree around: the build
+# job configures again, the test job configures and builds again. What it costs is the Boost
+# build, a few minutes per phase; what it buys is a phase-per-node graph and no artifact of
+# a tree full of absolute paths.
 #
 # launcher.remote_split_on_opal skips in both: it talks to a real RBE cluster and there are no
 # credentials here.
@@ -40,9 +47,9 @@ env:
   TIPI_DISABLE_AR_RANLIB_DRIVER: "ON"
 
 jobs:
-  linux-container:
+  linux-configure:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -72,6 +79,71 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
 
+  linux-build:
+    runs-on: ubuntu-latest
+    needs: linux-configure
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install CMake RE
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+          cmake-re --version
+          ctest-re --version
+
+      # cmake-re starts the build container through docker, and needs one recent enough to
+      # pull an image by digest into a bind-mounted work tree.
+      - name: Check docker
+        run: |
+          docker --version
+          version="$(docker version --format '{{.Server.Version}}')"
+          if [ "$(printf '%s\n27.2.0\n' "$version" | sort -V | head -n1)" != "27.2.0" ]; then
+            echo "docker $version is older than 27.2.0" >&2
+            exit 1
+          fi
+
+      - name: Configure
+        run: |
+          cmake-re -S . -B build/cmake-re-ubuntu-clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
+
+      - name: Build
+        run: cmake-re --build build/cmake-re-ubuntu-clang -j$(nproc)
+
+  linux-test:
+    runs-on: ubuntu-latest
+    needs: linux-build
+    timeout-minutes: 90
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install CMake RE
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+          cmake-re --version
+          ctest-re --version
+
+      # cmake-re starts the build container through docker, and needs one recent enough to
+      # pull an image by digest into a bind-mounted work tree.
+      - name: Check docker
+        run: |
+          docker --version
+          version="$(docker version --format '{{.Server.Version}}')"
+          if [ "$(printf '%s\n27.2.0\n' "$version" | sort -V | head -n1)" != "27.2.0" ]; then
+            echo "docker $version is older than 27.2.0" >&2
+            exit 1
+          fi
+
+      - name: Configure
+        run: |
+          cmake-re -S . -B build/cmake-re-ubuntu-clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=environments/ubuntu-clang.cmake
+
       - name: Build
         run: cmake-re --build build/cmake-re-ubuntu-clang -j$(nproc)
 
@@ -92,8 +164,55 @@ jobs:
             build/cmake-re-ubuntu-clang/test-output/
           retention-days: 7
 
-  macos-host:
+  macos-configure:
     runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # On an arm64 runner the installer also installs Rosetta, which tipi's x86_64 clang
+      # needs. It is a no-op where Rosetta is already present.
+      - name: Install CMake RE
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+          cmake-re --version
+          ctest-re --version
+
+      - name: Configure
+        run: |
+          cmake-re --host -S . -B build/cmake-re-macos-clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake
+
+  macos-build:
+    runs-on: macos-latest
+    needs: macos-configure
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # On an arm64 runner the installer also installs Rosetta, which tipi's x86_64 clang
+      # needs. It is a no-op where Rosetta is already present.
+      - name: Install CMake RE
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+          cmake-re --version
+          ctest-re --version
+
+      - name: Configure
+        run: |
+          cmake-re --host -S . -B build/cmake-re-macos-clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake
+
+      - name: Build
+        run: cmake-re --build build/cmake-re-macos-clang --host -j$(sysctl -n hw.ncpu)
+
+  macos-test:
+    runs-on: macos-latest
+    needs: macos-build
     timeout-minutes: 90
     steps:
       - name: Check out
