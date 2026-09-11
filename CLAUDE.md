@@ -50,8 +50,10 @@ You can just use the compilation commands bellow.
 
 # Building with cmake-re (works from macOS, no manual container)
 
-Export first, whichever of the two you run:
+Install cmake-re (also installs ctest-re; on Apple silicon it sets up Rosetta), then export,
+whichever of the two you run:
 ```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
 export TIPI_DISABLE_AR_RANLIB_DRIVER=ON TIPI_CACHE_CONSUME_ONLY=ON TIPI_CACHE_FORCE_ENABLE=OFF
 ```
 
