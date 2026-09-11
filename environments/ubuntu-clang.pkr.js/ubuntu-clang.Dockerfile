@@ -1,7 +1,7 @@
 # The environment CMake RE builds in.
 #
 # Inherits the exact image the rest of this repository builds in -- the devcontainer, the
-# `docker run` recipe in CLAUDE.md and .github/workflows/build-and-test.yml all name
+# `docker run` recipe in CLAUDE.md and .github/workflows/cmake-re.yml all name
 # tipibuild/tipi-ubuntu-2404:v0.0.87 -- so that a cmake-re build and a local build are the same
 # build. The clang that environments/ubuntu-clang.cmake points at, and the libc++ the link line
 # needs, both live in this image at a fixed path.

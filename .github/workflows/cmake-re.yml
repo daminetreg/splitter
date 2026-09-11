@@ -1,14 +1,13 @@
 # Build cpp-splitter and run its ctest suite through CMake RE, on both hosts it supports.
 #
-# Additive next to build-and-test.yml, which stays the reference: that one runs plain cmake
-# inside the tipi image. This one lets cmake-re drive the image itself, and adds the macOS host
-# build that CLAUDE.md describes -- so the two things a developer runs on a Mac are the two
-# things CI runs.
+# Three jobs: the reference build with plain cmake inside the tipi image, the same through
+# cmake-re, and the macOS host build that CLAUDE.md describes -- so what a developer runs on a
+# Mac is what CI runs.
 #
 #   cmake-re-linux-container-build-and-test
 #                     cmake-re --host inside tipibuild/tipi-ubuntu-2404:v0.0.87, the job's own
 #                     container, with environments/ubuntu-clang.cmake. Same compiler, same
-#                     standard and the same 31 fixtures as build-and-test.yml. Not cmake-re's
+#                     standard and the same 31 fixtures as plain-cmake-build-and-test. Not cmake-re's
 #                     containerized mode: from a runner that mode has to push the checkout
 #                     into a second container over ssh, and on a shallow checkout of a
 #                     private repository the checkout there failed to resolve the commit --
