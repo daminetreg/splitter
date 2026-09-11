@@ -42,6 +42,43 @@ and uploads the header closure, the worker writes the split tree, and it comes b
 `-output_directories`. The pieces still compile as separate actions and the final `ld -r` still
 happens here. The parse is the only thing that moves.
 
+What one translation unit goes through, end to end:
+
+```mermaid
+flowchart TB
+    subgraph local["Developer machine"]
+        direction TB
+        src["unit.cpp + the headers it includes"]
+        edge["cmake-re --distributed<br/>ninja edge for unit.o"]
+        launcher["cpp-splitter, chained ahead of tipi-compiler-driver<br/>CPP_SPLITTER_REMOTE_SPLIT=1"]
+        rw1["rewrapper<br/>action = the compile command<br/>-remote_wrapper = cpp-splitter"]
+        reproxy["reproxy<br/>C++ input processor scans the command<br/>and uploads the header closure"]
+        tree[".split tree comes back<br/>one .cpp per function · preamble · harvest"]
+        driver["tipi-compiler-driver<br/>one compile per piece"]
+        rw2["rewrapper × N<br/>inputs scanned per piece"]
+        link["ld -r → unit.o<br/>the object the build asked for"]
+    end
+    subgraph cluster["EngFlow RBE cluster"]
+        direction TB
+        worker["worker · cpp-splitter --emit-only<br/>libclang parses the unit once<br/>writes the split, compiles nothing"]
+        cache["action cache<br/>keyed on content"]
+        compile["workers × N<br/>clang++ -c piece.cpp"]
+    end
+    src --> edge --> launcher --> rw1 --> reproxy
+    reproxy -- "inputs" --> worker
+    worker -- "-output_directories" --> tree
+    tree --> driver --> rw2 --> cache
+    cache -- "hit: object served" --> link
+    cache -- "miss" --> compile --> link
+```
+
+The split action is labelled `type=compile`, so reproxy treats it exactly like a compile: it
+works out the inputs itself and nothing has to declare them. The worker runs the same
+`cpp-splitter` binary, staged into the exec root by content hash, with `--emit-only` telling it
+to write the split tree and stop. Everything after the tree comes back is the ordinary
+distributed build — each piece is an action of its own, and an edit that changes one piece
+changes one action key.
+
 **A cold full build** of all 277 programs, split on the cluster, took **334.6s** with all 279
 splits executed remotely and nothing falling back — against 456.0s for the same split produced
 locally, and that row was served entirely from cache. A row that did the parsing beat one that
