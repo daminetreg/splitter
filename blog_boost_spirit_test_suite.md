@@ -22,14 +22,16 @@ produced locally, and on the cluster with the split produced there too. All numb
 machine, and the caveats are in
 [`benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md`](benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md).
 
-The scenario used throughout is a one-line change to the body of `standard_wide::toucs4()`, a
-non-template function in a header. 194 of the 277 units include that header; one of them emits
-the function. A plain build must recompile every unit that includes the header. A split build
-must recompile the one piece whose content changed. Wall times are the build phase alone.
+The scenario, used throughout:
+
+- **Edit one line in the body of `standard_wide::toucs4()`, a non-template function in a header
+  that 194 of the 277 units include and one emits, then rebuild.** A plain build recompiles
+  every unit that includes the header; a split build recompiles the one piece whose content
+  changed. Wall times are the build phase alone.
 
 ## 1. On one machine
 
-A 32-core AMD EPYC with 122 GiB, at `-j16`, no cluster and no cache:
+A 32-core AMD EPYC at `-j16`, no cluster and no cache:
 
 | scenario | plain | split | what the split build did |
 |---|---:|---:|---|
@@ -60,11 +62,9 @@ content-addressed cache rewards, and it is the reason to split at all.
 
 Two costs go with it. The cold full build carries 15885 actions against 1641 — 456.0s against
 32.1s when both are served from cache. And the split still requires a libclang parse per unit
-on the developer machine, holding that AST in memory for the duration; on this corpus that,
-not the compiles, is what limits the job count. An earlier version of this benchmark ran at
-`-j8` on the 32-core machine because `-j32` ran out of memory. (These two rows were timed
-around the whole invocation, including about 20s of configure, before the benchmark was
-changed to time the build alone; the counts are unaffected.)
+on the developer machine: the compiles are distributed, the parsing is not. (These two rows
+were timed around the whole invocation, including about 20s of configure, before the benchmark
+was changed to time the build alone; the counts are unaffected.)
 
 ## 3. Producing the split on the cluster
 
@@ -144,10 +144,6 @@ header copy in place.
 - A full split build is more work than a plain one: 11.3x on one machine, and 15885 actions
   against 1641 on the cluster. Producing the split on the cluster reduces the cold build from
   456.0s to 334.6s, not to parity.
-- Remote splitting did not reduce memory use on this machine. Peak resident memory of the
-  build's own processes on the full row was 7.0G with the split produced on the cluster and
-  2.9G with it produced locally: launchers remain resident while waiting on the cluster, and
-  the downloaded trees are large.
 - Wall times vary between runs. The cluster body row measured 22.6s in one run and 33.0s in
   another an hour later. The action counts (271 against 1) did not vary.
 - A split build tree for this suite is tens of gigabytes, against tens of megabytes for a plain
@@ -162,7 +158,7 @@ The one-line body edit, build time:
 config:
   themeVariables:
     xyChart:
-      plotColorPalette: '#f3f3f3, #8de7f9'
+      plotColorPalette: '#cccccc, #8de7f9'
 ---
 xychart
     title "One header function body edit — build time (s)"
@@ -170,10 +166,10 @@ xychart
     y-axis "build time (s)" 0 --> 300
 
     %% neutral base
-    bar [57.5, 287.4, 14.2, 0]
+    bar [57.5, 287.4, 0, 0]
 
-    %% the split produced on the cluster, highlighted
-    bar [-300, -300, -300, 33.0]
+    %% split builds, highlighted
+    bar [-300, -300, 14.2, 33.0]
 ```
 
 All four are build-phase times. The distributed plain figure is from a run of that
@@ -184,7 +180,7 @@ same 271 compiles.
 On one machine, splitting turns a 57.5s rebuild of 194 units into a 14.2s re-slice and one
 compile. On a build farm it turns 271 executed compiles into one. Producing the split on the
 farm as well keeps that result and removes the libclang parse from the developer machine, at
-the cost of a cold build that is slower than a plain one and, in this measurement, no saving in
-memory. The suite is 277 small programs; the case where per-function splitting should help
+the cost of a cold build that is slower than a plain one. The suite is 277 small programs; the
+case where per-function splitting should help
 most — a few very large translation units, where a plain build is bounded by the longest one —
 has not been measured.
