@@ -50,7 +50,7 @@ You can just use the compilation commands bellow.
 
 # Building with cmake-re (works from macOS, no manual container)
 
-Install cmake-re (also installs ctest-re; on Apple silicon it sets up Rosetta), then export,
+If cmake-re is missing on the $PATH, install cmake-re (also installs ctest-re; on Apple silicon it sets up Rosetta), then export,
 whichever of the two you run:
 ```sh
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
@@ -69,6 +69,12 @@ macOS host build with tipi's clang 13 (`/usr/local/share/.tipi/clang/a7e6968`, x
 cmake-re --host -S . -B build/cmake-re-macos-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake
 cmake-re --build build/cmake-re-macos-clang --host -j8
 ctest-re --test-dir build/cmake-re-macos-clang --output-on-failure -j8
+```
+macOS host build with Apple's clang and Homebrew's libclang (`brew install llvm`) -- what CI runs, the installer bringing no tipi clang to a runner:
+```sh
+cmake-re --host -S . -B build/cmake-re-macos-apple-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/macos-apple-clang.cmake
+cmake-re --build build/cmake-re-macos-apple-clang --host -j8
+ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j8
 ```
 `--build` must be the first argument. `launcher.remote_split_on_opal` skips on macOS: it needs the Linux toolchain.
 

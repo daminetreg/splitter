@@ -30,6 +30,17 @@ cmake-re --build build/cmake-re-macos-clang --host -j8
 ctest-re --test-dir build/cmake-re-macos-clang --output-on-failure -j8
 ```
 
+Or with the clang macOS ships, which is what CI does since the installer does not bring
+tipi's clang to a GitHub runner. Apple's toolchain lacks the `clang-c/` headers, so libclang
+comes from Homebrew's llvm:
+
+```sh
+brew install llvm
+cmake-re --host -S . -B build/cmake-re-macos-apple-clang -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/macos-apple-clang.cmake
+cmake-re --build build/cmake-re-macos-apple-clang --host -j8
+ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j8
+```
+
 The same Mac can also run the Linux build below: `cmake-re` starts the image through Docker
 Desktop (>= 27.2.0) and mounts the tree into it.
 

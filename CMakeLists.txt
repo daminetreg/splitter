@@ -75,24 +75,45 @@ FetchContent_Declare(
   GIT_TAG        "ab7968a0bbcf574a7859240d1d8443f58ed6f6cf" # 1.85
 )
 
+# Boost.Context picks its assembly and ABI from CMAKE_SYSTEM_PROCESSOR, which is the processor
+# of the cmake process -- x86_64 when tipi's cmake runs under Rosetta -- and not the -arch the
+# toolchain compiles for. When a toolchain names one architecture, pass it on.
+set(boost_context_architecture "")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+  set(boost_context_architecture "
+    set(BOOST_CONTEXT_ARCHITECTURE arm64 CACHE STRING \"\" FORCE)
+    set(BOOST_CONTEXT_ABI aapcs CACHE STRING \"\" FORCE)")
+elseif(APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+  set(boost_context_architecture "
+    set(BOOST_CONTEXT_ARCHITECTURE x86_64 CACHE STRING \"\" FORCE)
+    set(BOOST_CONTEXT_ABI sysv CACHE STRING \"\" FORCE)")
+endif()
+
 FetchContent_MakeHermetic(
   Boost
   HERMETIC_TOOLCHAIN_EXTENSION
-  [=[
-    set(BOOST_BUILD_TEST OFF CACHE BOOL "" FORCE)
-    set(BOOST_ENABLE_PYTHON OFF CACHE BOOL "" FORCE)
-    set(BOOST_INCLUDE_LIBRARIES "process" CACHE STRING "" FORCE)
-  ]=]
+  "
+    set(BOOST_BUILD_TEST OFF CACHE BOOL \"\" FORCE)
+    set(BOOST_ENABLE_PYTHON OFF CACHE BOOL \"\" FORCE)
+    set(BOOST_INCLUDE_LIBRARIES \"process\" CACHE STRING \"\" FORCE)
+    ${boost_context_architecture}
+  "
 )
 
 HermeticFetchContent_MakeAvailableAtBuildTime(Boost)
 
 
+# Where libclang and its clang-c/ headers come from. The toolchain's own by default, which is
+# what every tipi clang provides; a toolchain whose compiler has no libclang headers -- Apple's
+# ships the library but not clang-c/ -- names another LLVM here. See environments/.
+set(CPP_SPLITTER_LIBCLANG_ROOT "${clang_toolchain_root}" CACHE PATH
+    "LLVM install holding lib/libclang and include/clang-c")
+
 add_executable(cpp-splitter src/main.cpp)
-target_include_directories(cpp-splitter PRIVATE "${clang_toolchain_root}/include")
+target_include_directories(cpp-splitter PRIVATE "${CPP_SPLITTER_LIBCLANG_ROOT}/include")
 target_link_libraries(cpp-splitter Boost::headers
-  "${clang_toolchain_root}/lib/libclang${CMAKE_SHARED_LIBRARY_SUFFIX}")
-set_target_properties(cpp-splitter PROPERTIES BUILD_RPATH "${clang_toolchain_root}/lib")
+  "${CPP_SPLITTER_LIBCLANG_ROOT}/lib/libclang${CMAKE_SHARED_LIBRARY_SUFFIX}")
+set_target_properties(cpp-splitter PROPERTIES BUILD_RPATH "${CPP_SPLITTER_LIBCLANG_ROOT}/lib")
 # --- Tests ----------------------------------------------------------------------------
 #
 # Each test splits a fixture in test/, compiles the pieces, links them and runs the result.

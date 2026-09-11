@@ -8,9 +8,11 @@
 #   linux-container   cmake-re in tipibuild/tipi-ubuntu-2404 (environments/ubuntu-clang.*),
 #                     started by cmake-re from docker on the runner. Same compiler, same
 #                     standard and the same 31 fixtures as build-and-test.yml.
-#   macos-host        cmake-re --host with tipi's own clang 13 for macOS
-#                     (environments/macos-clang.cmake). x86_64 binaries under Rosetta on the
-#                     arm64 runner; the installer sets Rosetta up.
+#   macos-host        cmake-re --host with the clang the runner ships, Apple's, and libclang
+#                     from Homebrew's llvm (environments/macos-apple-clang.cmake). The
+#                     installer does not bring tipi's clang to the runner, so the
+#                     tipi-clang toolchain a developer uses locally (macos-clang.cmake) is
+#                     not what runs here.
 #
 # launcher.remote_split_on_opal skips in both: it talks to a real RBE cluster and there are no
 # credentials here.
@@ -99,25 +101,33 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      # On an arm64 runner the installer also installs Rosetta, which tipi's x86_64 clang
-      # needs. It is a no-op where Rosetta is already present.
+      # cmake-re itself is an x86_64 binary; the installer sets Rosetta up on the arm64
+      # runner, a no-op where it is already present.
       - name: Install CMake RE
         run: |
           /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
           cmake-re --version
           ctest-re --version
 
+      # Apple's toolchain has libclang.dylib but not the clang-c/ headers; Homebrew's llvm
+      # has both, and the toolchain file asks `brew --prefix llvm` where.
+      - name: Install libclang
+        run: |
+          brew install llvm
+          "$(brew --prefix llvm)/bin/clang" --version
+          /usr/bin/clang++ --version
+
       - name: Configure
         run: |
-          cmake-re --host -S . -B build/cmake-re-macos-clang \
+          cmake-re --host -S . -B build/cmake-re-macos-apple-clang \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_TOOLCHAIN_FILE=environments/macos-clang.cmake
+            -DCMAKE_TOOLCHAIN_FILE=environments/macos-apple-clang.cmake
 
       - name: Build
-        run: cmake-re --build build/cmake-re-macos-clang --host -j$(sysctl -n hw.ncpu)
+        run: cmake-re --build build/cmake-re-macos-apple-clang --host -j$(sysctl -n hw.ncpu)
 
       - name: Test
-        run: ctest-re --test-dir build/cmake-re-macos-clang --output-on-failure -j$(sysctl -n hw.ncpu)
+        run: ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j$(sysctl -n hw.ncpu)
 
       - name: Upload test output
         if: failure()
@@ -125,6 +135,6 @@ jobs:
         with:
           name: ctest-output-macos-host
           path: |
-            build/cmake-re-macos-clang/Testing/
-            build/cmake-re-macos-clang/test-output/
+            build/cmake-re-macos-apple-clang/Testing/
+            build/cmake-re-macos-apple-clang/test-output/
           retention-days: 7

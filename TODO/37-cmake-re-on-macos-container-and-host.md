@@ -40,7 +40,13 @@ cmake-re removes the by-hand part twice over:
      with `cmake-re --build ... --run-test all` (`ctest-re` v0.0.87 runs on the host, where a
      Linux binary cannot execute).
    - `macos`: macos-latest, install cmake-re, `cmake-re --host` with
-     `environments/macos-clang.cmake`, run the tests with `ctest-re`.
+     `environments/macos-apple-clang.cmake`, run the tests with `ctest-re`. The installer
+     does not bring tipi's clang to a runner, so this toolchain takes Apple's clang and, for
+     the `clang-c/` headers Apple does not ship, libclang from Homebrew's llvm.
+     `CPP_SPLITTER_LIBCLANG_ROOT` separates where libclang comes from from which compiler
+     builds. tipi's cmake runs under Rosetta and would default the build to x86_64, so the
+     toolchain pins `CMAKE_OSX_ARCHITECTURES` to the hardware and CMakeLists forwards that to
+     Boost.Context, which otherwise picks its assembly from the translated processor.
 5. `TIPI_DISABLE_AR_RANLIB_DRIVER=ON`, `TIPI_CACHE_CONSUME_ONLY=ON`,
    `TIPI_CACHE_FORCE_ENABLE=OFF` exported wherever cmake-re runs, as `build-and-test.yml`
    already does for the last two.
@@ -58,6 +64,8 @@ cmake-re removes the by-hand part twice over:
 - A plain `cmake -DCMAKE_TOOLCHAIN_FILE=environments/monolithic.cmake` build in the tipi
   container still configures with an identical link line (the Linux branch is a refactor, not
   a change).
+- From this macOS host, the same with `environments/macos-apple-clang.cmake` builds an arm64
+  cpp-splitter against Homebrew's libclang 21 and `ctest-re` passes the suite.
 - `.github/workflows/cmake-re.yml` parses, and `build-and-test.yml` is untouched.
 - `example/boost-to-split`: not exercised here. The Boost harness needs the vendored checkout
   and hours; the acceptance for this entry is the unit suite on both hosts.
