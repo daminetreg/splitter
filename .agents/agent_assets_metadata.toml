@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "BfFrll1Uo7JcBAeuiQtWT"
+uri = "file://slides.html"
+type = "text"
+title = "CppCon 2026 — Automatic Splitting of Translation Units"
+description = "25 self-contained HTML slides: interactive architecture, per-function symbol tracing with O0/O2 comparisons, and three Boost.Spirit benchmark sets. Opens offline in a browser."
+logical_id = "2a586759-d7a8-4280-a25d-67fe908994cc"
+content_hash = "sha256:02e7a8bae690bf937c4f28648db22efad4adc215fff64a0c4f4223675ba698df"
+size = 46864
+mtime_ms = 1789315130795
+storage_uri = "gcs://replit-rams-assets-kirk/rams/assets/repl:b655f3d3-aae4-487d-9c77-1b8637b3fbc5/2a586759-d7a8-4280-a25d-67fe908994cc/409cdf29-ab8f-4979-a381-1ee04fe2b4da"
+storage_version_token = "1789315154424520"
+content_type = "text/html"

@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "status": "measured_actual_cpp_splitter",
+  "fixture": {
+    "header": "test/mylib.h",
+    "translation_unit": "test/use_mylib.cpp",
+    "functions_in_scope": [
+      "add(int, int)",
+      "multiply(int, int)",
+      "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)",
+      "average(std::vector<double, std::allocator<double> > const&)",
+      "int max_of<int>(int, int)",
+      "main"
+    ]
+  },
+  "toolchain": {
+    "splitter": {
+      "path": "./cpp-splitter",
+      "path_lookup": "not on PATH; invoked by repository-relative path",
+      "result": "available and successful in launcher mode with g++"
+    },
+    "compiler": {
+      "command": "g++",
+      "version": "g++ (GCC) 14.3.0",
+      "path_observed": "/nix/store/xqc25wl0krrgb856p1mj2xzi88a6jzq2-replit-runtime-path/bin/g++"
+    },
+    "binutils": {
+      "nm": "GNU nm 2.44",
+      "size": "GNU size 2.44",
+      "ld": "GNU ld 2.44"
+    }
+  },
+  "commands": {
+    "plain_compile_template": "g++ -std=c++17 -O{0|2} -c src/use_mylib.cpp -o plain/use_mylib_O{0|2}.o",
+    "plain_link_template": "g++ -std=c++17 -O{0|2} plain/use_mylib_O{0|2}.o -o plain/use_mylib_O{0|2}",
+    "split_compile_template": "CPP_SPLITTER_VERBOSE=1 CPP_SPLITTER_NO_LINKER_DRIVER=1 ./cpp-splitter g++ -std=c++17 -O{0|2} -Isrc -c -o actual/use_mylib_O{0|2}.o src/use_mylib.cpp",
+    "split_link_template": "g++ -std=c++17 -O{0|2} actual/use_mylib_O{0|2}.o -o actual/use_mylib_O{0|2}",
+    "splitter_relocatable_link_observed": "ld -r -o actual/use_mylib_O{0|2}.o <use_mylib_1_main.o> <mylib_1_add.o> <mylib_2_multiply.o> <mylib_3_greet.o> <mylib_4_average.o>",
+    "symbol_command": "nm -C --defined-only <object-or-executable>",
+    "normalized_symbol_command": "nm -C --defined-only <file> | sed -E 's/^[0-9a-f]+ /<addr> /' | grep -E 'add\\(|multiply\\(|greet\\(|average\\(|max_of| main$'",
+    "size_command": "size <object-or-executable>"
+  },
+  "runs": [
+    {
+      "optimization": "-O0",
+      "plain": {
+        "object": {
+          "file": "plain/use_mylib_O0.o",
+          "file_bytes": 41568,
+          "size": { "text": 7344, "data": 0, "bss": 0, "dec": 7344, "hex": "1cb0" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" },
+            { "name": "add(int, int)", "type": "W" },
+            { "name": "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)", "type": "W" },
+            { "name": "int max_of<int>(int, int)", "type": "W" },
+            { "name": "average(std::vector<double, std::allocator<double> > const&)", "type": "W" },
+            { "name": "multiply(int, int)", "type": "W" }
+          ]
+        },
+        "executable": {
+          "file": "plain/use_mylib_O0",
+          "file_bytes": 33400,
+          "size": { "text": 13486, "data": 872, "bss": 280, "dec": 14638, "hex": "392e" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" },
+            { "name": "add(int, int)", "type": "W" },
+            { "name": "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)", "type": "W" },
+            { "name": "int max_of<int>(int, int)", "type": "W" },
+            { "name": "average(std::vector<double, std::allocator<double> > const&)", "type": "W" },
+            { "name": "multiply(int, int)", "type": "W" }
+          ]
+        }
+      },
+      "split": {
+        "object": {
+          "file": "actual/use_mylib_O0.o",
+          "file_bytes": 387744,
+          "size": { "text": 58465, "data": 0, "bss": 0, "dec": 58465, "hex": "e461" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" },
+            { "name": "add(int, int)", "type": "W" },
+            { "name": "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)", "type": "W" },
+            { "name": "int max_of<int>(int, int)", "type": "W" },
+            { "name": "average(std::vector<double, std::allocator<double> > const&)", "type": "W" },
+            { "name": "multiply(int, int)", "type": "W" }
+          ]
+        },
+        "executable": {
+          "file": "actual/use_mylib_O0",
+          "file_bytes": 148992,
+          "size": { "text": 74773, "data": 1376, "bss": 280, "dec": 76429, "hex": "12a8d" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" },
+            { "name": "add(int, int)", "type": "W" },
+            { "name": "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)", "type": "W" },
+            { "name": "int max_of<int>(int, int)", "type": "W" },
+            { "name": "average(std::vector<double, std::allocator<double> > const&)", "type": "W" },
+            { "name": "multiply(int, int)", "type": "W" }
+          ]
+        },
+        "piece_symbol_ownership": [
+          { "object": "use_mylib_1_main.o", "defined_symbols": ["main (T)", "int max_of<int>(int, int) (W)"] },
+          { "object": "mylib_1_add.o", "defined_symbols": ["add(int, int) (W)"] },
+          { "object": "mylib_2_multiply.o", "defined_symbols": ["multiply(int, int) (W)"] },
+          { "object": "mylib_3_greet.o", "defined_symbols": ["greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) (W)"] },
+          { "object": "mylib_4_average.o", "defined_symbols": ["average(std::vector<double, std::allocator<double> > const&) (W)"] }
+        ]
+      }
+    },
+    {
+      "optimization": "-O2",
+      "plain": {
+        "object": {
+          "file": "plain/use_mylib_O2.o",
+          "file_bytes": 6152,
+          "size": { "text": 1131, "data": 0, "bss": 0, "dec": 1131, "hex": "46b" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" }
+          ]
+        },
+        "executable": {
+          "file": "plain/use_mylib_O2",
+          "file_bytes": 17264,
+          "size": { "text": 4150, "data": 728, "bss": 280, "dec": 5158, "hex": "1426" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" }
+          ]
+        }
+      },
+      "split": {
+        "object": {
+          "file": "actual/use_mylib_O2.o",
+          "file_bytes": 313624,
+          "size": { "text": 35943, "data": 0, "bss": 0, "dec": 35943, "hex": "8c67" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" },
+            { "name": "add(int, int)", "type": "W" },
+            { "name": "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)", "type": "W" },
+            { "name": "average(std::vector<double, std::allocator<double> > const&)", "type": "W" },
+            { "name": "multiply(int, int)", "type": "W" }
+          ]
+        },
+        "executable": {
+          "file": "actual/use_mylib_O2",
+          "file_bytes": 114904,
+          "size": { "text": 51041, "data": 1160, "bss": 280, "dec": 52481, "hex": "cd01" },
+          "defined_symbols": [
+            { "name": "main", "type": "T" },
+            { "name": "add(int, int)", "type": "W" },
+            { "name": "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)", "type": "W" },
+            { "name": "average(std::vector<double, std::allocator<double> > const&)", "type": "W" },
+            { "name": "multiply(int, int)", "type": "W" }
+          ]
+        },
+        "piece_symbol_ownership": [
+          { "object": "use_mylib_1_main.o", "defined_symbols": ["main (T)"] },
+          { "object": "mylib_1_add.o", "defined_symbols": ["add(int, int) (W)"] },
+          { "object": "mylib_2_multiply.o", "defined_symbols": ["multiply(int, int) (W)"] },
+          { "object": "mylib_3_greet.o", "defined_symbols": ["greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) (W)"] },
+          { "object": "mylib_4_average.o", "defined_symbols": ["average(std::vector<double, std::allocator<double> > const&) (W)"] }
+        ]
+      }
+    }
+  ],
+  "normalized_nm_diff": [
+    {
+      "optimization": "-O0",
+      "scope": "aggregate object and final executable separately",
+      "plain_only": [],
+      "split_only": [],
+      "common": ["main (T)", "add(int, int) (W)", "multiply(int, int) (W)", "greet(...) (W)", "average(...) (W)", "int max_of<int>(int, int) (W)"],
+      "interpretation": "The focused symbol set is equal after ld -r; the split build changes object ownership and layout, not the final focused set."
+    },
+    {
+      "optimization": "-O2",
+      "scope": "aggregate object and final executable separately",
+      "plain_only": [],
+      "split_only": ["add(int, int) (W)", "multiply(int, int) (W)", "greet(...) (W)", "average(...) (W)"],
+      "common": ["main (T)"],
+      "interpretation": "The plain build inlines/removes all four non-template inline definitions and the max_of instantiation. The split header pieces are compiled with the splitter's observed -fkeep-inline-functions flag, so four weak definitions remain; max_of stays a template and has no emitted focused symbol at -O2."
+    }
+  ],
+  "size_and_layout_facts": [
+    "At -O0, plain versus split final executable text is 13,486 versus 74,773 bytes; split is 61,287 bytes larger. At -O2 it is 4,150 versus 51,041 bytes; split is 46,891 bytes larger.",
+    "At -O0, plain versus split relocatable object text is 7,344 versus 58,465 bytes. At -O2 it is 1,131 versus 35,943 bytes.",
+    "The split final executable has the same bss at each optimization level (280 bytes), while data is 1,376 versus 872 at -O0 and 1,160 versus 728 at -O2.",
+    "The split object is an ld -r relocatable aggregate of one main piece plus four header pieces. The template body is present in the mirror/header tree but is not a separately linked object.",
+    "The measured split tree generated five header definitions, reported four compilable header object files, and kept max_of as a template. Main remained in the translation-unit piece."
+  ],
+  "generated_tree": {
+    "root_pattern": "actual/use_mylib_O{0|2}.o.split/",
+    "files": [
+      "use_mylib_preamble.h",
+      "mylib.h",
+      "use_mylib_1_main.cpp",
+      "mylib_1_add.cpp",
+      "mylib_2_multiply.cpp",
+      "mylib_3_greet.cpp",
+      "mylib_4_average.cpp",
+      "mylib_5_max_of.cpp",
+      "use_mylib_1_main.o",
+      "mylib_1_add.o",
+      "mylib_2_multiply.o",
+      "mylib_3_greet.o",
+      "mylib_4_average.o"
+    ],
+    "source_paths_are_normalized": true,
+    "source_path_note": "The embedded source below replaces ephemeral /tmp absolute prefixes in #line directives with test/ paths; function bodies and generated structure are measured output."
+  },
+  "generated_sources": {
+    "use_mylib_preamble.h": "#pragma once\n#line 1 \"test/use_mylib.cpp\"\n#include \"mylib.h\"\n#include <iostream>\n\n#line 15 \"test/use_mylib.cpp\"\n\n\nint main();\n",
+    "mylib.h": "#pragma once\n#line 1 \"test/mylib.h\"\n#pragma once\n#include <string>\n#include <vector>\n#include <numeric>\n#include <algorithm>\n\n#line 9 \"test/mylib.h\"\n\n\n#line 13 \"test/mylib.h\"\n\n\n#line 17 \"test/mylib.h\"\n\n\n#line 23 \"test/mylib.h\"\n\n\n#line 25 \"test/mylib.h\"\ntemplate<typename T>\nT max_of(T a, T b) {\n    return (a > b) ? a : b;\n}\n#line 28 \"test/mylib.h\"\n\n\nint add(int a, int b);\nint multiply(int a, int b);\nstd::string greet(const std::string& name);\ndouble average(const std::vector<double>& values);\n",
+    "use_mylib_1_main.cpp": "// Function: int main()\n// Source: test/use_mylib.cpp (lines 4-15)\n// ---\n\n#include \"use_mylib_preamble.h\"\n\n#line 4 \"test/use_mylib.cpp\"\nint main() {\n    std::cout << \"add(3, 4) = \" << add(3, 4) << \"\\n\";\n    std::cout << \"multiply(5, 6) = \" << multiply(5, 6) << \"\\n\";\n    std::cout << greet(\"World\") << \"\\n\";\n\n    std::vector<double> vals = {1.0, 2.0, 3.0, 4.0, 5.0};\n    std::cout << \"average = \" << average(vals) << \"\\n\";\n\n    std::cout << \"max_of(10, 20) = \" << max_of(10, 20) << \"\\n\";\n\n    return 0;\n}\n",
+    "mylib_1_add.cpp": "// Function: int add(int, int)\n// Source: test/mylib.h (lines 7-9)\n// ---\n\n#include \"mylib.h\"\n\n#line 7 \"test/mylib.h\"\ninline int add(int a, int b) {\n    return a + b;\n}\n",
+    "mylib_2_multiply.cpp": "// Function: int multiply(int, int)\n// Source: test/mylib.h (lines 11-13)\n// ---\n\n#include \"mylib.h\"\n\n#line 11 \"test/mylib.h\"\ninline int multiply(int a, int b) {\n    return a * b;\n}\n",
+    "mylib_3_greet.cpp": "// Function: std::string greet(const std::string &)\n// Source: test/mylib.h (lines 15-17)\n// ---\n\n#include \"mylib.h\"\n\n#line 15 \"test/mylib.h\"\ninline std::string greet(const std::string& name) {\n    return \"Hello, \" + name + \"!\";\n}\n",
+    "mylib_4_average.cpp": "// Function: double average(const std::vector<double> &)\n// Source: test/mylib.h (lines 19-23)\n// ---\n\n#include \"mylib.h\"\n\n#line 19 \"test/mylib.h\"\ninline double average(const std::vector<double>& values) {\n    if (values.empty()) return 0.0;\n    double sum = std::accumulate(values.begin(), values.end(), 0.0);\n    return sum / static_cast<double>(values.size());\n}\n",
+    "mylib_5_max_of.cpp": "// Function: T max_of(T, T)\n// Source: test/mylib.h (lines 25-28)\n// Note: template - kept in preamble header for compilation\n// ---\n\n#include \"mylib.h\"\n\n#line 25 \"test/mylib.h\"\ntemplate<typename T>\nT max_of(T a, T b) {\n    return (a > b) ? a : b;\n}\n"
+  },
+  "caveats": [
+    "This is measured output from ./cpp-splitter with g++ 14.3.0, not a manually reconstructed split. No project source was changed.",
+    "The repository-relative cpp-splitter binary is not on PATH. The first clang++ probe was not used for this evidence; the successful and reported runs are both plain g++ and actual splitter-plus-g++ runs.",
+    "The generated source from this binary does not visibly contain the __attribute__((used)) shown in the architecture document's illustrative snippet. Its verbose command instead adds -fkeep-inline-functions to header-piece GCC compiles. The artifact records the generated text actually observed.",
+    "The embedded #line paths are normalized only to remove ephemeral /tmp names. They are not invented source bodies.",
+    "nm addresses are intentionally normalized to <addr> for set comparison. Symbol type W means weak; T means text/global. size reports section totals, not source-function sizes.",
+    "The large split size is a property of this small fixture and this measured compiler/splitter invocation. It should not be presented as a general performance benchmark."
+  ]
+}
