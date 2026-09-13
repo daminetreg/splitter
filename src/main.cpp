@@ -3227,10 +3227,16 @@ static bool header_has_include_guard(const std::string& source) {
         blanked.find("# pragma once") != std::string::npos)
         return true;
 
-    // Classic guard: `#ifndef X` followed within a few lines by `#define X`.
+    // Classic guard: `#ifndef X` followed within a few lines by `#define X` -- and it has to
+    // be the file's first conditional directive. A guard wraps the whole file; an
+    // `#ifndef X / #define X` pair anywhere else guards a section. OpenCV's arithm.simd.hpp
+    // ends with `#ifndef SIMD_GUARD / #define SIMD_GUARD`, is meant to be included twice
+    // under two macro states, and was taken for a guarded header on that pair -- so its
+    // copy got a `#pragma once` and the second inclusion vanished.
     std::istringstream iss(blanked);
     std::string line, guard;
     int since_ifndef = -1;
+    bool any_conditional = false;
     while (std::getline(iss, line)) {
         std::istringstream ls(line);
         std::string hash, directive, ident;
@@ -3244,7 +3250,7 @@ static bool header_has_include_guard(const std::string& source) {
             if (since_ifndef >= 0 && ++since_ifndef > 4) since_ifndef = -1;
             continue;
         }
-        if (directive == "ifndef" && !ident.empty()) {
+        if (directive == "ifndef" && !ident.empty() && !any_conditional) {
             guard = ident;
             since_ifndef = 0;
         } else if (directive == "define" && since_ifndef >= 0 && ident == guard) {
@@ -3252,6 +3258,9 @@ static bool header_has_include_guard(const std::string& source) {
         } else if (since_ifndef >= 0 && ++since_ifndef > 4) {
             since_ifndef = -1;
         }
+        if (directive == "if" || directive == "ifdef" || directive == "ifndef" ||
+            directive == "elif" || directive == "else" || directive == "endif")
+            any_conditional = true;
     }
     return false;
 }
@@ -3537,10 +3546,70 @@ static void register_header_manifest(const fs::path& manifest_path,
 // The list is therefore completed from the AST: every file a function or variable definition
 // sits in is appended, whatever reported its inclusion. Both callers use this one function so
 // that a header is never split by one and forgotten by the other.
+// Set by header_split_candidates() when a header it will not split defines a function with
+// external linkage and no `inline`. Such a definition reaches every piece through the
+// preamble, which includes the header as it is, and the pieces' objects then define it as
+// many times as there are pieces. Nothing downstream can repair that, so do_split() stops
+// before writing anything and the unit is compiled whole -- the same outcome the relocatable
+// link would have forced, without the pieces being compiled first.
+static std::string g_unsplittable_header;
+
+// Files in which the translation unit defines a function with external linkage and no
+// `inline`: the ones whose text cannot be shared by every piece.
+static std::set<std::string> files_with_external_definitions(CXTranslationUnit tu) {
+    std::set<std::string> files;
+    auto visit = [](CXCursor c, CXCursor, CXClientData d) -> CXChildVisitResult {
+        const CXCursorKind k = clang_getCursorKind(c);
+        const bool fn_kind =
+            k == CXCursor_FunctionDecl || k == CXCursor_CXXMethod ||
+            k == CXCursor_Constructor || k == CXCursor_Destructor ||
+            k == CXCursor_ConversionFunction;
+        if (fn_kind && clang_isCursorDefinition(c)) {
+            if (!clang_Cursor_isFunctionInlined(c) &&
+                clang_getCursorLinkage(c) == CXLinkage_External) {
+                CXFile f = nullptr;
+                clang_getFileLocation(clang_getCursorLocation(c), &f, nullptr, nullptr, nullptr);
+                if (f) {
+                    std::error_code ec;
+                    const std::string abs =
+                        fs::absolute(cx_to_string(clang_getFileName(f)), ec).lexically_normal().string();
+                    if (!ec) static_cast<std::set<std::string>*>(d)->insert(abs);
+                }
+            }
+            return CXChildVisit_Continue;
+        }
+        return CXChildVisit_Recurse;
+    };
+    clang_visitChildren(clang_getTranslationUnitCursor(tu), visit, &files);
+    return files;
+}
+
 static std::vector<std::string> inclusions_of(CXTranslationUnit tu) {
     std::vector<std::string> includes;
-    clang_getInclusions(tu, inclusion_visitor, &includes);
 
+    // The preprocessing record first: every directive the preprocessor acted on, in order,
+    // once per inclusion. A header included twice under different macro states -- OpenCV's
+    // arithm.simd.hpp, definitions then dispatchers -- has to be counted twice, or the rule
+    // that leaves such a pair alone never fires and its copy gets a `#pragma once` that
+    // drops the second inclusion.
+    auto directives = [](CXCursor c, CXCursor, CXClientData d) -> CXChildVisitResult {
+        if (clang_getCursorKind(c) == CXCursor_InclusionDirective) {
+            CXFile f = clang_getIncludedFile(c);
+            if (f) {
+                std::error_code ec;
+                const std::string abs =
+                    fs::absolute(cx_to_string(clang_getFileName(f)), ec).lexically_normal().string();
+                if (!ec) static_cast<std::vector<std::string>*>(d)->push_back(abs);
+            }
+        }
+        return CXChildVisit_Continue;
+    };
+    clang_visitChildren(clang_getTranslationUnitCursor(tu), directives, &includes);
+
+    // Without a record -- a translation unit parsed without the flag -- the older source.
+    if (includes.empty()) clang_getInclusions(tu, inclusion_visitor, &includes);
+
+    // And whatever holds a definition, whether or not a directive was seen for it.
     std::set<std::string> from_ast;
     auto visit = [](CXCursor c, CXCursor, CXClientData d) -> CXChildVisitResult {
         auto* files = static_cast<std::set<std::string>*>(d);
@@ -3582,6 +3651,7 @@ static std::vector<std::string> header_split_candidates(
         return candidates;
 
     const std::vector<std::string> includes = inclusions_of(tu);
+    const std::set<std::string> external_definers = files_with_external_definitions(tu);
 
     const auto inc_dirs = unit_include_dirs(extra_flags);
     const std::string include_root = split_include_root(output_dir);
@@ -3651,6 +3721,12 @@ static std::vector<std::string> header_split_candidates(
                 out << "Skipping " << inc_path << ": no include guard and included "
                     << inclusion_count[inc_path] << " times, so it is one half of a pair"
                        " and is not meant to be included on its own\n";
+            // Left as it is, the header is included by the preamble and so by every piece.
+            // If it defines a function that may exist in only one object, the unit cannot be
+            // split at all. OpenCV's arithm.simd.hpp is included twice under two macro
+            // states and the second expansion defines the cv::hal dispatchers.
+            if (external_definers.count(inc_path) && g_unsplittable_header.empty())
+                g_unsplittable_header = inc_path;
             const std::string unit_dir =
                 (fs::path(include_root) / fs::path(rel).parent_path()).string();
             write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
@@ -4595,8 +4671,14 @@ static SplitResult do_split(const std::string& input_path,
     // silently, the build still succeeds, and only launcher.depfile_names_originals and
     // launcher.header_edit_behind_pch notice. The flags stay until the candidate list comes
     // from somewhere cheaper. See TODO/29.
+    // The detailed preprocessing record is what inclusions_of() reads: one
+    // CXCursor_InclusionDirective per `#include` actually processed, with the file it
+    // resolved to, whether the directive sits in the preamble region or after it, and once
+    // per inclusion when a header is included twice. clang_getInclusions() gives neither of
+    // the last two under a precompiled preamble.
     unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
-                         | CXTranslationUnit_CreatePreambleOnFirstParse;
+                         | CXTranslationUnit_CreatePreambleOnFirstParse
+                         | CXTranslationUnit_DetailedPreprocessingRecord;
     CXErrorCode err = clang_parseTranslationUnit2(
         index, abs_path.c_str(), args.data(),
         static_cast<int>(args.size()), nullptr, 0, parse_flags, &tu);
@@ -4640,6 +4722,17 @@ static SplitResult do_split(const std::string& input_path,
         input_is_header ? std::vector<std::string>()
                         : header_split_candidates(tu, abs_path, output_dir, extra_flags,
                                                   verbose, out);
+
+    if (!g_unsplittable_header.empty()) {
+        std::cerr << "[cpp-splitter] not splitting " << input_path << ": "
+                  << g_unsplittable_header
+                  << " is included more than once with no include guard and defines a"
+                     " function with external linkage; left unsplit it would reach every"
+                     " piece\n";
+        clang_disposeTranslationUnit(tu);
+        clang_disposeIndex(index);
+        return result;
+    }
 
     std::set<std::string> wanted(candidates.begin(), candidates.end());
     wanted.insert(abs_path);

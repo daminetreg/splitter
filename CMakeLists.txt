@@ -170,6 +170,17 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
             -P ${cpp_splitter_test_dir}/cmake/RunSplitTest.cmake)
 endforeach()
 
+# A header included twice with no include guard, defining an external function the second
+# time: the unit is declined before any piece is written, with the reason. TODO/42 (1).
+add_test(
+  NAME split.pair_header_declines
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/pair_header_main.cpp
+          -DWORKDIR=${cpp_splitter_test_output}/pair_header
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunPairHeaderTest.cmake)
+
 # What the launcher tells the build system a split object depends on. The pieces include
 # rewritten copies of the headers, so without help the depfile names only those and an edit
 # to the real header rebuilds nothing.
