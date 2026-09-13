@@ -1,7 +1,8 @@
-// A unit that includes pair_header.hpp twice, the second time producing an external-linkage
-// definition. The header cannot be split -- one copy would have to serve both inclusions --
-// and left as it is it reaches every piece through the preamble. The splitter has to say so
-// and compile the unit whole, before writing a single piece.
+// A unit that includes pair_header.hpp twice, the second time producing external-linkage
+// definitions. One rewritten copy cannot serve both inclusions, so each is split on its own
+// (TODO/44 B): the second into a copy of its own, named on this unit's second #include line
+// in the generated preamble, and its definitions compiled in the macro state of that
+// inclusion, at the position they were written.
 #include <cstdio>
 #define PAIR_DECLARATIONS
 #include "pair_header.hpp"
@@ -12,4 +13,8 @@
 
 int twice_kernel(int v) { return kernel(v) * 2; }
 
-int main() { std::printf("%d\n", PAIR_HELPER_MACRO(twice_kernel(3))); return twice_kernel(3) == 30 ? 0 : 1; }
+int main()
+{
+    std::printf("%d %d %d\n", PAIR_HELPER_MACRO(twice_kernel(3)), scaled(4), shifted(4));
+    return twice_kernel(3) == 30 && scaled(4) == 15 && shifted(4) == 6 ? 0 : 1;
+}

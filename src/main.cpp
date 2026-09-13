@@ -102,6 +102,7 @@ struct FunctionInfo {
     unsigned end_offset;
     std::string file;                 // absolute path of the file holding the definition
     std::string usr;                  // unified symbol name, for the referenced-set lookup
+    unsigned sloc_raw = 0;            // raw source location: which inclusion of `file`, TODO/44 (B)
     std::vector<ScopeEntry> scope_chain;
     bool is_template;
     bool is_static;
@@ -254,6 +255,7 @@ struct VariableInfo {
     unsigned start_offset = 0;
     unsigned end_offset = 0;
     unsigned start_line = 0;
+    unsigned sloc_raw = 0;            // raw source location: which inclusion of `file`, TODO/44 (B)
     std::string type_spelling;        // for the declaration left behind, when the text cannot give one
     unsigned name_offset = 0;         // where the declarator's name is written
     std::vector<ScopeEntry> scope_chain;
@@ -407,6 +409,150 @@ static void collect_emitted(CXTranslationUnit tu,
     }
 }
 
+// --- TODO/44 (B): a header included more than once with no include guard ------------------
+//
+// Such a file is one file and several inclusions, each under its own macro state, and one
+// rewritten copy cannot serve them all: OpenCV's arithm.simd.hpp defines the SIMD kernels the
+// first time it is read and the cv::hal dispatchers the second. Each inclusion is therefore
+// split on its own, the second and later ones into copies under include/_inclusion/<n>/, and
+// the unit's preamble is rewritten to name those copies on the later #include lines.
+//
+// A definition is attributed to an inclusion through its raw source location. clang's source
+// manager gives every inclusion of a file an entry of its own, whose base offset the raw
+// location encodes, and creates the entries in preprocessing order. The base is what remains
+// of a raw location once the offset within the file is taken away. A location produced by a
+// macro expansion has an entry of its own, created while the inclusion was being read, so it
+// falls between the base of the inclusion it belongs to and the base of the next.
+//
+// Entries loaded from a precompiled header sit at the top of the offset range and the ones
+// the parse creates at the bottom, so a loaded base is ordered before every local one. The
+// prefix PCH holds the unit's whole include block, so both inclusions of a pair are either
+// loaded from it, in order, or -- a pair written after the first line of code -- both created
+// by the parse, in order.
+static const unsigned k_macro_id_bit = 1u << 31;
+static const unsigned k_loaded_offset_floor = 1u << 30;
+
+static unsigned raw_sloc_offset(CXSourceLocation loc) { return loc.int_data & ~k_macro_id_bit; }
+static bool sloc_is_macro(CXSourceLocation loc) { return (loc.int_data & k_macro_id_bit) != 0; }
+
+// file -> the base offset of every source-manager entry seen for it: one per inclusion read.
+static std::map<std::string, std::set<unsigned>> g_file_bases;
+
+static void note_inclusion_base(const std::string& file, CXSourceLocation loc) {
+    if (sloc_is_macro(loc)) return;
+    unsigned off = 0;
+    clang_getFileLocation(loc, nullptr, nullptr, nullptr, &off);
+    g_file_bases[file].insert(raw_sloc_offset(loc) - off);
+}
+
+// The bases of a file in preprocessing order: loaded before local, ascending within each.
+static std::vector<unsigned> ordered_inclusion_bases(const std::string& file) {
+    std::vector<unsigned> loaded, local;
+    auto it = g_file_bases.find(file);
+    if (it == g_file_bases.end()) return {};
+    for (unsigned b : it->second) (b >= k_loaded_offset_floor ? loaded : local).push_back(b);
+    loaded.insert(loaded.end(), local.begin(), local.end());
+    return loaded;
+}
+
+// The 1-based inclusion a raw location belongs to: the last base of its kind not after it.
+static unsigned inclusion_of_raw(const std::vector<unsigned>& bases, unsigned raw) {
+    const bool loaded = raw >= k_loaded_offset_floor;
+    unsigned found = 0;
+    for (size_t i = 0; i < bases.size(); ++i) {
+        if ((bases[i] >= k_loaded_offset_floor) != loaded) continue;
+        if (bases[i] <= raw) found = static_cast<unsigned>(i + 1);
+    }
+    return found;
+}
+
+// The harvest and g_split_headers key of inclusion n of a file: the path itself for the
+// first, `<path>#<n>` for the others.
+static std::string inclusion_key(const std::string& path, unsigned n) {
+    return n <= 1 ? path : path + "#" + std::to_string(n);
+}
+
+static std::pair<std::string, unsigned> decode_inclusion_key(const std::string& key) {
+    const size_t hash = key.rfind('#');
+    if (hash == std::string::npos || hash + 1 >= key.size()) return {key, 1u};
+    for (size_t i = hash + 1; i < key.size(); ++i)
+        if (!std::isdigit(static_cast<unsigned char>(key[i]))) return {key, 1u};
+    return {key.substr(0, hash), static_cast<unsigned>(std::stoul(key.substr(hash + 1)))};
+}
+
+// Where inclusion n's copy lives relative to <split_dir>/include.
+static std::string inclusion_mirror_relpath(const std::string& rel, unsigned n) {
+    return n <= 1 ? rel : (fs::path("_inclusion") / std::to_string(n) / rel).string();
+}
+
+// Headers the current unit splits per inclusion, and the #include lines of the unit that
+// read each file: (line in the unit, the name as written), in the order they were processed.
+static std::set<std::string> g_pair_headers;
+static std::map<std::string, std::vector<std::pair<unsigned, std::string>>> g_inclusion_sites;
+
+// One #include line of the unit's preamble to point at a later inclusion's copy: the name as
+// written, which textual occurrence of it in the unit, and what to name instead.
+struct PreambleIncludeRewrite {
+    std::string unit;
+    std::string spelled;
+    unsigned occurrence;
+    std::string replacement;
+};
+static std::vector<PreambleIncludeRewrite> g_preamble_include_rewrites;
+
+// Whether a line is `#include "spelled"` or `#include <spelled>`.
+static bool is_include_of(const std::string& line, const std::string& spelled) {
+    const size_t hash = line.find_first_not_of(" \t");
+    if (hash == std::string::npos || line[hash] != '#') return false;
+    const size_t kw = line.find_first_not_of(" \t", hash + 1);
+    if (kw == std::string::npos || line.compare(kw, 7, "include") != 0) return false;
+    return line.find("\"" + spelled + "\"", kw + 7) != std::string::npos ||
+           line.find("<" + spelled + ">", kw + 7) != std::string::npos;
+}
+
+// The number of lines before `line` (1-based) that include `spelled`.
+static unsigned include_occurrence_before(const std::string& source, unsigned line,
+                                          const std::string& spelled) {
+    unsigned count = 0, current = 1;
+    size_t pos = 0;
+    while (pos < source.size() && current < line) {
+        size_t eol = source.find('\n', pos);
+        if (eol == std::string::npos) eol = source.size();
+        if (is_include_of(source.substr(pos, eol - pos), spelled)) ++count;
+        pos = eol + 1;
+        ++current;
+    }
+    return count;
+}
+
+static std::string apply_preamble_include_rewrites(const std::string& preamble,
+                                                   const std::string& unit) {
+    std::string text = preamble;
+    for (const auto& rw : g_preamble_include_rewrites) {
+        if (rw.unit != unit) continue;
+        std::string rebuilt;
+        rebuilt.reserve(text.size());
+        unsigned seen = 0;
+        size_t pos = 0;
+        while (pos <= text.size()) {
+            size_t eol = text.find('\n', pos);
+            const bool last = (eol == std::string::npos);
+            if (last) eol = text.size();
+            std::string line = text.substr(pos, eol - pos);
+            if (is_include_of(line, rw.spelled) && seen++ == rw.occurrence) {
+                const size_t kw = line.find("include");
+                line = line.substr(0, kw + 7) + " \"" + rw.replacement + "\"";
+            }
+            rebuilt += line;
+            if (last) break;
+            rebuilt += '\n';
+            pos = eol + 1;
+        }
+        text.swap(rebuilt);
+    }
+    return text;
+}
+
 struct VisitorData {
     CXTranslationUnit tu;
     const std::set<std::string>* wanted;   // files whose functions to record
@@ -470,6 +616,7 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
 
     VariableInfo info;
     info.file = file;
+    info.sloc_raw = raw_sloc_offset(clang_getCursorLocation(cursor));
     info.name = cx_to_string(clang_getCursorSpelling(cursor));
     info.is_member = is_member;
 
@@ -646,6 +793,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     std::string cursor_filename =
         fs::absolute(cx_to_string(clang_getFileName(cursor_file)), fec).lexically_normal().string();
     const bool wanted_file = !fec && vd->wanted->count(cursor_filename) != 0;
+    if (wanted_file) note_inclusion_base(cursor_filename, loc);
 
     CXCursorKind kind = clang_getCursorKind(cursor);
 
@@ -709,6 +857,7 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
 
     FunctionInfo info;
     info.file = cursor_filename;
+    info.sloc_raw = raw_sloc_offset(loc);
     info.usr = cx_to_string(clang_getCursorUSR(cursor));
     info.name = cx_to_string(clang_getCursorSpelling(cursor));
     info.is_template = (kind == CXCursor_FunctionTemplate);
@@ -1811,6 +1960,28 @@ static bool type_lacks_linkage(CXType type, int depth);
 //
 // Returns false when the text around `start` does not look like the inside of an
 // invocation, in which case the caller leaves the definition alone.
+// Whether a blanked extent is exactly one invocation, `NAME( ... )`, with an optional `;`.
+static bool is_macro_invocation_text(const std::string& blanked) {
+    size_t i = 0;
+    while (i < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[i]))) ++i;
+    const size_t name = i;
+    while (i < blanked.size() && is_ident_char(static_cast<unsigned char>(blanked[i]))) ++i;
+    if (i == name || std::isdigit(static_cast<unsigned char>(blanked[name]))) return false;
+    while (i < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[i]))) ++i;
+    if (i >= blanked.size() || blanked[i] != '(') return false;
+    int depth = 0;
+    for (; i < blanked.size(); ++i) {
+        if (blanked[i] == '(') ++depth;
+        else if (blanked[i] == ')' && --depth == 0) break;
+    }
+    if (depth != 0) return false;
+    ++i;
+    while (i < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[i]))) ++i;
+    if (i < blanked.size() && blanked[i] == ';') ++i;
+    while (i < blanked.size() && std::isspace(static_cast<unsigned char>(blanked[i]))) ++i;
+    return i == blanked.size();
+}
+
 static bool widen_to_macro_invocation(const std::string& blanked, unsigned& start, unsigned& end) {
     // Walk back to the `(` that opens the argument list.
     size_t i = start;
@@ -1888,22 +2059,27 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         }
     }
 
-    // A macro that expands to exactly one out-of-line member definition. Its extent is a
-    // fragment of the invocation; widening to the whole invocation makes it a unit that can
-    // be moved to the definitions header, which is where a non-inline definition in a header
-    // has to go. The restriction to a single out-of-line member is what makes the move safe:
-    // the class already declares it, so nothing left in the file refers to the text.
+    // A macro that expands to exactly one definition. Its extent is a fragment of the
+    // invocation; widening to the whole invocation makes it a unit that can be moved to the
+    // definitions header, which is where a non-inline definition in a header has to go. An
+    // out-of-line member is already declared by its class, so nothing left in the file
+    // refers to the text; a free function is moved the way a group is, with a declaration
+    // spelled from what libclang resolved left in its place (generate_preamble()). OpenCV's
+    // arithm.simd.hpp writes `DEFINE_SIMD_U8(or, op_or)`: one external function, which every
+    // piece emitted when it was left where it was.
     {
         const std::string blanked = blank_code_noise(source);
         for (auto& fn : functions) {
             if (fn.shares_extent || fn.defined_in_class) continue;
             if (extent_is_a_definition(fn, fn.body)) continue;
-            bool is_member = false;
-            for (const auto& e : fn.scope_chain)
-                if (e.kind == ScopeKind::Class) { is_member = true; break; }
-            if (!is_member) continue;
 
             unsigned start = fn.start_offset, end = fn.end_offset;
+            // Already the whole invocation -- `PAIR_DEFINE(sc, aled, 3)` -- when no token
+            // of the definition came from an argument: nothing to widen.
+            if (is_macro_invocation_text(blanked.substr(start, end - start))) {
+                fn.macro_invocation = true;
+                continue;
+            }
             if (!widen_to_macro_invocation(blanked, start, end)) continue;
             if (end > source.size()) continue;
             fn.start_offset = start;
@@ -2640,10 +2816,19 @@ static std::string generate_preamble(const std::string& source,
             // definitions object does not emit an inline function nothing there uses.
             // OpenCV's DEFINE_SIMD_ALL(recip, ...) expands to eight external functions and
             // was emitted by every piece of the unit.
+            // One macro invocation, one free function: moved like a group of one, since no
+            // declarator in the source covers it either. A member keeps the branch below.
+            std::vector<const FunctionInfo*> group = r.group;
+            if (group.empty() && r.fn && r.fn->macro_invocation && r.fn->member_decl.empty()) {
+                bool member = false;
+                for (const auto& sc : r.fn->scope_chain)
+                    if (sc.kind == ScopeKind::Class) member = true;
+                if (!member) group.push_back(r.fn);
+            }
             bool group_moves = false;
-            if (definitions && !r.group.empty()) {
+            if (definitions && !group.empty()) {
                 group_moves = true;
-                for (const FunctionInfo* g : r.group) {
+                for (const FunctionInfo* g : group) {
                     if (has_vague_linkage(*g) || g->uses_undefined_macro ||
                         !g->member_decl.empty() || g->in_class_template ||
                         g->in_anonymous_class || g->is_static || g->in_unnamed_ns)
@@ -2653,9 +2838,9 @@ static std::string generate_preamble(const std::string& source,
                 }
             }
             if (group_moves) {
-                *definitions += wrap_in_namespaces(text, r.group.front()->scope_chain);
+                *definitions += wrap_in_namespaces(text, group.front()->scope_chain);
                 *definitions += "\n";
-                for (const FunctionInfo* g : r.group) {
+                for (const FunctionInfo* g : group) {
                     // The source extent is the macro invocation, so no declarator can be
                     // read out of it; the declaration is spelled from what libclang
                     // resolved: the result type and the display name, which is the name
@@ -2759,7 +2944,8 @@ static std::string generate_preamble(const std::string& source,
 
     preamble += "\n";
 
-    return preamble;
+    // A later inclusion of a pair header names its own copy. TODO/44 (B).
+    return apply_preamble_include_rewrites(preamble, source_path);
 }
 
 static std::string wrap_in_namespaces(const std::string& body,
@@ -3247,6 +3433,9 @@ struct SplitResult {
     bool success = false;
     std::vector<std::string> header_obj_dirs;
     std::vector<std::string> header_obj_files;
+    // The unit's preamble cut after each inclusion of a pair header: what that inclusion's
+    // pieces include first, and so what needs a PCH beside the preamble's. TODO/44 (B).
+    std::vector<std::string> context_preambles;
 };
 
 struct SplitHeaderInfo {
@@ -3256,6 +3445,8 @@ struct SplitHeaderInfo {
 };
 
 static std::unordered_map<std::string, SplitHeaderInfo> g_split_headers;
+// Variant copies of pair headers with the definitions in place -> the original. TODO/44 (B).
+static std::map<std::string, std::string> g_definition_variants;
 
 
 static void inclusion_visitor(CXFile included_file, CXSourceLocation* /*stack*/,
@@ -3724,9 +3915,12 @@ static void emit_split_files(CXTranslationUnit tu,
                              const std::string& output_dir,
                              const std::string& include_root,
                              const std::string& unit_tag,
+                             unsigned inclusion,
                              const std::string& preamble_filename,
                              const std::string& preamble_path,
                              const std::string& definitions_filename,
+                             const std::string& definitions_context,
+                             const std::string& definitions_variant,
                              const std::vector<std::string>& all_flags,
                              const std::vector<std::string>& extra_flags,
                              const std::string& context_preamble,
@@ -3762,6 +3956,7 @@ static void register_header_manifest(const fs::path& manifest_path,
 // before writing anything and the unit is compiled whole -- the same outcome the relocatable
 // link would have forced, without the pieces being compiled first.
 static std::string g_unsplittable_header;
+static std::string g_unsplittable_header_reason;
 
 // Files in which the translation unit defines a function with external linkage and no
 // `inline`: the ones whose text cannot be shared by every piece.
@@ -3848,6 +4043,113 @@ static std::vector<std::string> inclusions_of(CXTranslationUnit tu) {
     return includes;
 }
 
+// The #include lines of the unit itself -- written in the source, or in the prefix the PCH
+// was built from, whose lines are the source's -- by the file each resolved to, in the order
+// the preprocessor took them. TODO/44 (B).
+static void collect_inclusion_sites(CXTranslationUnit tu,
+                                    const std::string& main_file,
+                                    const std::string& prefix_file) {
+    g_inclusion_sites.clear();
+    struct Ctx { const std::string* main; const std::string* prefix; };
+    Ctx ctx{&main_file, &prefix_file};
+    auto directives = [](CXCursor c, CXCursor, CXClientData d) -> CXChildVisitResult {
+        if (clang_getCursorKind(c) != CXCursor_InclusionDirective) return CXChildVisit_Continue;
+        const Ctx* ctx = static_cast<const Ctx*>(d);
+        CXFile included = clang_getIncludedFile(c);
+        CXFile in = nullptr;
+        unsigned line = 0;
+        clang_getFileLocation(clang_getCursorLocation(c), &in, &line, nullptr, nullptr);
+        if (!included || !in) return CXChildVisit_Continue;
+        std::error_code ec;
+        const std::string in_path =
+            fs::absolute(cx_to_string(clang_getFileName(in)), ec).lexically_normal().string();
+        if (ec || (in_path != *ctx->main && in_path != *ctx->prefix))
+            return CXChildVisit_Continue;
+        const std::string target =
+            fs::absolute(cx_to_string(clang_getFileName(included)), ec).lexically_normal().string();
+        if (!ec)
+            g_inclusion_sites[target].emplace_back(line, cx_to_string(clang_getCursorSpelling(c)));
+        return CXChildVisit_Continue;
+    };
+    clang_visitChildren(clang_getTranslationUnitCursor(tu), directives, &ctx);
+}
+
+// Once the translation unit is harvested: re-key what each pair header defines by inclusion
+// (`path` for the first, `path#n` after), or take the header out of the candidate list when
+// its inclusions cannot be told apart. Fills g_preamble_include_rewrites.
+static void attribute_pair_inclusions(HarvestMap& harvest,
+                                      VarHarvestMap& var_harvest,
+                                      std::vector<std::string>& candidates,
+                                      const std::set<std::string>& external_definers,
+                                      const std::string& main_file,
+                                      const std::string& source,
+                                      const std::vector<std::string>& inc_dirs,
+                                      bool verbose,
+                                      std::ostream& out) {
+    for (const auto& path : g_pair_headers) {
+        const auto sites = g_inclusion_sites.find(path);
+        const size_t count = sites == g_inclusion_sites.end() ? 0 : sites->second.size();
+        const std::vector<unsigned> bases = ordered_inclusion_bases(path);
+        // Every inclusion reused from an earlier run: nothing was harvested and there is
+        // nothing to attribute, but the preamble still has to name the later copies.
+        const bool harvested =
+            std::any_of(candidates.begin(), candidates.end(), [&](const std::string& c) {
+                return decode_inclusion_key(c).first == path;
+            });
+        if (harvested && (bases.size() != count || count < 2)) {
+            if (verbose)
+                out << "Skipping " << path << ": read " << count << " times but "
+                    << bases.size() << " inclusion(s) hold declarations, so its inclusions"
+                       " cannot be told apart\n";
+            candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                            [&](const std::string& c) {
+                                                return decode_inclusion_key(c).first == path;
+                                            }),
+                             candidates.end());
+            harvest.erase(path);
+            var_harvest.erase(path);
+            if (external_definers.count(path) && g_unsplittable_header.empty()) {
+                g_unsplittable_header = path;
+                g_unsplittable_header_reason = "its inclusions cannot be told apart";
+            }
+            continue;
+        }
+        auto fit = harvested ? harvest.find(path) : harvest.end();
+        if (fit != harvest.end()) {
+            std::vector<FunctionInfo> first;
+            for (auto& fn : fit->second) {
+                const unsigned n = inclusion_of_raw(bases, fn.sloc_raw);
+                if (n <= 1) first.push_back(std::move(fn));
+                else harvest[inclusion_key(path, n)].push_back(std::move(fn));
+            }
+            fit->second.swap(first);
+        }
+        auto vit = harvested ? var_harvest.find(path) : var_harvest.end();
+        if (vit != var_harvest.end()) {
+            std::vector<VariableInfo> first;
+            for (auto& var : vit->second) {
+                const unsigned n = inclusion_of_raw(bases, var.sloc_raw);
+                if (n <= 1) first.push_back(std::move(var));
+                else var_harvest[inclusion_key(path, n)].push_back(std::move(var));
+            }
+            vit->second.swap(first);
+        }
+        const std::string rel = header_mirror_relpath(path, inc_dirs);
+        for (size_t n = 2; n <= count; ++n) {
+            const auto& site = sites->second[n - 1];
+            PreambleIncludeRewrite rw;
+            rw.unit = main_file;
+            rw.spelled = site.second;
+            rw.occurrence = include_occurrence_before(source, site.first, rw.spelled);
+            rw.replacement = inclusion_mirror_relpath(rel, static_cast<unsigned>(n));
+            g_preamble_include_rewrites.push_back(rw);
+            if (verbose)
+                out << "[auto-split] inclusion " << n << " of " << path << " (line "
+                    << site.first << ") -> " << rw.replacement << "\n";
+        }
+    }
+}
+
 static std::vector<std::string> header_split_candidates(
         CXTranslationUnit tu,
         const std::string& main_file,
@@ -3892,15 +4194,57 @@ static std::vector<std::string> header_split_candidates(
         const std::string rel = header_mirror_relpath(inc_path, inc_dirs);
         const std::string manifest = (fs::path(include_root) / (rel + ".split")).string();
 
-        // The pair rule's decision from an earlier run is in the manifest, and the decline
-        // that goes with it has to be made again on every run, before any branch below
-        // reuses the manifest and moves on: on the run after the first, OpenCV's
-        // arithm.dispatch.cpp came through, split 106 header pieces, and failed at the
-        // relocatable link, which is the slow fallback the decline exists to replace.
-        if (external_definers.count(inc_path) && g_unsplittable_header.empty() &&
-            fs::exists(manifest) &&
-            read_file(manifest).find("# not split: no include guard") != std::string::npos)
-            g_unsplittable_header = inc_path;
+        // A file with no include guard read more than once is one file and several
+        // inclusions, each under its own macro state, and one copy cannot serve them all.
+        // Each inclusion written in the unit itself is split on its own (TODO/44 B); a pair
+        // one of whose inclusions comes through another header is left as it is, and if it
+        // defines a function that may exist in only one object the unit cannot be split at
+        // all, since the definition reaches every piece through the preamble. Read exactly
+        // once, the file is an implementation include, which has no guard for the ordinary
+        // reason that it does not need one.
+        if (inclusion_count[inc_path] > 1 && !header_has_include_guard(read_file(inc_path))) {
+            const auto sites = g_inclusion_sites.find(inc_path);
+            const size_t in_unit = sites == g_inclusion_sites.end() ? 0 : sites->second.size();
+            if (in_unit != static_cast<size_t>(inclusion_count[inc_path])) {
+                if (verbose)
+                    out << "Skipping " << inc_path << ": no include guard and included "
+                        << inclusion_count[inc_path] << " times, " << in_unit
+                        << " of them from the unit itself\n";
+                if (external_definers.count(inc_path) && g_unsplittable_header.empty()) {
+                    g_unsplittable_header = inc_path;
+                    g_unsplittable_header_reason =
+                        "not every inclusion is written in the unit";
+                }
+                const std::string unit_dir =
+                    (fs::path(include_root) / fs::path(rel).parent_path()).string();
+                write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
+                                              inc_path, "no include guard, included repeatedly");
+                continue;
+            }
+            g_pair_headers.insert(inc_path);
+            for (unsigned n = 1; n <= static_cast<unsigned>(in_unit); ++n) {
+                const std::string key = inclusion_key(inc_path, n);
+                if (g_split_headers.find(key) != g_split_headers.end()) {
+                    if (verbose) out << "[auto-split] already split: " << key << "\n";
+                    continue;
+                }
+                const std::string manifest_n =
+                    (fs::path(include_root) / (inclusion_mirror_relpath(rel, n) + ".split")).string();
+                std::error_code ec;
+                if (fs::exists(manifest_n) &&
+                    fs::last_write_time(inc_path, ec) <= fs::last_write_time(manifest_n, ec) &&
+                    !ec &&
+                    read_file(manifest_n).find("# not split: no include guard") ==
+                        std::string::npos) {
+                    register_header_manifest(manifest_n, include_root);
+                    if (verbose)
+                        out << "[auto-split] reusing an earlier split of " << key << "\n";
+                    continue;
+                }
+                candidates.push_back(key);
+            }
+            continue;
+        }
 
         if (g_split_headers.find(inc_path) != g_split_headers.end()) {
             if (verbose) out << "[auto-split] already split: " << inc_path << "\n";
@@ -3931,28 +4275,7 @@ static std::vector<std::string> header_split_candidates(
             continue;
         }
 
-        // A file with no include guard read more than once is one half of a pair, and
-        // rewriting half a pair is never correct. Read exactly once it is an implementation
-        // include, which has no guard for the ordinary reason that it does not need one.
-        const std::string src = read_file(inc_path);
-        if (src.empty() ||
-            (!header_has_include_guard(src) && inclusion_count[inc_path] > 1)) {
-            if (verbose)
-                out << "Skipping " << inc_path << ": no include guard and included "
-                    << inclusion_count[inc_path] << " times, so it is one half of a pair"
-                       " and is not meant to be included on its own\n";
-            // Left as it is, the header is included by the preamble and so by every piece.
-            // If it defines a function that may exist in only one object, the unit cannot be
-            // split at all. OpenCV's arithm.simd.hpp is included twice under two macro
-            // states and the second expansion defines the cv::hal dispatchers.
-            if (external_definers.count(inc_path) && g_unsplittable_header.empty())
-                g_unsplittable_header = inc_path;
-            const std::string unit_dir =
-                (fs::path(include_root) / fs::path(rel).parent_path()).string();
-            write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
-                                          inc_path, "no include guard, included repeatedly");
-            continue;
-        }
+        if (read_file(inc_path).empty()) continue;
         candidates.push_back(inc_path);
     }
     return candidates;
@@ -3978,7 +4301,15 @@ static SplitResult split_unit(CXTranslationUnit tu,
                               const std::string& context_preamble,
                               bool parse_clean,
                               bool verbose,
-                              std::ostream& out) {
+                              std::ostream& out,
+                              // Which inclusion of a header read more than once this is;
+                              // the second and later ones are mirrored under
+                              // include/_inclusion/<n>/. TODO/44 (B).
+                              unsigned inclusion = 1,
+                              // For such an inclusion, the unit's preamble cut *before* its
+                              // #include line: what the definitions piece includes ahead of
+                              // a variant of the copy that keeps the definitions in place.
+                              const std::string& definitions_context = std::string()) {
     SplitResult result;
     result.success = false;
 
@@ -3988,8 +4319,8 @@ static SplitResult split_unit(CXTranslationUnit tu,
 
     std::string unit_dir = output_dir;
     if (input_is_header) {
-        const std::string rel =
-            header_mirror_relpath(abs_path, unit_include_dirs(extra_flags));
+        const std::string rel = inclusion_mirror_relpath(
+            header_mirror_relpath(abs_path, unit_include_dirs(extra_flags)), inclusion);
         unit_dir = (fs::path(split_include_root(output_dir)) /
                     fs::path(rel).parent_path()).string();
     }
@@ -4000,6 +4331,14 @@ static SplitResult split_unit(CXTranslationUnit tu,
     prepare_functions(functions, source, referenced, input_is_header);
     prepare_variables(variables, functions, source, unit_tag, input_is_header);
     dump_keep_decisions(functions);
+
+    // A pair header's conditionals test the macros the unit defines before each #include
+    // and undefines after it; replayed at the end of the preamble they are all false and the
+    // piece is empty. The harvest of inclusion n holds what was live under n's macro state,
+    // so every conditional a piece of it replays is true. TODO/44 (B).
+    if (input_is_header && g_pair_headers.count(abs_path))
+        for (auto& fn : functions)
+            for (auto& c : fn.conditionals) c = "#if 1";
 
     // A static variable whose type no other translation unit can name moves whole to the
     // definitions header (prepare_variables()), and every function that references it goes
@@ -4093,14 +4432,40 @@ static SplitResult split_unit(CXTranslationUnit tu,
         }
     }
 
+    // A pair header's definitions cannot be re-expanded behind the whole header: OpenCV's
+    // arithm.simd.hpp redefines DEFINE_SIMD_FUN section by section, and DEFINE_SIMD_ALL(add,
+    // op_add) moved to the definitions header expanded with the last section's macros. The
+    // definitions piece of such an inclusion instead includes the preamble cut before the
+    // inclusion and then a variant of the copy in which the pieces' functions are declared
+    // and everything bound for the definitions header is left where it was written, so each
+    // definition is expanded once, in the macro state it had. TODO/44 (B).
+    std::string definitions_variant;
+    if (!definitions_filename.empty() && !definitions_context.empty()) {
+        definitions_variant = preamble_filename + ".definitions.h";
+        const std::string variant_path = (fs::path(unit_dir) / definitions_variant).string();
+        const std::string body = generate_preamble(source, functions, variables, unit_tag,
+                                                   abs_path, static_renames, nullptr);
+        if (!fs::exists(variant_path) || read_file(variant_path) != body) {
+            std::ofstream ofs(variant_path);
+            if (!ofs.is_open()) {
+                std::cerr << "Error: cannot write " << variant_path << "\n";
+                return result;
+            }
+            ofs << body;
+            if (verbose) out << "Generated definitions variant: " << variant_path << "\n";
+        }
+        g_definition_variants[variant_path] = abs_path;
+    }
+
     if (nothing_of_its_own) {
         result.success = true;
         return result;
     }
 
     emit_split_files(tu, functions, variables, input_path, abs_path, unit_dir,
-                     split_include_root(output_dir), unit_tag,
+                     split_include_root(output_dir), unit_tag, inclusion,
                      preamble_filename, preamble_path, definitions_filename,
+                     definitions_context, definitions_variant,
                      all_flags, extra_flags,
                      context_preamble, input_is_header, parse_clean, verbose, out, result);
     result.success = true;
@@ -4134,9 +4499,25 @@ static void fix_mirror_quoted_includes(const std::string& output_dir,
                                        bool verbose, std::ostream& out) {
     const std::string mirror_root = split_include_root(output_dir);
 
+    // Every rewritten copy: one per split header (per inclusion, for a pair header), and the
+    // definitions variants of pair headers. A copy under include/_inclusion/<n>/ is not
+    // parallel to the original tree, so a mirrored sibling has to be named by its path too.
+    // TODO/44 (B).
+    struct Copy { std::string original, path; bool parallel_to_original; };
+    std::vector<Copy> copies;
     for (const auto& entry : g_split_headers) {
-        const std::string& original = entry.first;
-        const std::string& copy_path = entry.second.preamble_path;
+        const auto decoded = decode_inclusion_key(entry.first);
+        copies.push_back({decoded.first, entry.second.preamble_path, decoded.second <= 1});
+    }
+    for (const auto& entry : g_definition_variants) {
+        const bool parallel =
+            entry.first.find("/_inclusion/") == std::string::npos;
+        copies.push_back({entry.second, entry.first, parallel});
+    }
+    for (const auto& copy : copies) {
+        const std::string& original = copy.original;
+        const bool parallel_to_original = copy.parallel_to_original;
+        const std::string& copy_path = copy.path;
         if (copy_path.empty() || !fs::exists(copy_path)) continue;
 
         const fs::path orig_dir = fs::path(original).parent_path();
@@ -4175,12 +4556,15 @@ static void fix_mirror_quoted_includes(const std::string& output_dir,
                         // been split out, defining every one of them a second time.
                         const std::string sib_rel =
                             header_mirror_relpath(resolved.string(), inc_dirs);
+                        const std::string sib_copy = (fs::path(mirror_root) / sib_rel).string();
                         const bool sibling_mirrored =
-                            !sib_rel.empty() &&
-                            fs::exists((fs::path(mirror_root) / sib_rel).string(), ec);
+                            !sib_rel.empty() && fs::exists(sib_copy, ec);
                         if (!sibling_mirrored) {
                             line = line.substr(0, q1 + 1) + resolved.string() +
                                    line.substr(q2);
+                            ++rewritten;
+                        } else if (!parallel_to_original) {
+                            line = line.substr(0, q1 + 1) + sib_copy + line.substr(q2);
                             ++rewritten;
                         }
                     }
@@ -4205,12 +4589,92 @@ static void fix_mirror_quoted_includes(const std::string& output_dir,
     }
 }
 
+// The pieces of a pair header's inclusion n compile in the macro state of that inclusion:
+// what the unit defined before the n-th #include and had not yet undefined after it. The
+// whole preamble ends in the state of the last inclusion and whatever follows -- OpenCV's
+// arithm.dispatch.cpp defines ARITHM_DISPATCHING_ONLY between its two inclusions of
+// arithm.simd.hpp, so the SIMD kernels of the first, re-expanded behind the whole preamble,
+// became dispatchers calling functions that do not exist. Each inclusion therefore gets the
+// preamble cut right after its own #include line, with a PCH of its own. Written on every
+// run that regenerates the preamble, since the pieces name these files; returns the file name
+// for each inclusion's key. TODO/44 (B).
+struct PairContext {
+    std::string after;    // the preamble through the inclusion's #include line
+    std::string before;   // the preamble up to that line: the definitions piece's context
+};
+
+static std::map<std::string, PairContext> write_pair_context_preambles(
+        const std::string& preamble_path,
+        const std::string& source,
+        const std::vector<std::string>& inc_dirs,
+        bool verbose,
+        std::ostream& out) {
+    std::map<std::string, PairContext> contexts;
+    const std::string preamble = read_file(preamble_path);
+    if (preamble.empty()) return contexts;
+    const fs::path dir = fs::path(preamble_path).parent_path();
+    const std::string stem = fs::path(preamble_path).stem().string();   // <unit>_preamble
+
+    for (const auto& path : g_pair_headers) {
+        const auto sites = g_inclusion_sites.find(path);
+        if (sites == g_inclusion_sites.end()) continue;
+        const std::string rel = header_mirror_relpath(path, inc_dirs);
+        for (size_t n = 1; n <= sites->second.size(); ++n) {
+            // What the n-th #include line reads in the preamble: the name as written for the
+            // first, the copy's path for the others (apply_preamble_include_rewrites()).
+            const std::string spelled =
+                n == 1 ? sites->second[0].second
+                       : inclusion_mirror_relpath(rel, static_cast<unsigned>(n));
+            const unsigned occurrence =
+                n == 1 ? include_occurrence_before(source, sites->second[0].first, spelled) : 0;
+            unsigned seen = 0;
+            size_t cut = std::string::npos, line_start = 0, pos = 0;
+            while (pos < preamble.size()) {
+                size_t eol = preamble.find('\n', pos);
+                if (eol == std::string::npos) eol = preamble.size();
+                if (is_include_of(preamble.substr(pos, eol - pos), spelled) &&
+                    seen++ == occurrence) {
+                    cut = eol < preamble.size() ? eol + 1 : eol;
+                    line_start = pos;
+                    break;
+                }
+                pos = eol + 1;
+            }
+            const std::string key = inclusion_key(path, static_cast<unsigned>(n));
+            if (cut == std::string::npos) {
+                if (verbose)
+                    out << "[auto-split] no #include line for " << key
+                        << " in the preamble; its pieces get the whole preamble\n";
+                continue;
+            }
+            const std::string name =
+                stem + "." + sanitize_filename(rel) + "." + std::to_string(n) + ".h";
+            const std::string before_name =
+                stem + "." + sanitize_filename(rel) + "." + std::to_string(n) + ".before.h";
+            auto write = [&](const std::string& file, const std::string& text) {
+                if (!fs::exists(file) || read_file(file) != text) {
+                    std::ofstream ofs(file);
+                    if (ofs.is_open()) ofs << text;
+                }
+            };
+            write((dir / name).string(), preamble.substr(0, cut));
+            write((dir / before_name).string(), preamble.substr(0, line_start));
+            contexts[key] = PairContext{name, before_name};
+            if (verbose) out << "[auto-split] context of " << key << ": " << name << "\n";
+        }
+    }
+    return contexts;
+}
+
 static void resolve_header_deps(CXTranslationUnit tu,
                                 const HarvestMap& harvest,
                                 const VarHarvestMap& var_harvest,
                                 const std::set<std::string>& referenced,
                                 const std::vector<std::string>& candidates,
                                 const std::string& context_preamble,
+                                // Per candidate key, the preamble cut after that inclusion,
+                                // for a pair header's inclusions. TODO/44 (B).
+                                const std::map<std::string, PairContext>& pair_contexts,
                                 SplitResult& result,
                                 const std::string& output_dir,
                                 const std::vector<std::string>& all_flags,
@@ -4218,15 +4682,20 @@ static void resolve_header_deps(CXTranslationUnit tu,
                                 bool parse_clean,
                                 bool verbose,
                                 std::ostream& out) {
-    for (const auto& inc_path : candidates) {
-        if (verbose) out << "\n[auto-split] " << inc_path << "\n";
+    for (const auto& key : candidates) {
+        if (verbose) out << "\n[auto-split] " << key << "\n";
 
-        auto it = harvest.find(inc_path);
+        auto it = harvest.find(key);
         std::vector<FunctionInfo> fns =
             (it == harvest.end()) ? std::vector<FunctionInfo>() : it->second;
-        auto vit = var_harvest.find(inc_path);
+        auto vit = var_harvest.find(key);
         std::vector<VariableInfo> vars =
             (vit == var_harvest.end()) ? std::vector<VariableInfo>() : vit->second;
+
+        // `path#n` is inclusion n of a header read more than once. TODO/44 (B).
+        const auto decoded = decode_inclusion_key(key);
+        const std::string& inc_path = decoded.first;
+        const unsigned inclusion = decoded.second;
 
         const std::string src = read_file(inc_path);
         if (src.empty()) continue;
@@ -4243,31 +4712,44 @@ static void resolve_header_deps(CXTranslationUnit tu,
         if (fns.empty() && vars.empty()) {
             // Nothing to split, but record the decision so it is not reconsidered on every
             // invocation.
-            const std::string rel =
-                header_mirror_relpath(inc_path, unit_include_dirs(extra_flags));
+            const std::string rel = inclusion_mirror_relpath(
+                header_mirror_relpath(inc_path, unit_include_dirs(extra_flags)), inclusion);
             const std::string unit_dir =
                 (fs::path(split_include_root(output_dir)) / fs::path(rel).parent_path()).string();
             if (verbose)
-                out << "No function or variable definitions found in " << inc_path << "\n";
+                out << "No function or variable definitions found in " << key << "\n";
             write_skipped_header_manifest(unit_dir, fs::path(inc_path).filename().string(),
                                           inc_path, "no function or variable definitions");
             continue;
         }
 
+        const auto ctx = pair_contexts.find(key);
         SplitResult hdr_sr = split_unit(tu, inc_path, inc_path, src, fns, vars, referenced, true,
-                                        output_dir, all_flags, extra_flags, context_preamble,
-                                        parse_clean, verbose, out);
+                                        output_dir, all_flags, extra_flags,
+                                        ctx == pair_contexts.end() ? context_preamble
+                                                                   : ctx->second.after,
+                                        parse_clean, verbose, out, inclusion,
+                                        ctx == pair_contexts.end() ? std::string()
+                                                                   : ctx->second.before);
         if (!hdr_sr.success && verbose)
-            out << "[auto-split] warning: failed to split " << inc_path << "\n";
+            out << "[auto-split] warning: failed to split " << key << "\n";
     }
+
+    // The context preambles pieces actually include, split now or reused: those need a PCH.
+    for (const auto& ctx : pair_contexts)
+        if (g_split_headers.find(ctx.first) != g_split_headers.end())
+            result.context_preambles.push_back((fs::path(output_dir) / ctx.second.after).string());
 
     const std::vector<std::string> includes = inclusions_of(tu);
 
     std::set<std::string> seen_dirs;
+    std::map<std::string, unsigned> times_read;
     for (const auto& inc_path : includes) {
-        auto it = g_split_headers.find(inc_path);
+        // The n-th time a file is read, the copy split for its n-th inclusion, if any.
+        const std::string key = inclusion_key(inc_path, ++times_read[inc_path]);
+        auto it = g_split_headers.find(key);
         if (it != g_split_headers.end()) {
-            if (verbose) out << "[header-dep] " << inc_path << " -> " << it->second.split_dir << "\n";
+            if (verbose) out << "[header-dep] " << key << " -> " << it->second.split_dir << "\n";
             if (seen_dirs.insert(it->second.split_dir).second)
                 result.header_obj_dirs.push_back(it->second.split_dir);
             for (const auto& cpp : it->second.compilable_files) {
@@ -4316,9 +4798,22 @@ static void register_header_manifest(const fs::path& manifest_path,
         if (!f.empty()) info.compilable_files.push_back(f);
     }
 
+    // A copy under include/_inclusion/<n>/ serves inclusion n of the header. TODO/44 (B).
+    unsigned inclusion = 1;
+    {
+        std::error_code ec;
+        const fs::path rel = fs::relative(manifest_path, include_root, ec);
+        auto it = rel.begin();
+        if (!ec && it != rel.end() && *it == "_inclusion" && ++it != rel.end()) {
+            const std::string n = it->string();
+            if (!n.empty() && std::all_of(n.begin(), n.end(), ::isdigit))
+                inclusion = static_cast<unsigned>(std::stoul(n));
+        }
+    }
+
     // An empty list is how a header that was examined and deliberately not split is recorded.
     if (!abs_path.empty() && !info.compilable_files.empty())
-        g_split_headers[abs_path] = std::move(info);
+        g_split_headers[inclusion_key(abs_path, inclusion)] = std::move(info);
 }
 
 static void load_header_manifests(const std::string& output_dir) {
@@ -4480,9 +4975,12 @@ static void emit_split_files(CXTranslationUnit tu,
                              const std::string& output_dir,
                              const std::string& include_root,
                              const std::string& unit_tag,
+                             unsigned inclusion,
                              const std::string& preamble_filename,
                              const std::string& preamble_path,
                              const std::string& definitions_filename,
+                             const std::string& definitions_context,
+                             const std::string& definitions_variant,
                              const std::vector<std::string>& all_flags,
                              const std::vector<std::string>& extra_flags,
                              const std::string& context_preamble,
@@ -4544,7 +5042,8 @@ static void emit_split_files(CXTranslationUnit tu,
         content << "#include \"" << preamble_filename << "\"\n";
         // The definitions header carries what may exist in only one object, so exactly one
         // piece includes it. Which one does not matter; the first compilable one will do.
-        if (!definitions_filename.empty() && !definitions_emitted && !should_keep_in_header(fn)) {
+        if (!definitions_filename.empty() && !definitions_emitted && !should_keep_in_header(fn) &&
+            definitions_variant.empty()) {
             content << "#include \"" << definitions_filename << "\"\n";
             definitions_emitted = true;
         }
@@ -4755,9 +5254,16 @@ static void emit_split_files(CXTranslationUnit tu,
                 << "// one object. No split piece was compiled to carry them.\n";
         content << "// Source: " << input_path << "\n";
         content << "// ---\n\n";
-        if (!context_preamble.empty())
-            content << "#include \"" << context_preamble << "\"\n";
-        content << "#include \"" << definitions_filename << "\"\n";
+        if (!definitions_variant.empty()) {
+            // A pair header's inclusion: the context up to its #include line, then the
+            // copy's variant with the definitions in place.
+            content << "#include \"" << definitions_context << "\"\n";
+            content << "#include \"" << definitions_variant << "\"\n";
+        } else {
+            if (!context_preamble.empty())
+                content << "#include \"" << context_preamble << "\"\n";
+            content << "#include \"" << definitions_filename << "\"\n";
+        }
         const std::string new_content = content.str();
         if (!fs::exists(out_path) || read_file(out_path) != new_content) {
             std::ofstream ofs(out_path);
@@ -4806,9 +5312,11 @@ static void emit_split_files(CXTranslationUnit tu,
         hdr_info.split_dir = fs::absolute(include_root).string();
         hdr_info.preamble_path = preamble_path;
         hdr_info.compilable_files = result.compilable_files;
-        g_split_headers[abs_path] = std::move(hdr_info);
+        // The manifest names the original, which is what the depfile has to name; which
+        // inclusion it is for is in its path.
+        g_split_headers[inclusion_key(abs_path, inclusion)] = std::move(hdr_info);
         write_header_manifest(output_dir, preamble_filename, abs_path, result.compilable_files);
-        if (verbose) out << "Registered split header: " << abs_path << " (" << result.compilable_files.size() << " compilable files)\n";
+        if (verbose) out << "Registered split header: " << inclusion_key(abs_path, inclusion) << " (" << result.compilable_files.size() << " compilable files)\n";
     }
 }
 
@@ -4853,6 +5361,7 @@ static SplitResult do_split(const std::string& input_path,
     std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
     size_t prefix_in_pch = 0;   // bytes of the source the prefix PCH already holds
+    std::string prefix_path;    // the include block the prefix PCH was built from
     if (input_is_header && !header_has_include_guard(source)) {
         if (verbose)
             out << "Skipping " << input_path
@@ -4884,8 +5393,7 @@ static SplitResult do_split(const std::string& input_path,
         if (!prefix.empty()) {
             std::error_code ec;
             fs::create_directories(unit_dir, ec);
-            const std::string prefix_path =
-                (fs::path(unit_dir) / (unit_tag + "_prefix.h")).string();
+            prefix_path = (fs::path(unit_dir) / (unit_tag + "_prefix.h")).string();
             if (!fs::exists(prefix_path) || read_file(prefix_path) != prefix) {
                 std::ofstream ofs(prefix_path);
                 if (ofs.is_open()) ofs << prefix;
@@ -4998,24 +5506,39 @@ static SplitResult do_split(const std::string& input_path,
     // One walk of this translation unit yields the inventory for the file itself and for
     // every header it should split, each seen in the context its includer establishes.
     // Deciding the header set first keeps the walk from recording functions nobody wants.
-    const std::vector<std::string> candidates =
+    g_pair_headers.clear();
+    g_file_bases.clear();
+    g_preamble_include_rewrites.clear();
+    if (!input_is_header) {
+        std::error_code ec;
+        collect_inclusion_sites(tu, fs::path(abs_path).lexically_normal().string(),
+                                prefix_path.empty()
+                                    ? std::string()
+                                    : fs::absolute(prefix_path, ec).lexically_normal().string());
+    }
+    std::vector<std::string> candidates =
         input_is_header ? std::vector<std::string>()
                         : header_split_candidates(tu, abs_path, output_dir, extra_flags,
                                                   verbose, out);
 
-    if (!g_unsplittable_header.empty()) {
+    auto decline_for_header = [&]() {
         g_declined = true;
         std::cerr << "[cpp-splitter] not splitting " << input_path << ": "
                   << g_unsplittable_header
                   << " is included more than once with no include guard and defines a"
-                     " function with external linkage; left unsplit it would reach every"
-                     " piece\n";
+                     " function with external linkage, and "
+                  << g_unsplittable_header_reason
+                  << "; left unsplit it would reach every piece\n";
         clang_disposeTranslationUnit(tu);
         clang_disposeIndex(index);
+    };
+    if (!g_unsplittable_header.empty()) {
+        decline_for_header();
         return result;
     }
 
-    std::set<std::string> wanted(candidates.begin(), candidates.end());
+    std::set<std::string> wanted;
+    for (const auto& c : candidates) wanted.insert(decode_inclusion_key(c).first);
     wanted.insert(abs_path);
 
     HarvestMap harvest;
@@ -5023,6 +5546,16 @@ static SplitResult do_split(const std::string& input_path,
     VisitorData vd{tu, &wanted, &harvest, &var_harvest};
     CXCursor root = clang_getTranslationUnitCursor(tu);
     clang_visitChildren(root, visitor, &vd);
+
+    if (!g_pair_headers.empty()) {
+        attribute_pair_inclusions(harvest, var_harvest, candidates,
+                                  files_with_external_definitions(tu), abs_path, source,
+                                  unit_include_dirs(extra_flags), verbose, out);
+        if (!g_unsplittable_header.empty()) {
+            decline_for_header();
+            return result;
+        }
+    }
 
     std::vector<FunctionInfo> functions;
     {
@@ -5048,8 +5581,13 @@ static SplitResult do_split(const std::string& input_path,
         // Split pieces of this unit's headers include this preamble first, so they compile
         // in the context the header was harvested in.
         const std::string tu_preamble = fs::path(abs_path).stem().string() + "_preamble.h";
+        std::map<std::string, PairContext> pair_contexts;
+        if (!g_pair_headers.empty())
+            pair_contexts = write_pair_context_preambles(
+                (fs::path(output_dir) / tu_preamble).string(), source,
+                unit_include_dirs(extra_flags), verbose, out);
         resolve_header_deps(tu, harvest, var_harvest, referenced, candidates, tu_preamble,
-                            result, output_dir,
+                            pair_contexts, result, output_dir,
                             all_flags, extra_flags, parse_errors == 0, verbose, out);
         // Once every copy that is going to exist does, and not before. TODO/31.
         fix_mirror_quoted_includes(output_dir, unit_include_dirs(extra_flags), verbose, out);
@@ -5246,6 +5784,8 @@ static void write_split_cache(const std::string& split_dir, const std::string& h
     for (const auto& d : sr.header_obj_dirs) ofs << d << "\n";
     ofs << sr.header_obj_files.size() << "\n";
     for (const auto& f : sr.header_obj_files) ofs << f << "\n";
+    ofs << sr.context_preambles.size() << "\n";
+    for (const auto& f : sr.context_preambles) ofs << f << "\n";
 }
 
 static bool read_split_cache(const std::string& split_dir, const std::string& hash,
@@ -5284,6 +5824,8 @@ static bool read_split_cache(const std::string& split_dir, const std::string& ha
     if (!read_list(sr.compilable_files)) return false;
     if (!read_list(sr.header_obj_dirs)) return false;
     if (!read_list(sr.header_obj_files)) return false;
+    // Written since TODO/44 (B); a cache from before has no list here.
+    if (!read_list(sr.context_preambles)) sr.context_preambles.clear();
     sr.success = true;
     return true;
 }
@@ -5341,6 +5883,9 @@ static bool try_incremental_split(const std::string& split_dir,
         if (it->path().extension() != ".harvest") continue;
         HarvestFile candidate;
         if (read_harvest(it->path(), candidate) && candidate.path == file) {
+            // A pair header has one harvest per inclusion, and a piece of either may hold
+            // the edit. TODO/44 (B).
+            if (found) return refuse("the changed file was split once per inclusion");
             hf = candidate;
             // Where this file's split output was written: its pieces, its `.keeps`, and -- for
             // a definition no piece was emitted for -- this unit's rewritten copy of the file.
@@ -5348,7 +5893,6 @@ static bool try_incremental_split(const std::string& split_dir,
             // definition may be one of the kept ones and have no piece.
             harvest_dir = it->path().parent_path().string();
             found = true;
-            break;
         }
     }
     if (!found) return refuse("the changed file has no harvest record");
@@ -6100,12 +6644,16 @@ static int run_as_launcher(int argc, char* argv[]) {
                        {"-I" + split_include_root(split_dir),
                         "-I" + fs::absolute(input_file).parent_path().string()});
       build_pch(sr.preamble_filename, actual_compiler, "", pch_flags, split_dir, verbose, std::cerr);
+      for (const auto& ctx : sr.context_preambles)
+          build_pch(ctx, actual_compiler, "", pch_flags, split_dir, verbose, std::cerr);
     } else {
       auto pch_flags = other_flags;
       pch_flags.insert(pch_flags.begin(),
                        {"-I" + split_include_root(split_dir),
                         "-I" + fs::absolute(input_file).parent_path().string()});
       build_pch(sr.preamble_filename, compiler, "", pch_flags, split_dir, verbose, std::cerr);
+      for (const auto& ctx : sr.context_preambles)
+          build_pch(ctx, compiler, "", pch_flags, split_dir, verbose, std::cerr);
     }
 
     // Whether the dependency-tracking flags have been handed to some compile yet.
@@ -6489,6 +7037,8 @@ int main(int argc, char* argv[]) {
         pch_flags.push_back("-I" + fs::absolute(input_path).parent_path().string());
         for (const auto& f : extra_flags) pch_flags.push_back(f);
         bool pch_ok = build_pch(sr.preamble_filename, cxx_compiler, "", pch_flags, output_dir, true, std::cout);
+        for (const auto& ctx : sr.context_preambles)
+            build_pch(ctx, cxx_compiler, "", pch_flags, output_dir, true, std::cout);
         if (pch_ok) std::cout << "\n";
 
         std::vector<CompileJob> jobs;

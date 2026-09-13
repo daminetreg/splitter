@@ -179,19 +179,17 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
             -P ${cpp_splitter_test_dir}/cmake/RunSplitTest.cmake)
 endforeach()
 
-# A unit the splitter must decline -- split nothing, say why, compile whole, be right.
-#   pair_header_main         a header included twice with no include guard, defining an
-#                            external function the second time (TODO/42 1)
+# A header included twice with no include guard, defining an external function the second
+# time: each inclusion is split on its own, the second into a copy of its own, and the unit's
+# preamble names that copy on its second #include line. TODO/44 (B).
 add_test(
-  NAME split.pair_header_declines
+  NAME split.pair_header
   COMMAND ${CMAKE_COMMAND}
           -DSPLITTER=$<TARGET_FILE:cpp-splitter>
           -DSOURCE=${cpp_splitter_test_dir}/pair_header_main.cpp
           -DWORKDIR=${cpp_splitter_test_output}/pair_header
           -DCXX=${CMAKE_CXX_COMPILER}
-          "-DEXPECT_MESSAGE=included more than once with no include guard and defines a function with external linkage"
-          -DEXPECT_OUTPUT=31
-          -P ${cpp_splitter_test_dir}/cmake/RunDeclineTest.cmake)
+          -P ${cpp_splitter_test_dir}/cmake/RunPairHeaderSplitTest.cmake)
 
 # The libclang prefix PCH, built from a copy of the include block, has to resolve quoted
 # includes against the unit's own directory. TODO/42 (5).
