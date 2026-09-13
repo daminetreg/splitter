@@ -157,6 +157,8 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   defaulted_out_of_line_main  `T::~T() = default;` written out of line (TODO/42 4)
 #   static_defines_type_main  a static whose declaration defines its type (TODO/42 2)
 #   static_stateless_lambda_main  a static captureless lambda, kept per piece (TODO/42 4)
+#   static_unnamed_type_main  a static of an unnamed struct type: its users stay with it (TODO/44)
+#   static_unnamed_ns_type_main  a static of a class from an unnamed namespace, likewise (TODO/44)
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
                 always_inline_main impl_include_main preamble_linkage macro_members_main
                 retracted_macro_main ipp_ctor_main multiline_conditional_main
@@ -165,7 +167,8 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
                 main_in_header_main no_linkage_type_main extern_c_main
                 tail_include_main macro_group_main static_name_shared_main
                 conditional_declarator_main defaulted_out_of_line_main
-                static_defines_type_main static_stateless_lambda_main)
+                static_defines_type_main static_stateless_lambda_main
+                static_unnamed_type_main static_unnamed_ns_type_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -176,10 +179,9 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
             -P ${cpp_splitter_test_dir}/cmake/RunSplitTest.cmake)
 endforeach()
 
-# Units the splitter must decline -- split nothing, say why, compile whole, be right.
+# A unit the splitter must decline -- split nothing, say why, compile whole, be right.
 #   pair_header_main         a header included twice with no include guard, defining an
 #                            external function the second time (TODO/42 1)
-#   static_unnamed_type_main a static variable of an unnamed struct type (TODO/42 4)
 add_test(
   NAME split.pair_header_declines
   COMMAND ${CMAKE_COMMAND}
@@ -189,16 +191,6 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           "-DEXPECT_MESSAGE=included more than once with no include guard and defines a function with external linkage"
           -DEXPECT_OUTPUT=31
-          -P ${cpp_splitter_test_dir}/cmake/RunDeclineTest.cmake)
-add_test(
-  NAME split.static_unnamed_type_declines
-  COMMAND ${CMAKE_COMMAND}
-          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
-          -DSOURCE=${cpp_splitter_test_dir}/static_unnamed_type_main.cpp
-          -DWORKDIR=${cpp_splitter_test_output}/static_unnamed_type
-          -DCXX=${CMAKE_CXX_COMPILER}
-          "-DEXPECT_MESSAGE=has a type no other translation unit can name"
-          -DEXPECT_OUTPUT=42
           -P ${cpp_splitter_test_dir}/cmake/RunDeclineTest.cmake)
 
 # The libclang prefix PCH, built from a copy of the include block, has to resolve quoted

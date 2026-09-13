@@ -113,6 +113,10 @@ struct FunctionInfo {
     // the translation unit. The rename that lets pieces share a static is textual and would
     // reach both, so such a static stays in the preamble instead.
     bool name_shared = false;
+    // References a static variable whose type no other translation unit can name. The
+    // variable moves whole to the definitions header, and so does this function, whatever
+    // its linkage: a `static` one is renamed like any other so the pieces can still call it.
+    bool kept_with_variable = false;
     // `= default;` or `= delete;` out of line: the extent was carried through the `;`, and
     // there is no body to re-slice.
     bool is_defaulted_or_deleted = false;
@@ -260,6 +264,12 @@ struct VariableInfo {
     bool inline_in_place = false;
     bool internal_linkage = false;    // `static`, or enclosed by an unnamed namespace
     bool type_lacks_linkage = false;  // its type cannot be named from another translation unit
+    std::string usr;                  // what a reference to it records (see EmitGraph)
+    // A `static` whose type no other translation unit can name. It cannot be shared by the
+    // pieces and must not be copied into each, so it moves whole -- `static` kept, type
+    // definition included, no declaration left behind -- to the definitions header, and every
+    // function that references it goes there with it. TODO/44.
+    bool anchors_users = false;
     // const or constexpr, asked of the type rather than read off the text. The keyword is
     // routinely a macro -- Boost.Filesystem writes BOOST_CONSTEXPR_OR_CONST -- and such a
     // variable has to stay where its users can see it as a constant expression.
@@ -271,11 +281,6 @@ struct VariableInfo {
     std::string replacement;          // what the preamble gets in place of the definition
 };
 
-// Set when a variable that would have to move out of the preamble has a type no other
-// translation unit can name. Every piece is another translation unit, so the unit cannot be
-// split: kept in the preamble the variable is one object per piece, moved it cannot be
-// declared. See prepare_variables().
-static std::string g_unsplittable_variable;
 // Set by do_split() when it declined the unit -- decided before anything was written that it
 // cannot be split correctly -- as opposed to failed. The two are reported apart: a fallback
 // is a defect, a decline is a limit the tool stated.
@@ -310,6 +315,11 @@ struct EmitGraph {
     std::set<std::string> roots;
     std::vector<std::string> stack;                      // enclosing definitions
 };
+
+// The last graph's references, kept for prepare_functions(): which definitions refer to a
+// given USR. A variable of a type no other translation unit can name anchors every function
+// that references it to the definitions unit (TODO/44), and this is how they are found.
+static std::map<std::string, std::set<std::string>> g_references;
 
 static CXChildVisitResult record_reference(CXCursor node, CXCursor, CXClientData payload) {
     auto* g = static_cast<EmitGraph*>(payload);
@@ -381,6 +391,7 @@ static void collect_emitted(CXTranslationUnit tu,
     EmitGraph graph;
     graph.main_file = fs::path(main_file).lexically_normal().string();
     clang_visitChildren(clang_getTranslationUnitCursor(tu), build_emit_graph, &graph);
+    g_references = graph.calls;
 
     // Everything reachable from a root is emitted; nothing else is.
     out = graph.roots;
@@ -508,6 +519,7 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
     // `inline` is read from the pretty-printed declaration rather than the source text
     // because, like constexpr on a function, it is routinely spelled as a macro.
     info.internal_linkage = clang_getCursorLinkage(cursor) != CXLinkage_External;
+    info.usr = cx_to_string(clang_getCursorUSR(cursor));
     // The declaration that would replace a moved variable names its type. If that type is
     // one another translation unit cannot name -- a class in an unnamed namespace, or a
     // local or unnamed class -- the variable cannot be defined anywhere but here, and the
@@ -940,6 +952,7 @@ static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_specialization)   return "explicit specialization";
     if (fn.is_virtual)          return "virtual member function";
     if (fn.in_unnamed_ns)       return "enclosed by an unnamed namespace";
+    if (fn.kept_with_variable)  return "uses a static no other translation unit can name; kept with it";
     if (fn.name_shared)         return "static whose name another function in the unit also has; a rename would reach both";
     if (fn.is_static)           return "internal linkage in a header";
     if (fn.name == "main" && fn.scope_chain.empty()) return "the program's entry point";
@@ -1377,7 +1390,10 @@ static StaticRenameMap build_static_rename_map(const std::vector<FunctionInfo>& 
         for (const auto& e : fn.scope_chain)
             if (e.kind == ScopeKind::Class) { is_member = true; break; }
         if (is_member) continue;
-        if (fn.keep_in_header) continue;   // never moved, so never renamed
+        // Never moved, so never renamed -- except one kept *with* a variable: it goes to the
+        // definitions header rather than to a piece, and a `static` one has to be renamed so
+        // the pieces can call it through the declaration left in its place.
+        if (fn.keep_in_header && !fn.kept_with_variable) continue;
 
         // Overloads share one name and so one mangled name; entering it twice would make
         // the rewriter replace the same position twice and corrupt the identifier.
@@ -2248,11 +2264,16 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
         if (!var.move_out && var.internal_linkage && !var.is_const && !input_is_header &&
             !var.in_unnamed_ns && !var.is_member && !var.name.empty()) {
             if (var.type_lacks_linkage) {
-                if (g_unsplittable_variable.empty()) g_unsplittable_variable = var.name;
-                continue;
+                // No other translation unit can name its type, so no `extern` can stand in
+                // for it and no piece may hold a copy. It moves whole to the definitions
+                // header, `static` and type definition included, with nothing left behind;
+                // every function that references it goes there with it (TODO/44).
+                var.anchors_users = true;
+                var.move_out = true;
+            } else {
+                var.rename_and_move = true;
+                var.move_out = true;
             }
-            var.rename_and_move = true;
-            var.move_out = true;
         }
         if (!var.move_out) continue;
         if (var.end_offset > source.size() || var.start_offset >= var.end_offset) continue;
@@ -2290,6 +2311,17 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
         const std::string head_blanked = blank_code_noise(head);
         if (contains_decl_token(head_blanked, "inline") ||
             contains_decl_token(head_blanked, "constexpr")) {
+            i = j;
+            continue;
+        }
+
+        // A variable whose type no other translation unit can name: the whole declaration
+        // moves, text as written, and the preamble gets nothing in its place -- the only
+        // code that names it moves too. Several declarators in one such declaration move
+        // together, since the text is one.
+        if (group.anchors_users) {
+            group.replacement.clear();
+            kept.push_back(std::move(group));
             i = j;
             continue;
         }
@@ -2635,13 +2667,21 @@ static std::string generate_preamble(const std::string& source,
                         decl = g->return_type + " " + g->qualified_name + ";";
                     if (!decl.empty()) preamble += decl + "\n";
                 }
-            } else if (definitions && r.fn && !has_vague_linkage(*r.fn) &&
-                !r.fn->uses_undefined_macro &&
-                (r.fn->macro_invocation || extent_is_a_definition(*r.fn, text))) {
+            } else if (definitions && r.fn &&
+                       (r.fn->kept_with_variable ||
+                        (!has_vague_linkage(*r.fn) && !r.fn->uses_undefined_macro &&
+                         (r.fn->macro_invocation || extent_is_a_definition(*r.fn, text))))) {
                 // Kept, but it may exist in only one object. Out of the shared preamble it
                 // goes; a member is already declared by its class, and a free function gets
                 // a declaration left where its body was. The text is lifted out of whatever
                 // namespaces enclosed it, so they have to be reopened around it.
+                //
+                // A function kept *with* a variable no other translation unit can name goes
+                // here whatever its linkage. A `static` one loses the keyword: it was renamed
+                // with the rest (build_static_rename_map()), and the pieces call it through
+                // the declaration left below, which names the mangled form.
+                if (r.fn->kept_with_variable && r.fn->is_static)
+                    text = strip_decl_specifier(text, "static");
                 *definitions += wrap_in_namespaces(text, r.fn->scope_chain);
                 *definitions += "\n";
                 if (r.fn->member_decl.empty()) {
@@ -3961,14 +4001,32 @@ static SplitResult split_unit(CXTranslationUnit tu,
     prepare_variables(variables, functions, source, unit_tag, input_is_header);
     dump_keep_decisions(functions);
 
-    if (!input_is_header && !g_unsplittable_variable.empty()) {
-        g_declined = true;
-        std::cerr << "[cpp-splitter] not splitting " << input_path << ": the static variable `"
-                  << g_unsplittable_variable
-                  << "` has a type no other translation unit can name, so it can neither"
-                     " be shared by the pieces nor copied into each\n";
-        result.success = false;
-        return result;
+    // A static variable whose type no other translation unit can name moves whole to the
+    // definitions header (prepare_variables()), and every function that references it goes
+    // there too -- that is the one translation unit that may hold single instances, and the
+    // reference is what a template or a header-defined function could not carry along. Those
+    // decline the unit, with the reason, as the variable alone did before TODO/44.
+    if (!input_is_header) {
+        for (const auto& var : variables) {
+            if (!var.anchors_users || var.usr.empty()) continue;
+            for (auto& fn : functions) {
+                auto it = g_references.find(fn.usr);
+                if (it == g_references.end() || !it->second.count(var.usr)) continue;
+                if (fn.is_template || fn.in_class_template || is_included_file(fn.file)) {
+                    g_declined = true;
+                    std::cerr << "[cpp-splitter] not splitting " << input_path
+                              << ": the static variable `" << var.name
+                              << "` has a type no other translation unit can name, and `"
+                              << fn.signature << "` refers to it from a "
+                              << (is_included_file(fn.file) ? "header" : "template")
+                              << ", which every piece would carry\n";
+                    result.success = false;
+                    return result;
+                }
+                fn.keep_in_header = true;
+                fn.kept_with_variable = true;
+            }
+        }
     }
 
     // A translation unit with nothing of its own to split still needs its preamble on disk:
