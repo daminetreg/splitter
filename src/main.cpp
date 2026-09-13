@@ -105,6 +105,10 @@ struct FunctionInfo {
     std::vector<ScopeEntry> scope_chain;
     bool is_template;
     bool is_static;
+    // Defined inside `extern "C"` -- by block, or by a macro such as OpenCV's CV_IMPL. The
+    // piece has to say so again, or it defines a C++-linkage function of the same name and
+    // the C-linkage declaration left in the preamble resolves to nothing.
+    bool c_linkage = false;
 
     // Set by prepare_functions() once the whole file has been visited.
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
@@ -596,8 +600,15 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
         // Recurse regardless of file: a namespace opened in one header can hold definitions
         // belonging to another, and the enclosing scopes are what give a definition its
         // qualification.
+        // A linkage specification too. OpenCV's C API is `CV_IMPL void cvMaxS(...) {...}`
+        // with CV_IMPL expanding to `extern "C"`; a harvest that stopped here left every
+        // such definition in the preamble verbatim, and every header piece emitted it.
+        // libclang 13 reports the specification as CXCursor_UnexposedDecl (kind 1), not as
+        // CXCursor_LinkageSpec; recursing into an unexposed declaration is harmless, since
+        // only a definition among its children is acted on.
         if (kind == CXCursor_Namespace || kind == CXCursor_ClassDecl ||
-            kind == CXCursor_StructDecl || kind == CXCursor_ClassTemplate) {
+            kind == CXCursor_StructDecl || kind == CXCursor_ClassTemplate ||
+            kind == CXCursor_LinkageSpec || kind == CXCursor_UnexposedDecl) {
             return CXChildVisit_Recurse;
         }
         return CXChildVisit_Continue;
@@ -700,6 +711,18 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     bool innermost = true;   // still counting unnamed namespaces closest to the function
     while (true) {
         CXCursorKind pk = clang_getCursorKind(parent_cursor);
+        if (pk == CXCursor_LinkageSpec || pk == CXCursor_UnexposedDecl) {
+            // `extern "C"` is a declaration context but not a scope: it contributes no
+            // qualifier, and the walk continues to whatever encloses it. libclang 13
+            // reports a linkage specification as CXCursor_UnexposedDecl, not as the
+            // CXCursor_LinkageSpec its header declares, so both are accepted. Whether it is
+            // "C" rather than "C++" is read off the mangled name, which libclang gives and
+            // the cursor does not: a C-linkage function mangles to its own name.
+            const std::string mangled = cx_to_string(clang_Cursor_getMangling(cursor));
+            if (mangled == info.name || mangled == "_" + info.name) info.c_linkage = true;
+            parent_cursor = clang_getCursorSemanticParent(parent_cursor);
+            continue;
+        }
         if (pk == CXCursor_ClassDecl || pk == CXCursor_StructDecl ||
             pk == CXCursor_UnionDecl || pk == CXCursor_ClassTemplate ||
             pk == CXCursor_ClassTemplatePartialSpecialization ||
@@ -4117,6 +4140,12 @@ static void emit_split_files(CXTranslationUnit tu,
 
         for (const auto& c : fn.conditionals)
             content << c << "\n";
+
+        // The linkage specification the definition was written under, restated: the
+        // FunctionDecl's own extent starts after `extern "C"`, so the piece would otherwise
+        // define a C++-linkage function beside the C-linkage declaration the preamble keeps.
+        if (fn.c_linkage)
+            body = "extern \"C\" {\n" + body + "\n}";
 
         if (!fn.scope_chain.empty()) {
             content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
