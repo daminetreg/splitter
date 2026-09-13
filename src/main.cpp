@@ -2360,15 +2360,19 @@ static std::string generate_preamble(const std::string& source,
         bool keep;
         const FunctionInfo* fn;
         const VariableInfo* var;
+        // Every function whose extent was folded into this range -- one macro invocation
+        // expanding to several definitions. `fn` is null for such a range; this is what
+        // remains known about it.
+        std::vector<const FunctionInfo*> group;
     };
     std::vector<Range> ranges;
     for (const auto& fn : functions) {
-        ranges.push_back({fn.start_offset, fn.end_offset, should_keep_in_header(fn), &fn, nullptr});
+        ranges.push_back({fn.start_offset, fn.end_offset, should_keep_in_header(fn), &fn, nullptr, {}});
     }
     // Only the variables that move are listed. One that stays is ordinary text between the
     // function extents and is copied through without an entry, which is what it already was.
     for (const auto& var : variables) {
-        ranges.push_back({var.start_offset, var.end_offset, false, nullptr, &var});
+        ranges.push_back({var.start_offset, var.end_offset, false, nullptr, &var, {}});
     }
     std::sort(ranges.begin(), ranges.end(),
               [](const Range& a, const Range& b) {
@@ -2400,6 +2404,9 @@ static std::string generate_preamble(const std::string& source,
             if (!merged.empty() && r.start < merged.back().end) {
                 Range& prev = merged.back();
                 if (r.end > prev.end) prev.end = r.end;
+                if (prev.fn) prev.group.push_back(prev.fn);
+                if (r.fn) prev.group.push_back(r.fn);
+                if (r.var || prev.var) prev.group.clear();   // a variable in it: not handled
                 prev.keep = true;
                 prev.fn = nullptr;
                 prev.var = nullptr;
@@ -2449,7 +2456,44 @@ static std::string generate_preamble(const std::string& source,
             // second placement decision. It stays here instead, emitted `inline` so that the
             // copy every piece gets merges rather than colliding -- which is the same
             // treatment a definition split out of a header already receives.
-            if (definitions && r.fn && !has_vague_linkage(*r.fn) &&
+            // A folded group -- one macro invocation, several definitions -- gets the same
+            // treatment as one definition when every function in it may exist in only one
+            // object and none is a class member: the invocation moves whole to the
+            // definitions header, and a declaration for each function takes its place, since
+            // no declarator in the source covers the group and there is nothing to leave
+            // behind otherwise. A group mixing inline and non-inline functions is left where
+            // it is: a piece that calls an inline one needs its definition, and the
+            // definitions object does not emit an inline function nothing there uses.
+            // OpenCV's DEFINE_SIMD_ALL(recip, ...) expands to eight external functions and
+            // was emitted by every piece of the unit.
+            bool group_moves = false;
+            if (definitions && !r.group.empty()) {
+                group_moves = true;
+                for (const FunctionInfo* g : r.group) {
+                    if (has_vague_linkage(*g) || g->uses_undefined_macro ||
+                        !g->member_decl.empty() || g->in_class_template ||
+                        g->in_anonymous_class || g->is_static || g->in_unnamed_ns)
+                        group_moves = false;
+                    for (const auto& sc : g->scope_chain)
+                        if (sc.kind == ScopeKind::Class) group_moves = false;
+                }
+            }
+            if (group_moves) {
+                *definitions += wrap_in_namespaces(text, r.group.front()->scope_chain);
+                *definitions += "\n";
+                for (const FunctionInfo* g : r.group) {
+                    // The source extent is the macro invocation, so no declarator can be
+                    // read out of it; the declaration is spelled from what libclang
+                    // resolved: the result type and the display name, which is the name
+                    // with its parameter types. Default arguments are not carried; a piece
+                    // relying on one fails to compile and the unit falls back, which is
+                    // the visible outcome rather than the silent one.
+                    std::string decl = generate_forward_decl_inplace(*g, stem);
+                    if (decl.empty() && !g->return_type.empty() && !g->qualified_name.empty())
+                        decl = g->return_type + " " + g->qualified_name + ";";
+                    if (!decl.empty()) preamble += decl + "\n";
+                }
+            } else if (definitions && r.fn && !has_vague_linkage(*r.fn) &&
                 !r.fn->uses_undefined_macro &&
                 (r.fn->macro_invocation || extent_is_a_definition(*r.fn, text))) {
                 // Kept, but it may exist in only one object. Out of the shared preamble it
