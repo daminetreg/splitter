@@ -3837,13 +3837,24 @@ static std::vector<std::string> header_split_candidates(
             if (verbose) out << "[auto-split] not split, system header: " << inc_path << "\n";
             continue;
         }
+        const std::string rel = header_mirror_relpath(inc_path, inc_dirs);
+        const std::string manifest = (fs::path(include_root) / (rel + ".split")).string();
+
+        // The pair rule's decision from an earlier run is in the manifest, and the decline
+        // that goes with it has to be made again on every run, before any branch below
+        // reuses the manifest and moves on: on the run after the first, OpenCV's
+        // arithm.dispatch.cpp came through, split 106 header pieces, and failed at the
+        // relocatable link, which is the slow fallback the decline exists to replace.
+        if (external_definers.count(inc_path) && g_unsplittable_header.empty() &&
+            fs::exists(manifest) &&
+            read_file(manifest).find("# not split: no include guard") != std::string::npos)
+            g_unsplittable_header = inc_path;
+
         if (g_split_headers.find(inc_path) != g_split_headers.end()) {
             if (verbose) out << "[auto-split] already split: " << inc_path << "\n";
             continue;
         }
 
-        const std::string rel = header_mirror_relpath(inc_path, inc_dirs);
-        const std::string manifest = (fs::path(include_root) / (rel + ".split")).string();
         bool stale = false;
         if (fs::exists(manifest)) {
             std::error_code ec;
@@ -6237,6 +6248,13 @@ static int run_as_launcher(int argc, char* argv[]) {
                 std::cerr << "cpp-splitter: relocatable link failed using '" << linker
                           << "'\n";
                 split_build_failed = true;
+                // The cache and the input hashes were written before this link, and a run
+                // that reuses them goes straight to the same link and fails the same way,
+                // every time, without a parse in between to notice anything changed. A
+                // split whose link failed is not a split to remember.
+                std::error_code rm_ec;
+                fs::remove(fs::path(split_dir) / "split.cache", rm_ec);
+                fs::remove(fs::path(split_dir) / "inputs.hash", rm_ec);
             }
         }
     }
