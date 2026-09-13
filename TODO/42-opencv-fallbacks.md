@@ -29,7 +29,11 @@ In order of units affected:
 5. **The libclang parse errors** (96 units). Establish the cause first — the flags the parse
    receives against the flags the compile receives, on one unit — before attributing anything
    to it.
-6. **The 78 body-row refusals**, *the change is not confined to one definition*, in units
+6. **The split-on-cluster body row executes 4043 piece compiles** where the split-here row
+   sends 66 (`benchmarks/opencv-cmake-re.md`): pieces regenerated on a worker differ from those
+   regenerated here, so none is a cache hit. Diff one unit's tree from each side; if the
+   difference tracks the parse errors of (5), that is (5).
+7. **The 78 body-row refusals**, *the change is not confined to one definition*, in units
    whose harvest does record the edited extent. `try_incremental_split()` already says which
    hypothesis fails; run it on one refusing unit with the verbose output and read it.
 

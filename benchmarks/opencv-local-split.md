@@ -116,6 +116,9 @@ fail to link on any of these has not been tested; the benchmark links nothing ag
 - `-j16` on 32 cores, as for the Boost measurements.
 - Wall times are from one run.
 
+The same corpus through CMake RE on the cluster is in
+[`opencv-cmake-re.md`](opencv-cmake-re.md).
+
 ## Reproducing
 
 ```sh
