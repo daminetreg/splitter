@@ -3439,6 +3439,53 @@ static void emit_split_files(CXTranslationUnit tu,
 static void register_header_manifest(const fs::path& manifest_path,
                                      const std::string& include_root);
 
+// Every file the translation unit read that may hold a definition.
+//
+// clang_getInclusions() is not the whole list. With a precompiled preamble in play -- and one
+// is, see the parse flags in do_split() -- libclang 13 walks either the loaded source-location
+// table (the preamble's inclusions) or the local one, not both, so an include placed after the
+// unit's opening include block is never reported. OpenCV's filesystem.cpp ends with
+// `#include "plugin_loader.impl.hpp"`, which defines DynamicLib::~DynamicLib() out of line;
+// unreported, the header was never split, the destructor stayed in the preamble verbatim, and
+// every piece of the unit emitted it. Even when it was split, the same call decided whose
+// pieces were compiled and linked, so the split was written and then left out of the object.
+//
+// The list is therefore completed from the AST: every file a function or variable definition
+// sits in is appended, whatever reported its inclusion. Both callers use this one function so
+// that a header is never split by one and forgotten by the other.
+static std::vector<std::string> inclusions_of(CXTranslationUnit tu) {
+    std::vector<std::string> includes;
+    clang_getInclusions(tu, inclusion_visitor, &includes);
+
+    std::set<std::string> from_ast;
+    auto visit = [](CXCursor c, CXCursor, CXClientData d) -> CXChildVisitResult {
+        auto* files = static_cast<std::set<std::string>*>(d);
+        const CXCursorKind k = clang_getCursorKind(c);
+        const bool def_kind =
+            k == CXCursor_FunctionDecl || k == CXCursor_CXXMethod ||
+            k == CXCursor_Constructor || k == CXCursor_Destructor ||
+            k == CXCursor_ConversionFunction || k == CXCursor_FunctionTemplate ||
+            k == CXCursor_VarDecl;
+        if (def_kind && clang_isCursorDefinition(c)) {
+            CXFile f = nullptr;
+            clang_getFileLocation(clang_getCursorLocation(c), &f, nullptr, nullptr, nullptr);
+            if (f) {
+                std::error_code ec;
+                const std::string abs =
+                    fs::absolute(cx_to_string(clang_getFileName(f)), ec).lexically_normal().string();
+                if (!ec) files->insert(abs);
+            }
+            return CXChildVisit_Continue;
+        }
+        return CXChildVisit_Recurse;
+    };
+    clang_visitChildren(clang_getTranslationUnitCursor(tu), visit, &from_ast);
+    std::set<std::string> reported(includes.begin(), includes.end());
+    for (const auto& f : from_ast)
+        if (!reported.count(f)) includes.push_back(f);
+    return includes;
+}
+
 static std::vector<std::string> header_split_candidates(
         CXTranslationUnit tu,
         const std::string& main_file,
@@ -3450,8 +3497,7 @@ static std::vector<std::string> header_split_candidates(
     if (!auto_include_split_enabled())
         return candidates;
 
-    std::vector<std::string> includes;
-    clang_getInclusions(tu, inclusion_visitor, &includes);
+    const std::vector<std::string> includes = inclusions_of(tu);
 
     const auto inc_dirs = unit_include_dirs(extra_flags);
     const std::string include_root = split_include_root(output_dir);
@@ -3473,8 +3519,17 @@ static std::vector<std::string> header_split_candidates(
         // reports. An implementation include -- .ipp, .inc, .inl, .tcc -- is as splittable
         // as anything else, and Boost.Filesystem puts a whole translation unit's worth of
         // code in one.
-        if (is_stdlib_header(inc_path)) continue;
-        if (g_split_headers.find(inc_path) != g_split_headers.end()) continue;
+        // Every reason a header is not split is said, or a header that silently kept its
+        // definitions in the preamble -- and had every piece emit them -- cannot be told from
+        // one that was never included.
+        if (is_stdlib_header(inc_path)) {
+            if (verbose) out << "[auto-split] not split, system header: " << inc_path << "\n";
+            continue;
+        }
+        if (g_split_headers.find(inc_path) != g_split_headers.end()) {
+            if (verbose) out << "[auto-split] already split: " << inc_path << "\n";
+            continue;
+        }
 
         const std::string rel = header_mirror_relpath(inc_path, inc_dirs);
         const std::string manifest = (fs::path(include_root) / (rel + ".split")).string();
@@ -3498,6 +3553,7 @@ static std::vector<std::string> header_split_candidates(
             // pre-loaded stale header would be skipped rather than re-split, and header edits
             // would stop being detected.
             register_header_manifest(manifest, include_root);
+            if (verbose) out << "[auto-split] reusing an earlier split of " << inc_path << "\n";
             continue;
         }
 
@@ -3797,8 +3853,7 @@ static void resolve_header_deps(CXTranslationUnit tu,
             out << "[auto-split] warning: failed to split " << inc_path << "\n";
     }
 
-    std::vector<std::string> includes;
-    clang_getInclusions(tu, inclusion_visitor, &includes);
+    const std::vector<std::string> includes = inclusions_of(tu);
 
     std::set<std::string> seen_dirs;
     for (const auto& inc_path : includes) {
