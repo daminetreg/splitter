@@ -1,8 +1,8 @@
 # A minimal OpenCV through CMake RE, on the cluster
 
-One measurement set, from a single run of
+Two measurement sets, each from a single run of
 `BUILD_TYPE=Release CMAKE_RE_JOBS=500 REMOTE_SPLIT=1 ./benchmark-opencv-cmake-re.sh --distributed`
-on 13 September 2026. The corpus, the scenarios and the body target are those of
+on 13 September 2026: before TODO/42 and after it. The corpus, the scenarios and the body target are those of
 [`opencv-local-split.md`](opencv-local-split.md): OpenCV 4.11.0, `core` and `imgproc`, static,
 nothing optional, 158 C++ units; one line added to the body of `SparseMat::nzcount()` in
 `mat.inl.hpp`, a header all 158 units include and one emits.
@@ -22,63 +22,53 @@ cache. The last column is the splitter's own report of what the units did.
 
 ## Results
 
+### After TODO/42
+
 | scenario | splitter | build | fallbacks | remote | cached | what the 158 units did |
 |---|---|---:|---:|---:|---:|---|
-| full | no | 115.3s | 0 | 1 | 516 | — (served from cache: a plain build of the same tree preceded the run) |
-| full | split here | 322.6s | 61 | 7248 | 0 | 97 split here, 61 compiled whole; every piece executed |
-| full | split on cluster | 179.0s | 61 | 160 | 21738 | 158 split on the cluster; pieces served from cache |
-| no-op | no | 3.9s | 0 | 0 | 0 | — |
-| no-op | split here | 7.8s | 0 | 0 | 291 | all reused their split |
-| no-op | split on cluster | 7.7s | 0 | 0 | 291 | all reused their split |
-| one source | any | 3.9s | 0 | 0 | 0 | not re-mirrored: content unchanged |
-| one header | any | 3.9s | 0 | 0 | 0 | not re-mirrored: content unchanged |
+| full | no | 11.7s | 0 | 1 | 516 | served from cache |
+| full | split here | 398.4s | 3 | 8618 | 234 | 155 split here, 3 compiled whole; every piece executed |
+| full | split on cluster | 123.0s | 3 | 204 | 25941 | 155 split on the cluster; pieces served from cache |
+| no-op | any | 3.9–8.5s | 0 | 0 | 0–465 | reused |
+| one source / one header | any | 3.9s | 0 | 0 | 0 | not re-mirrored |
+| **one body** | **no** | **40.9s** | 0 | **158** | 0 | all 158 recompiled |
+| **one body** | **split here** | **16.8s** | 3 | **38** | 465 | 155 re-sliced, 3 compiled whole, 35 pieces recompiled |
+| **one body** | **split on cluster** | **22.5s** | 3 | **26** | 501 | 155 re-sliced, 3 compiled whole |
+
+### Before TODO/42
+
+| scenario | splitter | build | fallbacks | remote | cached | what the 158 units did |
+|---|---|---:|---:|---:|---:|---|
+| full | no | 115.3s | 0 | 1 | 516 | served from cache |
+| full | split here | 322.6s | 61 | 7248 | 0 | 97 split here, 61 compiled whole |
+| full | split on cluster | 179.0s | 61 | 160 | 21738 | 158 split on the cluster |
 | **one body** | **no** | **109.5s** | 0 | **158** | 0 | all 158 recompiled |
 | **one body** | **split here** | **35.6s** | 61 | **66** | 291 | 64 re-sliced, 78 re-parsed here, 61 compiled whole |
 | **one body** | **split on cluster** | **276.0s** | 61 | **4043** | 300 | 64 re-sliced, 94 re-split on the cluster, 61 compiled whole |
 
-The two `full` split rows are not comparable with each other: the split-here row executed
-every piece (a cold cache for this build type), and the split-on-cluster row that followed it
-found those pieces cached.
+## Reading the tables
 
-## Reading the table
+**The body edit, after TODO/42: 40.9s plain against 16.8s with the split produced here and
+22.5s with it produced on the cluster** — 158 remote compiles against 38 and 26. The 3
+declined units are compiled whole on every header edit; the rest re-slice.
 
-**The body edit is where distribution changes the picture.** On one machine the split build
-loses this row, 20.7s against 16.1s, because 94 units re-parse and 61 are compiled whole. On
-the cluster the same row reads **35.6s against 109.5s**: the plain build executes 158
-compiles remotely and the split build 66, of which 61 are the fallback units compiled whole
-and the rest the changed piece and its dependents. The 78 units that re-parse do so locally
-and produce byte-identical pieces, which are not resent. A content-addressed cache converts
-"re-parsed but unchanged" into "free".
+**The split-on-cluster body row's 4043 executions are gone.** They read 26 now, with 501
+cache hits. The cause was the libclang parse: built around a prefix PCH that could not find
+`precomp.hpp`, it degraded differently on the worker than here, so the pieces the worker
+wrote differed from the local ones and none was a cache hit. With the parse clean (TODO/42
+(5)) the worker's pieces are the local ones. That was TODO/42 (6).
 
-**The 61 fallbacks are still the floor.** They are 61 remote compiles on every header edit,
-whatever the splitter does with the other 97 units. `TODO/42` lists their causes.
-
-**Producing the split on the cluster loses on this corpus.** 276.0s and 4043 executions on the
-body row: the 78 units that refuse the re-slice are re-split on a worker, the returned trees
-replace the local ones, and their pieces are executed rather than served from cache — only
-300 hits. On Boost.Spirit the same path served the regenerated pieces from cache, because the
-regenerated pieces were byte-identical. Here they were not. The difference is consistent
-with the libclang parse errors `opencv-local-split.md` reports on 96 of these units: a parse
-that degrades differently on the worker than on this machine writes different pieces. That
-attribution is not established; it is what the counts allow.
-
-**The touch rows are free by construction**, here as for Spirit: CMake RE mirrors by content,
-and a file whose bytes did not change is not re-mirrored. They confirm that no configuration
-invents work.
-
-**A cold full plain build is 7x the local one** — 115.3s against 16.6s, and the run before it,
-with nothing cached, 163.8s. A corpus of 158 units does not amortise the cluster's per-action
-cost; it is included for the incremental rows, not for this one.
+**A cold full plain build is served from cache here** (11.7s); the plain build of this corpus
+takes 163.8s cold through the cluster, 16s locally. 158 units do not amortise a cluster's
+per-action cost. The split cold build executed every piece (8618 actions, 398.4s); the run
+that followed found them cached.
 
 ## Caveats
 
-- Everything in `opencv-local-split.md`'s caveats applies: 61 fallbacks, 78 unexplained
-  re-slice refusals, libclang parse errors in 96 units. The cluster rows measure the tool as it
-  is on this corpus.
-- The plain `full` row was served from cache because the driver was smoke-tested with a plain
-  build immediately before the run; its cold figure, 163.8s, is from that smoke test.
-- The split-on-cluster body row's cache misses are attributed by consistency with the parse
-  errors, not by inspection of the differing pieces.
+- Everything in `opencv-local-split.md`'s caveats applies: three units are declined by
+  design, and the split archives are not symbol-identical to the plain ones.
+- The plain `full` row is served from cache because a plain build of the same tree preceded
+  the run; its cold figure, 163.8s, is from a smoke test.
 - Wall times are from one run.
 
 ## Reproducing

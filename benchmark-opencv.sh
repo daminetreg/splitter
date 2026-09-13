@@ -134,7 +134,7 @@ cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 2; p=$(build "$PLAIN")
 cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 3; s=$(build "$SPLIT")
 report "one body" "$p" "$s"
 body_resliced=$(grep -c 're-sliced its piece' "$SPLIT_LOG" || true)
-body_parsed=$(grep -c '^\[cpp-splitter\] splitting:' "$SPLIT_LOG" || true)
+body_parsed=$(grep -c '^\[cpp-splitter\] libclang args:' "$SPLIT_LOG" || true)
 body_refusals=$(grep -oE '\[cpp-splitter\] full split: .*' "$SPLIT_LOG" | sort | uniq -c | sort -rn | head -5 || true)
 cp "$BODY_BACKUP" "$BODY_HEADER"
 
@@ -148,18 +148,25 @@ python3 - "$SPLIT_LOG.full" <<'PY'
 import sys, re, collections
 lines = open(sys.argv[1], errors="replace").read().split("\n")
 cats = collections.Counter()
+# Declines say so on a line of their own, one per unit; with -j16 the lines of different
+# units interleave, so they are counted from those lines rather than from what precedes a
+# fallback. The remaining fallbacks are attributed to the nearest diagnostic above them.
+declined = [l for l in lines if "[cpp-splitter] not splitting " in l]
+for l in declined:
+    cats["declined: " + l.split(": ", 2)[-1][:100]] += 1
+remaining = sum(1 for l in lines if "falling back" in l) - len(declined)
 for i, l in enumerate(lines):
-    if "falling back" not in l: continue
+    if remaining <= 0: break
+    if "falling back" not in l or "splitting failed" in l: continue
     block = lines[max(0, i - 400):i]
     if any("relocatable link failed" in x for x in block[-4:]):
         sym = next((re.search(r"multiple definition of `([^']*)'", x) for x in reversed(block) if "multiple definition" in x), None)
         cats["ld -r: multiple definition (e.g. %s)" % (sym.group(1) if sym else "?")] += 1
-        continue
-    errs = [x for x in block if " error: " in x]
-    if not errs: cats["(no diagnostic captured)"] += 1; continue
-    msg = re.sub(r"'[^']*'", "'…'", errs[0].split(" error: ", 1)[1])[:80]
-    if "__static_" in errs[0]: msg = "static rename referenced through a macro: " + msg
-    cats[msg] += 1
+    else:
+        errs = [x for x in block if " error: " in x and "Parse error" not in x]
+        msg = re.sub(r"'[^']*'", "'…'", errs[0].split(" error: ", 1)[1])[:80] if errs else "(no diagnostic captured)"
+        cats[msg] += 1
+    remaining -= 1
 for k, v in cats.most_common(): print(f"    {v:3}  {k}")
 PY
 

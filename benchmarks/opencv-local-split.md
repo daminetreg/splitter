@@ -1,6 +1,8 @@
 # A minimal OpenCV, split and built on one machine
 
-One measurement set, from a single run of `./benchmark-opencv.sh` on 13 September 2026.
+Two measurement sets, each from a single run of `./benchmark-opencv.sh`: the first on 13
+September 2026, before TODO/42; the second on the same day after it. The first is kept because
+the second is its consequence.
 
 ## What was built
 
@@ -39,6 +41,41 @@ whose content changed.
 
 ## Results
 
+### After TODO/42
+
+| scenario | plain | split | ratio | fallbacks |
+|---|---:|---:|---:|---:|
+| full | 16.4s | 318.8s | 19.4x slower | 3 |
+| no-op | 0.2s | 0.2s | — | 0 |
+| one source | 1.3s | 0.3s | 4.3x faster | 0 |
+| one header | 16.3s | 5.3s | **3.1x faster** | 3 |
+| one body | 16.1s | 7.3s | **2.2x faster** | 3 |
+
+**3 of the 158 units fall back, each declined by the splitter before any piece is written,
+with the reason:** `alloc.cpp` and `array.cpp` hold a static variable of a type no other
+translation unit can name (a class in an unnamed namespace; an unnamed struct), and
+`arithm.dispatch.cpp` includes `arithm.simd.hpp` twice under two macro states with no include
+guard, and the second expansion defines external functions. The libclang parse reports 0
+errors. On the body row 155 units re-slice the edited body, 0 refuse, and 3 parses run — the
+declined units'. 35 pieces recompile: the edited one, and the pieces of `mat.inl.hpp` after it
+whose `#line` moved.
+
+| artefact | plain | split |
+|---|---:|---:|
+| `libopencv_core.a` | 6,392,568 bytes | 10,527,770 bytes |
+| `libopencv_imgproc.a` | 7,164,534 bytes | 9,747,596 bytes |
+| build tree | 30M | 5.6G |
+| generated pieces | — | 8451 |
+
+`nm --defined-only -g`: `libopencv_core.a` 4118 external symbols plain, 5142 split, 85 only
+in the plain archive, 1109 only in the split one (`imgproc`: 2604 / 3125; 352 / 873). The
+extra symbols are `static` helpers given external linkage by the rename and
+`__attribute__((used))`; the missing ones include namespace-scope tables, template
+instantiations no longer emitted, and out-of-line members. Whether a consumer of the split
+archive would fail to link on any of them has not been tested.
+
+### Before TODO/42
+
 | scenario | plain | split | ratio | fallbacks |
 |---|---:|---:|---:|---:|
 | full | 16.6s | 295.4s | 17.8x slower | 61 |
@@ -47,72 +84,35 @@ whose content changed.
 | one header | 16.0s | 17.6s | 1.1x slower | 61 |
 | one body | 16.1s | 20.7s | 1.3x slower | 61 |
 
-**61 of the 158 units fall back to a plain compile.** The fallback column counts them per row;
-a unit that falls back is compiled whole, so every build above is correct and links, and the
-rows measure the tool as it is on this corpus.
-
-| artefact | plain | split |
-|---|---:|---:|
-| `libopencv_core.a` | 6,392,568 bytes | 9,187,850 bytes |
-| `libopencv_imgproc.a` | 7,164,534 bytes | 7,737,912 bytes |
-| build tree | 30M | 3.7G |
-| generated pieces | — | 7827 |
+61 of the 158 units fell back; the libclang parse reported 3262 errors across 96 units; on
+the body row 64 units re-sliced and 78 refused. What each of those was, and what fixed it, is
+in `TODO/42`. In short: functions inside `extern "C"` were never harvested (42 units); a
+header included at the end of a source was not a candidate; a macro producing several
+external definitions stayed in the preamble; a static whose name a dispatch macro used for
+another function was renamed under the macro (11); the prefix PCH was built where a quoted
+include of a sibling could not be found and used anyway, which is where the parse errors and
+the refusals came from; and two rewrite defects. Two of the three units now declined were
+*not* fallbacks before: `array.cpp` split, and the program it produced was wrong — a static of
+unnamed struct type became one object per piece.
 
 ## Why the rows read as they do
 
-**The 61 fallbacks decide the incremental rows.** A unit that fell back has no split tree, so
-every time the build system re-runs the launcher on it — every header touch, every header
-edit — it is compiled whole again. Measured on the `one header` row: 158 launcher runs, 142
-units reused their split, 61 were passed through to the compiler. 61 whole compiles is about
-40% of the plain build, before any split unit does anything, and that is the 17.6s.
+**The full build costs 19.4x**, against 11.3x on Boost.Spirit's suite: `-O3` compiles of
+8451 pieces on one machine.
 
-**The body row re-parsed 94 units.** Of the 158, 64 re-sliced the edited body without a
-parse; 78 refused with *the change is not confined to one definition* and re-split from
-scratch; the rest are fallback units. In the one refusing unit inspected, the harvest for
-`mat.inl.hpp` does record `nzcount()`'s extent (a kept definition, no piece), so the refusal is
-not the TODO/36 case; its cause is not established here. The 94 libclang parses are the
-difference between 16.1s and 20.7s.
+**The header touch is 3.1x faster than plain.** 158 launcher runs; 155 units reuse their
+split, 3 are compiled whole. Before TODO/42 the 61 fallback units were compiled whole on every
+touch.
 
-**The full build costs 17.8x**, against 11.3x on Boost.Spirit's suite. `-O3` compiles of
-pieces that each re-instantiate what the unit's preamble declares, 7827 of them, on one
-machine with nothing to absorb the extra work.
-
-## What fell back, and why
-
-From the full build's log, by first cause:
-
-| units | cause |
-|---:|---|
-| 45 | `ld -r`: *multiple definition* of a C-API function — `cvMaxS`, `cvResize`, `cvFindContours`, `cvSVBkSb`, … (41 `CV_IMPL` functions), plus `cv::hal::cpu_baseline::recip64f`, `cv::accW_64f`, `cv::plugin::impl::DynamicLib::~DynamicLib()`. A definition with external linkage was kept in the tier-one preamble, which every header piece includes, so every header piece emitted it. TODO/10's layering by linkage does not catch these; `CV_IMPL` expands to an `extern "C"` specifier, and `cpu_baseline` is a namespace the dispatch macros open. |
-| 11 | a `static` function renamed by the splitter (`__static_<file>__<name>`) and then referenced by name through OpenCV's CPU-dispatch macros (`CV_CPU_DISPATCH`, `cpu_baseline::`), which the rename does not reach: *no member named … in namespace cv::cpu_baseline*, *no matching function for call to …*, *declaration of reference variable … requires an initializer*. |
-| 2 | `inline` inserted in front of something that is not a function: `'inline' can only appear on functions and non-local variables` (`utils/filesystem.private.hpp:46`). |
-| 1 | a member rewritten out of line lost a default argument: *too few arguments to function call, expected 11, have 10* (`histogram.cpp`). |
-| 1 | *expected ';' after top level declarator* (`alloc.cpp` preamble). |
-| 1 | *expected unqualified-id* (`cuda_gpu_mat_nd.cpp` preamble). |
-
-Separately, the libclang parse reported errors in **96 of the 158 units** — 3262 lines, mostly
-*no type named … in …* and *no viable conversion* in `imgproc.hpp`, `cuda.hpp`, `mat.hpp` and
-libstdc++'s `stl_vector.h`. The compile command's `-std=c++17` does reach the parse (the
-command line wins over the probed default). The parse continues past errors and the split
-proceeds from what it harvested; how much of the two tables above this accounts for is not
-established. Boost.Spirit's suite shows 12 such lines across 279 units.
-
-**The split archives are not symbol-identical to the plain ones.** `nm --defined-only -g` on
-`libopencv_core.a`: 4118 external symbols plain, 4836 split; 73 present only in the plain
-archive, 791 only in the split one (`imgproc`: 2604 / 2782; 139 / 317). The extra symbols are
-`static` helpers given external linkage by the rename and `__attribute__((used))`
-(`cv_isalnum`, `hal_ni_lut`, 415 `__static_…`). The missing ones include namespace-scope tables
-(`cv::g_8x32fTab`, `cv::hal::popCountTable`), template instantiations no longer emitted
-(`cv::normDiffInf_<float, float>`), a function-local static's guard variable, and
-`cv::DownhillSolverImpl::createInitialSimplex`. Whether a consumer of the split archive would
-fail to link on any of these has not been tested; the benchmark links nothing against them.
+**The body edit is 2.2x faster than plain.** 155 re-slices without a parse and 35 piece
+compiles, against 158 whole compiles.
 
 ## Caveats
 
-- The fallback rate makes this a measurement of the splitter *on a corpus it does not yet
-  handle*, and the incremental rows should be read as such. Every cause above is a defect in
-  the splitter, not a property of OpenCV; see `TODO/42`.
-- The body row's 78 refusals are reported, not explained.
+- Three units are declined by design; their reasons are stated by the splitter and are
+  limitations of the approach, not defects: a static of a type no other translation unit can
+  name, and a header included twice with no guard that defines external functions.
+- The split archives are not symbol-identical to the plain ones; see above.
 - `-j16` on 32 cores, as for the Boost measurements.
 - Wall times are from one run.
 
