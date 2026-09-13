@@ -113,6 +113,9 @@ struct FunctionInfo {
     // the translation unit. The rename that lets pieces share a static is textual and would
     // reach both, so such a static stays in the preamble instead.
     bool name_shared = false;
+    // `= default;` or `= delete;` out of line: the extent was carried through the `;`, and
+    // there is no body to re-slice.
+    bool is_defaulted_or_deleted = false;
 
     // Set by prepare_functions() once the whole file has been visited.
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
@@ -852,14 +855,48 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     CXSourceLocation end_loc = clang_getRangeEnd(extent);
 
     unsigned start_line, end_line, s_off, e_off;
-    clang_getFileLocation(start_loc, nullptr, &start_line, nullptr, &s_off);
+    CXFile extent_file = nullptr;
+    clang_getFileLocation(start_loc, &extent_file, &start_line, nullptr, &s_off);
     clang_getFileLocation(end_loc, nullptr, &end_line, nullptr, &e_off);
+
+    info.body = get_source_range_text(vd->tu, extent);
+
+    // A special member defaulted or deleted out of line -- `T::~T() = default;`, OpenCV's
+    // cuda_gpu_mat_nd.cpp -- has an extent that ends at the declarator. Cut out on that
+    // extent, the preamble kept ` = default;` and the piece a declarator with nothing after
+    // it. The extent is carried through the `;` so that the piece is the whole definition.
+    if (extent_file) {
+        size_t size = 0;
+        const char* buf = clang_getFileContents(vd->tu, extent_file, &size);
+        if (buf && e_off <= size) {
+            size_t i = e_off;
+            while (i < size && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n' || buf[i] == '\r')) ++i;
+            if (i < size && buf[i] == '=') {
+                ++i;
+                while (i < size && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n')) ++i;
+                const std::string rest(buf + i, std::min<size_t>(8, size - i));
+                size_t word = 0;
+                if (rest.rfind("default", 0) == 0) word = 7;
+                else if (rest.rfind("delete", 0) == 0) word = 6;
+                if (word) {
+                    size_t j = i + word;
+                    while (j < size && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\n')) ++j;
+                    if (j < size && buf[j] == ';') {
+                        for (size_t k = e_off; k <= j; ++k)
+                            if (buf[k] == '\n') ++end_line;
+                        e_off = static_cast<unsigned>(j + 1);
+                        info.body = std::string(buf + s_off, e_off - s_off);
+                        info.is_defaulted_or_deleted = true;
+                    }
+                }
+            }
+        }
+    }
+
     info.start_line = start_line;
     info.end_line = end_line;
     info.start_offset = s_off;
     info.end_offset = e_off;
-
-    info.body = get_source_range_text(vd->tu, extent);
 
     (*vd->harvest)[cursor_filename].push_back(std::move(info));
 

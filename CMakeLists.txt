@@ -154,6 +154,7 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   macro_group_main    one macro invocation defining several external functions (TODO/42 1c)
 #   static_name_shared_main  a static whose name a macro uses for another function (TODO/42 2)
 #   conditional_declarator_main  a declarator that differs by preprocessor branch (TODO/42 4)
+#   defaulted_out_of_line_main  `T::~T() = default;` written out of line (TODO/42 4)
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
                 always_inline_main impl_include_main preamble_linkage macro_members_main
                 retracted_macro_main ipp_ctor_main multiline_conditional_main
@@ -161,7 +162,7 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
                 macro_argument_extent_main preamble_variables_main macro_definition_main
                 main_in_header_main no_linkage_type_main extern_c_main
                 tail_include_main macro_group_main static_name_shared_main
-                conditional_declarator_main)
+                conditional_declarator_main defaulted_out_of_line_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
