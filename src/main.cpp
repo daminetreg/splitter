@@ -521,6 +521,14 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
             const CXLinkageKind lk = clang_getCursorLinkage(decl);
             if (lk == CXLinkage_Internal || lk == CXLinkage_NoLinkage)
                 info.type_lacks_linkage = true;
+            // An empty type carries no state, so one copy per piece is the same object for
+            // every purpose: `static auto fun1 = [](auto&) {...};` in Boost.Spirit's x3
+            // tests, a captureless lambda, whose closure type has no linkage. It stays in
+            // the preamble, as it did before the rule; the rule is for a variable whose
+            // copies would diverge.
+            const long long size = clang_Type_getSizeOf(t);
+            if (info.type_lacks_linkage && size >= 0 && size <= 1)
+                info.type_lacks_linkage = false;
         }
     }
     info.is_const =
