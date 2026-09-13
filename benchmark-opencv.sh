@@ -64,6 +64,12 @@ fallbacks() {
     [ -r "$SPLIT_LOG" ] || { echo 0; return; }
     grep -c 'falling back' "$SPLIT_LOG" || true
 }
+# Declined is not fallen back: the splitter decided before writing anything that the unit
+# cannot be split correctly, and said why. Fallbacks are defects; declines are stated limits.
+declined() {
+    [ -r "$SPLIT_LOG" ] || { echo 0; return; }
+    grep -c '\[cpp-splitter\] not splitting ' "$SPLIT_LOG" || true
+}
 
 build() {  # build <dir> -> elapsed ms of the build alone
     local dir="$1" start end log=/dev/null
@@ -104,11 +110,11 @@ echo "==> building cpp-splitter"
 tipi run cmake --build "$REPO/build" -j32 >/dev/null
 echo "==> opencv $(git -C "$OPENCV" log -1 --format=%h), core + imgproc, Release, -j$JOBS, build phase only"
 
-printf '\n%-14s %10s %10s %10s %10s\n' scenario plain split ratio fallbacks
-printf '%-14s %10s %10s %10s %10s\n' -------------- ---------- ---------- ---------- ----------
+printf '\n%-14s %10s %10s %10s %10s %9s\n' scenario plain split ratio fallbacks declined
+printf '%-14s %10s %10s %10s %10s %9s\n' -------------- ---------- ---------- ---------- ---------- ---------
 report() {
-    printf '%-14s %10s %10s %9sx %10s\n' "$1" "$(human "$2")" "$(human "$3")" \
-        "$(ratio_of "$2" "$3")" "$(fallbacks)"
+    printf '%-14s %10s %10s %9sx %10s %9s\n' "$1" "$(human "$2")" "$(human "$3")" \
+        "$(ratio_of "$2" "$3")" "$(fallbacks)" "$(declined)"
 }
 
 configure "$PLAIN"
@@ -143,7 +149,7 @@ echo "==> one body: $body_resliced unit(s) re-sliced, $body_parsed re-parsed"
 [ -n "$body_refusals" ] && echo "$body_refusals" | sed 's/^/    /'
 
 echo
-echo "==> fallbacks on the full build: $(grep -c 'falling back' "$SPLIT_LOG.full" || true) of $full_units units, by cause"
+echo "==> fallbacks and declines on the full build, of $full_units units: $(grep -c 'falling back' "$SPLIT_LOG.full" || true) fell back, $(grep -c '\[cpp-splitter\] not splitting ' "$SPLIT_LOG.full" || true) declined"
 python3 - "$SPLIT_LOG.full" <<'PY'
 import sys, re, collections
 lines = open(sys.argv[1], errors="replace").read().split("\n")
@@ -154,7 +160,7 @@ cats = collections.Counter()
 declined = [l for l in lines if "[cpp-splitter] not splitting " in l]
 for l in declined:
     cats["declined: " + l.split(": ", 2)[-1][:100]] += 1
-remaining = sum(1 for l in lines if "falling back" in l) - len(declined)
+remaining = sum(1 for l in lines if "falling back" in l)
 for i, l in enumerate(lines):
     if remaining <= 0: break
     if "falling back" not in l or "splitting failed" in l: continue

@@ -43,16 +43,18 @@ whose content changed.
 
 ### After TODO/42
 
-| scenario | plain | split | ratio | fallbacks |
-|---|---:|---:|---:|---:|
-| full | 16.4s | 318.8s | 19.4x slower | 3 |
-| no-op | 0.2s | 0.2s | — | 0 |
-| one source | 1.3s | 0.3s | 4.3x faster | 0 |
-| one header | 16.3s | 5.3s | **3.1x faster** | 3 |
-| one body | 16.1s | 7.3s | **2.2x faster** | 3 |
+| scenario | plain | split | ratio | fallbacks | declined |
+|---|---:|---:|---:|---:|---:|
+| full | 16.4s | 318.8s | 19.4x slower | 0 | 3 |
+| no-op | 0.2s | 0.2s | — | 0 | 0 |
+| one source | 1.3s | 0.3s | 4.3x faster | 0 | 0 |
+| one header | 16.3s | 5.3s | **3.1x faster** | 0 | 3 |
+| one body | 16.1s | 7.3s | **2.2x faster** | 0 | 3 |
 
-**3 of the 158 units fall back, each declined by the splitter before any piece is written,
-with the reason:** `alloc.cpp` and `array.cpp` hold a static variable of a type no other
+**0 units fall back. 3 are declined: the splitter decides before any piece is written that
+it cannot split them correctly, compiles them whole, and says why.** A fallback is a defect —
+the splitter tried and something failed; a decline is a stated limit (`TODO/44`). The two
+were one column until this run. `alloc.cpp` and `array.cpp` hold a static variable of a type no other
 translation unit can name (a class in an unnamed namespace; an unnamed struct), and
 `arithm.dispatch.cpp` includes `arithm.simd.hpp` twice under two macro states with no include
 guard, and the second expansion defines external functions. The libclang parse reports 0
@@ -109,9 +111,10 @@ compiles, against 158 whole compiles.
 
 ## Caveats
 
-- Three units are declined by design; their reasons are stated by the splitter and are
-  limitations of the approach, not defects: a static of a type no other translation unit can
-  name, and a header included twice with no guard that defines external functions.
+- Three units are declined; the reasons are stated by the splitter and are limits of the
+  approach, not defects: a static of a type no other translation unit can name, and a header
+  included twice with no guard that defines external functions. `TODO/44` proposes how to
+  split both. Before this distinction was drawn they were counted as fallbacks.
 - The split archives are not symbol-identical to the plain ones; see above.
 - `-j16` on 32 cores, as for the Boost measurements.
 - Wall times are from one run.

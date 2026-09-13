@@ -180,14 +180,17 @@ run() {  # run <log> <extra args...> -> the build's elapsed ms; peak RSS lands i
 }
 
 fallbacks() { grep -c 'falling back' "$1" 2>/dev/null || true; }
+# A decline -- the splitter decided before writing anything that the unit cannot be split
+# correctly, and said why -- is reported beside the fallbacks, not among them.
+declined()  { grep -c '\[cpp-splitter\] not splitting ' "$1" 2>/dev/null || true; }
 
 echo "==> mode: $MODE   build type: ${BUILD_TYPE:-Debug}   jobs: ${CMAKE_RE_JOBS:-default}"
 echo "==> building cpp-splitter"
 tipi run cmake --build "$REPO/build" -j"$(nproc)" >/dev/null
 
-printf '\n%-12s %-8s %9s %10s %-18s %8s\n' scenario splitter wall fallbacks 'remote/cached/local' 'peak RSS'
-printf '%-12s %-8s %9s %10s %-18s %8s\n' ------------ -------- --------- ---------- ------------------ --------
-report() { printf '%-12s %-8s %9s %10s %-18s %8s\n' "$1" "$2" "$(human "$3")" "$4" "$5" "$(human_rss "$(cat "$PEAK_FILE")")"; }
+printf '\n%-12s %-8s %9s %10s %9s %-18s %8s\n' scenario splitter wall fallbacks declined 'remote/cached/local' 'peak RSS'
+printf '%-12s %-8s %9s %10s %9s %-18s %8s\n' ------------ -------- --------- ---------- --------- ------------------ --------
+report() { printf '%-12s %-8s %9s %10s %9s %-18s %8s\n' "$1" "$2" "$(human "$3")" "$4" "$6" "$5" "$(human_rss "$(cat "$PEAK_FILE")")"; }
 
 # Three configurations rather than two when REMOTE_SPLIT is set, in one run: the point of
 # TODO/35 is splitting here against splitting on the cluster, and comparing those across two
@@ -220,22 +223,22 @@ for mode in "${modes[@]}"; do
     L=/tmp/bench-cmake-re-$mode
 
     t=$(run "$L-full.log" --clean "${args[@]}")
-    report full "$label" "$t" "$(fallbacks "$L-full.log")" "$(actions)"
+    report full "$label" "$t" "$(fallbacks "$L-full.log")" "$(actions)" "$(declined "$L-full.log")"
 
     t=$(run "$L-noop.log" "${args[@]}")
-    report no-op "$label" "$t" "$(fallbacks "$L-noop.log")" "$(actions)"
+    report no-op "$label" "$t" "$(fallbacks "$L-noop.log")" "$(actions)" "$(declined "$L-noop.log")"
 
     touch "$SOURCE"
     t=$(run "$L-source.log" "${args[@]}")
-    report "one source" "$label" "$t" "$(fallbacks "$L-source.log")" "$(actions)"
+    report "one source" "$label" "$t" "$(fallbacks "$L-source.log")" "$(actions)" "$(declined "$L-source.log")"
 
     touch "$HEADER"
     t=$(run "$L-header.log" "${args[@]}")
-    report "one header" "$label" "$t" "$(fallbacks "$L-header.log")" "$(actions)"
+    report "one header" "$label" "$t" "$(fallbacks "$L-header.log")" "$(actions)" "$(declined "$L-header.log")"
 
     cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body "$((RANDOM))"
     t=$(run "$L-body.log" "${args[@]}")
-    report "one body" "$label" "$t" "$(fallbacks "$L-body.log")" "$(actions)"
+    report "one body" "$label" "$t" "$(fallbacks "$L-body.log")" "$(actions)" "$(declined "$L-body.log")"
     cp "$BODY_BACKUP" "$BODY_HEADER"
 done
 

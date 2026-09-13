@@ -46,13 +46,13 @@ In order of units affected:
 
 ## Outcome
 
-61 fallbacks to 3, 3262 parse-error lines to 0, the body row from 64 re-sliced and 78 refused
+61 fallbacks to 0 with 3 units declined, 3262 parse-error lines to 0, the body row from 64 re-sliced and 78 refused
 to 155 re-sliced and 0 refused, and the cluster's body row from 4043 executions to 26. One
 commit per finding, each with a fixture that fails before it.
 
 | | before | after |
 |---|---:|---:|
-| fallbacks on the full build | 61 | 3, each declined with its reason |
+| fallbacks on the full build | 61 | 0, and 3 units declined with their reason |
 | libclang parse errors (lines / units) | 3262 / 96 | 0 / 0 |
 | body edit, local: re-sliced / refused | 64 / 78 | 155 / 0 |
 | body edit, local: wall (plain 16.1s) | 20.7s | 7.3s |

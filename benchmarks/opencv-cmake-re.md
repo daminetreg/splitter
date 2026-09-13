@@ -24,16 +24,20 @@ cache. The last column is the splitter's own report of what the units did.
 
 ### After TODO/42
 
-| scenario | splitter | build | fallbacks | remote | cached | what the 158 units did |
-|---|---|---:|---:|---:|---:|---|
-| full | no | 11.7s | 0 | 1 | 516 | served from cache |
-| full | split here | 398.4s | 3 | 8618 | 234 | 155 split here, 3 compiled whole; every piece executed |
-| full | split on cluster | 123.0s | 3 | 204 | 25941 | 155 split on the cluster; pieces served from cache |
-| no-op | any | 3.9–8.5s | 0 | 0 | 0–465 | reused |
-| one source / one header | any | 3.9s | 0 | 0 | 0 | not re-mirrored |
-| **one body** | **no** | **40.9s** | 0 | **158** | 0 | all 158 recompiled |
-| **one body** | **split here** | **16.8s** | 3 | **38** | 465 | 155 re-sliced, 3 compiled whole, 35 pieces recompiled |
-| **one body** | **split on cluster** | **22.5s** | 3 | **26** | 501 | 155 re-sliced, 3 compiled whole |
+| scenario | splitter | build | fallbacks | declined | remote | cached | what the 158 units did |
+|---|---|---:|---:|---:|---:|---:|---|
+| full | no | 11.7s | 0 | — | 1 | 516 | served from cache |
+| full | split here | 398.4s | 0 | 3 | 8618 | 234 | 155 split here, 3 compiled whole; every piece executed |
+| full | split on cluster | 123.0s | 0 | 3 | 204 | 25941 | 155 split on the cluster; pieces served from cache |
+| no-op | any | 3.9–8.5s | 0 | 0 | 0 | 0–465 | reused |
+| one source / one header | any | 3.9s | 0 | 0 | 0 | 0 | not re-mirrored |
+| **one body** | **no** | **40.9s** | 0 | — | **158** | 0 | all 158 recompiled |
+| **one body** | **split here** | **16.8s** | 0 | 3 | **38** | 465 | 155 re-sliced, 3 compiled whole, 35 pieces recompiled |
+| **one body** | **split on cluster** | **22.5s** | 0 | 3 | **26** | 501 | 155 re-sliced, 3 compiled whole |
+
+A *fallback* is a defect: the splitter tried and something failed. A *decline* is a limit it
+stated before writing anything (`TODO/44`). The run that produced these numbers reported the
+three declines in the fallback column; the columns have been separated since.
 
 ### Before TODO/42
 
@@ -65,8 +69,8 @@ that followed found them cached.
 
 ## Caveats
 
-- Everything in `opencv-local-split.md`'s caveats applies: three units are declined by
-  design, and the split archives are not symbol-identical to the plain ones.
+- Everything in `opencv-local-split.md`'s caveats applies: three units are declined, and
+  the split archives are not symbol-identical to the plain ones.
 - The plain `full` row is served from cache because a plain build of the same tree preceded
   the run; its cold figure, 163.8s, is from a smoke test.
 - Wall times are from one run.

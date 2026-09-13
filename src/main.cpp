@@ -276,6 +276,10 @@ struct VariableInfo {
 // split: kept in the preamble the variable is one object per piece, moved it cannot be
 // declared. See prepare_variables().
 static std::string g_unsplittable_variable;
+// Set by do_split() when it declined the unit -- decided before anything was written that it
+// cannot be split correctly -- as opposed to failed. The two are reported apart: a fallback
+// is a defect, a decline is a limit the tool stated.
+static bool g_declined = false;
 
 using HarvestMap = std::map<std::string, std::vector<FunctionInfo>>;
 using VarHarvestMap = std::map<std::string, std::vector<VariableInfo>>;
@@ -3958,6 +3962,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
     dump_keep_decisions(functions);
 
     if (!input_is_header && !g_unsplittable_variable.empty()) {
+        g_declined = true;
         std::cerr << "[cpp-splitter] not splitting " << input_path << ": the static variable `"
                   << g_unsplittable_variable
                   << "` has a type no other translation unit can name, so it can neither"
@@ -4941,6 +4946,7 @@ static SplitResult do_split(const std::string& input_path,
                                                   verbose, out);
 
     if (!g_unsplittable_header.empty()) {
+        g_declined = true;
         std::cerr << "[cpp-splitter] not splitting " << input_path << ": "
                   << g_unsplittable_header
                   << " is included more than once with no include guard and defines a"
@@ -5999,7 +6005,13 @@ static int run_as_launcher(int argc, char* argv[]) {
         // the build succeeds either way -- so a silent one is a silent regression. The
         // failure that motivated this said so: a stale prefix PCH made every header edit
         // fall back, and the only trace was in a log nobody was reading.
-        std::cerr << "[cpp-splitter] splitting failed, falling back to normal compilation\n";
+        // A decline is not a fallback. The reason was printed where it was decided; here it
+        // only says the unit is compiled whole, in words the benchmarks do not count as a
+        // fallback -- that column is for defects.
+        if (g_declined)
+            std::cerr << "[cpp-splitter] declined: compiling whole\n";
+        else
+            std::cerr << "[cpp-splitter] splitting failed, falling back to normal compilation\n";
         std::string cmd = build_passthrough_cmd();
         if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
         const int rc = run_command_quiet(cmd);
@@ -6386,7 +6398,10 @@ int main(int argc, char* argv[]) {
     SplitResult sr = do_split(input_path, output_dir, extra_flags, true);
 
     if (!sr.success) {
-        std::cerr << "Warning: splitting failed, falling back to normal compilation\n";
+        if (g_declined)
+            std::cerr << "Warning: declined: compiling whole\n";
+        else
+            std::cerr << "Warning: splitting failed, falling back to normal compilation\n";
         if (do_compile) {
             std::string cmd = cxx_compiler + " -std=c++17";
             for (const auto& f : extra_flags) cmd += " " + f;
