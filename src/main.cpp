@@ -256,6 +256,7 @@ struct VariableInfo {
     // Only from C++17, where inline variables exist.
     bool inline_in_place = false;
     bool internal_linkage = false;    // `static`, or enclosed by an unnamed namespace
+    bool type_lacks_linkage = false;  // its type cannot be named from another translation unit
     // const or constexpr, asked of the type rather than read off the text. The keyword is
     // routinely a macro -- Boost.Filesystem writes BOOST_CONSTEXPR_OR_CONST -- and such a
     // variable has to stay where its users can see it as a constant expression.
@@ -266,6 +267,12 @@ struct VariableInfo {
     bool rename_and_move = false;
     std::string replacement;          // what the preamble gets in place of the definition
 };
+
+// Set when a variable that would have to move out of the preamble has a type no other
+// translation unit can name. Every piece is another translation unit, so the unit cannot be
+// split: kept in the preamble the variable is one object per piece, moved it cannot be
+// declared. See prepare_variables().
+static std::string g_unsplittable_variable;
 
 using HarvestMap = std::map<std::string, std::vector<FunctionInfo>>;
 using VarHarvestMap = std::map<std::string, std::vector<VariableInfo>>;
@@ -494,6 +501,25 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
     // `inline` is read from the pretty-printed declaration rather than the source text
     // because, like constexpr on a function, it is routinely spelled as a macro.
     info.internal_linkage = clang_getCursorLinkage(cursor) != CXLinkage_External;
+    // The declaration that would replace a moved variable names its type. If that type is
+    // one another translation unit cannot name -- a class in an unnamed namespace, or a
+    // local or unnamed class -- the variable cannot be defined anywhere but here, and the
+    // pieces are other translation units. OpenCV's `static AllocatorStatistics
+    // allocator_stats;`, of a class the header defines in an unnamed namespace.
+    {
+        CXType t = clang_getCanonicalType(clang_getCursorType(cursor));
+        while (t.kind == CXType_Pointer || t.kind == CXType_LValueReference ||
+               t.kind == CXType_RValueReference)
+            t = clang_getPointeeType(t);
+        while (t.kind == CXType_ConstantArray || t.kind == CXType_IncompleteArray)
+            t = clang_getArrayElementType(t);
+        CXCursor decl = clang_getTypeDeclaration(t);
+        if (!clang_Cursor_isNull(decl) && clang_getCursorKind(decl) != CXCursor_NoDeclFound) {
+            const CXLinkageKind lk = clang_getCursorLinkage(decl);
+            if (lk == CXLinkage_Internal || lk == CXLinkage_NoLinkage)
+                info.type_lacks_linkage = true;
+        }
+    }
     info.is_const =
         clang_isConstQualifiedType(clang_getCanonicalType(clang_getCursorType(cursor))) != 0;
     info.move_out = clang_getCursorLinkage(cursor) == CXLinkage_External && !in_template;
@@ -1063,6 +1089,13 @@ static std::string terminate_declaration(const std::string& decl) {
     // blank_code_noise() preserves offsets and newlines, so the two last lines line up. If
     // they differ the line ends inside a comment that nothing closed.
     if (decl.compare(from, std::string::npos, blanked, from, std::string::npos) != 0)
+        return decl + "\n;";
+    // A last line that is a preprocessor directive cannot carry a token either: a declarator
+    // written across `#ifdef ... #else ... #endif`, OpenCV's alloc.cpp `fastMalloc`, ends
+    // on the `#endif`, and `#endif;` is a directive with an extra token, not a declaration.
+    // The `;` on a line of its own terminates the declaration the tokens above it spell.
+    const size_t first = decl.find_first_not_of(" \t", from);
+    if (first != std::string::npos && decl[first] == '#')
         return decl + "\n;";
     return decl + ";";
 }
@@ -2165,6 +2198,10 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
         // BOOST_CONSTEXPR_OR_CONST, which is why the text cannot be trusted to find them.
         if (!var.move_out && var.internal_linkage && !var.is_const && !input_is_header &&
             !var.in_unnamed_ns && !var.is_member && !var.name.empty()) {
+            if (var.type_lacks_linkage) {
+                if (g_unsplittable_variable.empty()) g_unsplittable_variable = var.name;
+                continue;
+            }
             var.rename_and_move = true;
             var.move_out = true;
         }
@@ -3555,6 +3592,33 @@ static unsigned count_newlines(const std::string& s) {
     return (unsigned)std::count(s.begin(), s.end(), '\n');
 }
 
+// How many conditionals a definition's own text closes that it did not open: `#endif`s in
+// the extent beyond those matching an `#if` inside it. A declarator written across
+// `#ifdef ... #else ... #endif` with the body after the `#endif` -- OpenCV's alloc.cpp
+// `fastMalloc` -- has an extent that begins inside the `#else` branch and contains the
+// `#endif` closing it. The conditional stack replayed around the piece opens that branch, so
+// the piece must not close it a second time.
+static size_t conditionals_closed_by(const std::string& text) {
+    const std::string blanked = blank_code_noise(text);
+    long depth = 0;
+    size_t closed = 0;
+    std::istringstream iss(blanked);
+    std::string line;
+    while (std::getline(iss, line)) {
+        const size_t at = line.find_first_not_of(" \t");
+        if (at == std::string::npos || line[at] != '#') continue;
+        std::istringstream ls(line.substr(at + 1));
+        std::string directive;
+        ls >> directive;
+        if (directive == "if" || directive == "ifdef" || directive == "ifndef") {
+            ++depth;
+        } else if (directive == "endif") {
+            if (depth > 0) --depth; else ++closed;
+        }
+    }
+    return closed;
+}
+
 static void emit_split_files(CXTranslationUnit tu,
                              const std::vector<FunctionInfo>& functions,
                              const std::vector<VariableInfo>& variables,
@@ -3828,6 +3892,15 @@ static SplitResult split_unit(CXTranslationUnit tu,
     prepare_functions(functions, source, referenced, input_is_header);
     prepare_variables(variables, functions, source, unit_tag, input_is_header);
     dump_keep_decisions(functions);
+
+    if (!input_is_header && !g_unsplittable_variable.empty()) {
+        std::cerr << "[cpp-splitter] not splitting " << input_path << ": the static variable `"
+                  << g_unsplittable_variable
+                  << "` has a type no other translation unit can name, so it can neither"
+                     " be shared by the pieces nor copied into each\n";
+        result.success = false;
+        return result;
+    }
 
     // A translation unit with nothing of its own to split still needs its preamble on disk:
     // the pieces split out of its headers include it to compile in the context the header
@@ -4416,8 +4489,13 @@ static void emit_split_files(CXTranslationUnit tu,
             content << body << "\n";
         }
 
-        for (size_t ci = 0; ci < fn.conditionals.size(); ++ci)
-            content << "#endif\n";
+        {
+            const size_t closed = conditionals_closed_by(fn.body);
+            const size_t to_close =
+                fn.conditionals.size() > closed ? fn.conditionals.size() - closed : 0;
+            for (size_t ci = 0; ci < to_close; ++ci)
+                content << "#endif\n";
+        }
 
         std::string new_content = content.str();
         const bool kept = should_keep_in_header(fn);
