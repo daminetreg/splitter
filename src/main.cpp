@@ -109,6 +109,10 @@ struct FunctionInfo {
     // piece has to say so again, or it defines a C++-linkage function of the same name and
     // the C-linkage declaration left in the preamble resolves to nothing.
     bool c_linkage = false;
+    // A static whose unqualified name is also that of another function declared anywhere in
+    // the translation unit. The rename that lets pieces share a static is textual and would
+    // reach both, so such a static stays in the preamble instead.
+    bool name_shared = false;
 
     // Set by prepare_functions() once the whole file has been visited.
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
@@ -551,10 +555,24 @@ static bool type_lacks_linkage(CXType type, int depth) {
     return false;
 }
 
+// Every function name the translation unit declares, with the USRs that carry it. System
+// headers included: a static named `max` collides with std::max just as surely, and the
+// rename that would follow is textual.
+static std::map<std::string, std::set<std::string>> g_function_name_usrs;
+
 static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClientData data) {
     auto* vd = static_cast<VisitorData*>(data);
 
     CXSourceLocation loc = clang_getCursorLocation(cursor);
+    {
+        const CXCursorKind k = clang_getCursorKind(cursor);
+        if (k == CXCursor_FunctionDecl || k == CXCursor_CXXMethod ||
+            k == CXCursor_FunctionTemplate) {
+            const std::string usr = cx_to_string(clang_getCursorUSR(cursor));
+            if (!usr.empty())
+                g_function_name_usrs[cx_to_string(clang_getCursorSpelling(cursor))].insert(usr);
+        }
+    }
     if (clang_Location_isInSystemHeader(loc))
         return CXChildVisit_Continue;
 
@@ -839,6 +857,7 @@ static std::string keep_reason(const FunctionInfo& fn) {
     if (fn.is_specialization)   return "explicit specialization";
     if (fn.is_virtual)          return "virtual member function";
     if (fn.in_unnamed_ns)       return "enclosed by an unnamed namespace";
+    if (fn.name_shared)         return "static whose name another function in the unit also has; a rename would reach both";
     if (fn.is_static)           return "internal linkage in a header";
     if (fn.name == "main" && fn.scope_chain.empty()) return "the program's entry point";
     if (fn.is_ctor_or_dtor)     return "constructor or destructor in a header";
@@ -1878,6 +1897,27 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         if (fn.is_static && is_included_file(fn.file)) {
             fn.keep_in_header = true;
             continue;
+        }
+
+        // A static is renamed so that the pieces can share it, and the rename is applied
+        // to every whole-identifier occurrence of the name. When another function anywhere
+        // in the translation unit has the same unqualified name, some of those occurrences
+        // are its: OpenCV's `static getCvtScaleAbsFunc()` dispatches through
+        // `CV_CPU_DISPATCH(getCvtScaleAbsFunc, ...)`, whose expansion names
+        // `cpu_baseline::getCvtScaleAbsFunc`, and renaming the token in the macro argument
+        // left `no member named '__static_..._getCvtScaleAbsFunc' in namespace
+        // 'cpu_baseline'`. Such a static stays in the preamble: internal linkage makes the
+        // copy every piece then holds harmless.
+        if (fn.is_static) {
+            bool is_member = false;
+            for (const auto& e : fn.scope_chain)
+                if (e.kind == ScopeKind::Class) { is_member = true; break; }
+            auto it = g_function_name_usrs.find(fn.name);
+            if (!is_member && it != g_function_name_usrs.end() && it->second.size() > 1) {
+                fn.name_shared = true;
+                fn.keep_in_header = true;
+                continue;
+            }
         }
 
         // Harmless today, because the visitor does not harvest conversion operators at all
