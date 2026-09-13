@@ -181,6 +181,18 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunPairHeaderTest.cmake)
 
+# The libclang prefix PCH, built from a copy of the include block, has to resolve quoted
+# includes against the unit's own directory. TODO/42 (5).
+add_test(
+  NAME launcher.quoted_include_in_prefix
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/quoted_prefix/main.cpp
+          -DAPI_DIR=${cpp_splitter_test_dir}/quoted_prefix/api
+          -DWORKDIR=${cpp_splitter_test_output}/quoted_prefix
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunQuotedPrefixTest.cmake)
+
 # What the launcher tells the build system a split object depends on. The pieces include
 # rewritten copies of the headers, so without help the depfile names only those and an edit
 # to the real header rebuilds nothing.

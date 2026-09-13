@@ -416,6 +416,14 @@ static bool extend_through_semicolon(const std::string& blanked, unsigned& to) {
 
 static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string& file) {
     if (!vd->variables) return;
+    if (const char* dump = std::getenv("CPP_SPLITTER_DUMP_HARVEST")) {
+        if (file.find(dump) != std::string::npos) {
+            unsigned line = 0;
+            clang_getFileLocation(clang_getCursorLocation(cursor), nullptr, &line, nullptr, nullptr);
+            fprintf(stderr, "[harvest-var] line=%-5u %s\n", line,
+                    cx_to_string(clang_getCursorSpelling(cursor)).c_str());
+        }
+    }
 
     CXCursor parent = clang_getCursorSemanticParent(cursor);
     const CXCursorKind pk = clang_getCursorKind(parent);
@@ -2974,7 +2982,8 @@ static bool pch_is_current(const std::string& pch_file) {
 static std::string build_libclang_pch(const std::string& preamble_file,
                                        const std::vector<std::string>& clang_flags,
                                        bool verbose,
-                                       std::ostream& out = std::cout) {
+                                       std::ostream& out = std::cout,
+                                       const std::string& quote_dir = "") {
     if (!fs::exists(preamble_file)) return "";
 
     std::string hash = file_content_hash(preamble_file);
@@ -3012,14 +3021,26 @@ static std::string build_libclang_pch(const std::string& preamble_file,
     if (std::find(pch_flags.begin(), pch_flags.end(), "-x") == pch_flags.end()) {
         pch_flags.insert(pch_flags.begin(), {"-x", "c++-header"});
     }
+    // The prefix is a copy of the unit's include block, written into the split directory.
+    // A quoted include that the unit resolved against its own directory --
+    // `#include "precomp.hpp"` beside modules/core/src/glob.cpp -- resolves against the
+    // copy's directory here and is not found. -iquote gives it the original's directory, and
+    // only for quoted includes, which is exactly the rule the compiler applied to the unit.
+    if (!quote_dir.empty()) {
+        pch_flags.push_back("-iquote");
+        pch_flags.push_back(quote_dir);
+    }
 
     std::vector<const char*> args;
     for (const auto& f : pch_flags) args.push_back(f.c_str());
 
     CXTranslationUnit tu = nullptr;
+    // With a preprocessing record, so that the include directives of the prefix -- which the
+    // main parse no longer reads from the source -- are still there for inclusions_of().
     CXErrorCode err = clang_parseTranslationUnit2(
         index, preamble_file.c_str(), args.data(),
-        static_cast<int>(args.size()), nullptr, 0, CXTranslationUnit_ForSerialization, &tu);
+        static_cast<int>(args.size()), nullptr, 0,
+        CXTranslationUnit_ForSerialization | CXTranslationUnit_DetailedPreprocessingRecord, &tu);
 
     if (err != CXError_Success || !tu) {
         if (verbose) out << "  libclang PCH: parse failed (code: " << err << ")\n";
@@ -3028,6 +3049,33 @@ static std::string build_libclang_pch(const std::string& preamble_file,
         return "";
     }
 
+    // A PCH whose build reported an error is incomplete -- a fatal `file not found` leaves
+    // every header behind that include out of it -- and a parse that loads it then reads a
+    // program that is neither the source nor anything else. OpenCV's core parsed with 39
+    // errors per unit on exactly that, and the split was decided on the result. Better no
+    // PCH than that one.
+    {
+        const unsigned n = clang_getNumDiagnostics(tu);
+        unsigned errors = 0;
+        for (unsigned i = 0; i < n; ++i) {
+            CXDiagnostic d = clang_getDiagnostic(tu, i);
+            if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
+                if (verbose && errors < 3)
+                    out << "  libclang PCH diagnostic: "
+                        << cx_to_string(clang_formatDiagnostic(d, CXDiagnostic_DisplaySourceLocation)) << "\n";
+                ++errors;
+            }
+            clang_disposeDiagnostic(d);
+        }
+        if (errors) {
+            if (verbose)
+                out << "  libclang PCH: " << errors << " error(s) while building it; not"
+                       " saved, parsing without it\n";
+            clang_disposeTranslationUnit(tu);
+            clang_disposeIndex(index);
+            return "";
+        }
+    }
     int save_err = clang_saveTranslationUnit(tu, pch_file.c_str(), clang_defaultSaveOptions(tu));
 
     // What this PCH is only valid for. Written before the translation unit is disposed,
@@ -4599,6 +4647,7 @@ static SplitResult do_split(const std::string& input_path,
     std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
     std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
+    size_t prefix_in_pch = 0;   // bytes of the source the prefix PCH already holds
     if (input_is_header && !header_has_include_guard(source)) {
         if (verbose)
             out << "Skipping " << input_path
@@ -4626,6 +4675,7 @@ static SplitResult do_split(const std::string& input_path,
     // per distinct prefix rather than once per split.
     {
         const std::string prefix = include_prefix_of(source);
+        (void)prefix_in_pch;
         if (!prefix.empty()) {
             std::error_code ec;
             fs::create_directories(unit_dir, ec);
@@ -4636,10 +4686,12 @@ static SplitResult do_split(const std::string& input_path,
                 if (ofs.is_open()) ofs << prefix;
             }
             const std::string prefix_pch =
-                build_libclang_pch(prefix_path, all_flags, verbose, out);
+                build_libclang_pch(prefix_path, all_flags, verbose, out,
+                                   fs::path(abs_path).parent_path().string());
             if (!prefix_pch.empty()) {
                 parse_flags_vec.push_back("-include-pch");
                 parse_flags_vec.push_back(prefix_pch);
+                prefix_in_pch = prefix.size();
             }
         }
     }
@@ -4647,6 +4699,13 @@ static SplitResult do_split(const std::string& input_path,
     std::vector<const char*> args;
     for (const auto& f : parse_flags_vec)
         args.push_back(f.c_str());
+    if (verbose) {
+        // What libclang is given is not what the compiler was given, and when the two
+        // disagree the split is decided on one program and compiled as another.
+        std::cerr << "[cpp-splitter] libclang args:";
+        for (const auto& f : parse_flags_vec) std::cerr << " " << f;
+        std::cerr << "\n";
+    }
 
     CXIndex index = clang_createIndex(0, 0);
     if (!index) {
@@ -4679,9 +4738,25 @@ static SplitResult do_split(const std::string& input_path,
     unsigned parse_flags = CXTranslationUnit_PrecompiledPreamble
                          | CXTranslationUnit_CreatePreambleOnFirstParse
                          | CXTranslationUnit_DetailedPreprocessingRecord;
+    // When the prefix PCH is in use the include block is already in the translation unit,
+    // and reading it again from the source processes every unguarded header twice: OpenCV's
+    // *.simd.hpp, included on purpose twice under two macro states, came back a third and a
+    // fourth time as `redefinition of ...`. The parse is therefore given the source with the
+    // prefix blanked -- every character but the newlines replaced by a space, so that every
+    // offset and line number the harvest records is the file's own.
+    std::string parse_source;
+    std::vector<CXUnsavedFile> unsaved;
+    if (prefix_in_pch > 0 && prefix_in_pch <= source.size()) {
+        parse_source = source;
+        for (size_t i = 0; i < prefix_in_pch; ++i)
+            if (parse_source[i] != '\n') parse_source[i] = ' ';
+        unsaved.push_back({abs_path.c_str(), parse_source.c_str(),
+                           static_cast<unsigned long>(parse_source.size())});
+    }
     CXErrorCode err = clang_parseTranslationUnit2(
         index, abs_path.c_str(), args.data(),
-        static_cast<int>(args.size()), nullptr, 0, parse_flags, &tu);
+        static_cast<int>(args.size()), unsaved.empty() ? nullptr : unsaved.data(),
+        static_cast<unsigned>(unsaved.size()), parse_flags, &tu);
 
     if (err != CXError_Success || !tu) {
         if (verbose) std::cerr << "Error: failed to parse translation unit (code: " << err << ")\n";
