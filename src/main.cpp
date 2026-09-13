@@ -2343,8 +2343,16 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
                     group.text = group.type_spelling + " " +
                                  source.substr(group.name_offset,
                                                group.end_offset - group.name_offset);
+                    // A static of this shape is renamed like any other -- every use and the
+                    // moved definition get the mangled name through apply_static_renames()
+                    // -- so the declaration left here has to spell it too. OpenCV's
+                    // `static struct LABLUVLUT_s16_t {...} LABLUVLUTs16` kept the original
+                    // name here and no use could find it.
+                    const std::string declared =
+                        group.rename_and_move ? make_static_mangled_name(unit_tag, group.name)
+                                              : group.name;
                     group.replacement = ";\nextern " + group.type_spelling + " " +
-                                        group.name + ";";
+                                        declared + ";";
                 } else {
                     usable_group = false;
                 }
