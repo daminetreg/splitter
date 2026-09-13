@@ -155,6 +155,81 @@ int describe() { return twice(3) + seven(); }
 int main() { std::printf("%d %d %d\n", twice(21), seven(), plus_one(describe())); return 0; }
 ```
 
+## Expected result on the example
+
+What the splitter writes for the three files, and what the compiler is given.
+
+`math.cppm` — the launcher's command is the interface unit's own
+(`-x c++-module -c math.cppm -fmodule-output=math.pcm -o math.o`).
+
+```
+math.o.split/
+├── math_interface.cppm             the interface the compiler sees; precompiled to math.pcm
+│                                   and compiled to math_interface.o by the original command
+├── math.cppm_1_helper_kept.cpp     module math;  + the body         (implementation unit)
+├── math.cppm_2_seven.cpp           module math;  + the body         (implementation unit)
+├── math.cppm.harvest / .keeps
+└── *.o                             ld -r → math.o, the object the build asked for
+```
+
+```cpp
+// math_interface.cppm
+export module math;
+export inline int twice(int v) { return v * 2; }   // inline: stays, so it is in the BMI
+int helper_kept();                                 // declaration left in place
+export int seven();                                // declaration left in place, `export` kept
+export int plus_one(int v);                        // as written
+```
+
+```cpp
+// math.cppm_2_seven.cpp
+module math;
+#line 4 "/…/math.cppm"
+int seven() { return helper_kept(); }
+```
+
+The piece is compiled with `-fmodule-file=math=math.o.split/math.pcm`, after the interface;
+an implementation unit imports its interface implicitly, so no `#include` of a preamble.
+`.keeps` records `twice` as *exported inline: belongs in the BMI* and `plus_one` as *declared
+only*. An edit to `seven()`'s body changes `math.cppm_2_seven.cpp` and nothing else: the
+interface text, and so `math.pcm`, is byte-identical.
+
+`math_impl.cpp` — an implementation unit; every definition in it is a piece, each an
+implementation unit of its own. There is no preamble to include: `module math;` gives each
+piece the interface, and the unit's own file-local declarations, if any, go in a
+`math_impl_preamble.h` the pieces include after the module declaration.
+
+```cpp
+// math_impl.cpp_1_plus_one.cpp
+module math;
+#line 2 "/…/math_impl.cpp"
+int plus_one(int v) { return v + 1; }
+```
+
+`use.cpp` — an importer. An `import` may not appear in an included header, so the pieces
+carry the unit's import declarations themselves, ahead of the preamble; the preamble holds
+what it holds today, the include block and the declarations.
+
+```
+use.o.split/
+├── use_preamble.h                  #include <cstdio>   int describe();
+├── use.cpp_1_describe.cpp          import math;  #include "use_preamble.h"  + the body
+├── use.cpp_definitions.h           main, which stays with the definitions
+├── use.cpp_0_definitions.cpp       import math;  #include "use.cpp_definitions.h"
+└── *.o                             ld -r → use.o
+```
+
+```cpp
+// use.cpp_1_describe.cpp
+import math;
+#include "use_preamble.h"
+#line 4 "/…/use.cpp"
+int describe() { return twice(3) + seven(); }
+```
+
+Each piece is compiled with the unit's own `-fmodule-file=` flags, which pass through
+already. The depfile names `use.cpp`, `<cstdio>`'s headers and `math.pcm`.
+
 ## The test
 
 `launcher.module_interface_split`, `test/cmake/RunModuleSplitTest.cmake`, skipped with the
