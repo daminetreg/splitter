@@ -1,8 +1,8 @@
 # A minimal OpenCV through CMake RE, on the cluster
 
-Two measurement sets, each from a single run of
+Three measurement sets, each from a single run of
 `BUILD_TYPE=Release CMAKE_RE_JOBS=500 REMOTE_SPLIT=1 ./benchmark-opencv-cmake-re.sh --distributed`
-on 13 September 2026: before TODO/42 and after it. The corpus, the scenarios and the body target are those of
+on 13 September 2026: before TODO/42, after it, and after TODO/44. The corpus, the scenarios and the body target are those of
 [`opencv-local-split.md`](opencv-local-split.md): OpenCV 4.11.0, `core` and `imgproc`, static,
 nothing optional, 158 C++ units; one line added to the body of `SparseMat::nzcount()` in
 `mat.inl.hpp`, a header all 158 units include and one emits.
@@ -21,6 +21,27 @@ reclient's per-action records — actions executed on the cluster and actions se
 cache. The last column is the splitter's own report of what the units did.
 
 ## Results
+
+### After TODO/44
+
+| scenario | splitter | build | fallbacks | declined | remote | cached | what the 158 units did |
+|---|---|---:|---:|---:|---:|---:|---|
+| full | no | 123.8s | 0 | — | 1 | 516 | served from cache |
+| full | split here | 74.9s | 0 | 0 | 289 | 25575 | 158 split here; pieces served from cache |
+| full | split on cluster | 69.3s | 0 | 0 | 160 | 26436 | 158 split on the cluster; pieces served from cache |
+| no-op | any | 3.9–8.6s | 0 | 0 | 0 | 0–474 | reused |
+| one source / one header | any | 3.8–3.9s | 0 | 0 | 0 | 0 | not re-mirrored |
+| **one body** | **no** | **139.1s** | 0 | — | **158** | 0 | all 158 recompiled |
+| **one body** | **split here** | **13.9s** | 0 | 0 | **23** | 510 | 158 re-sliced, 23 pieces recompiled |
+| **one body** | **split on cluster** | **14.5s** | 0 | 0 | **23** | 510 | 158 re-sliced, 23 pieces recompiled |
+
+All 158 units split (TODO/44); no unit is compiled whole on any row. The pieces of the full
+split builds were served from the cluster's cache, being the pieces the run after TODO/42
+had executed: 289 and 160 executions are the three units' new pieces and the splits
+themselves. The plain rows took three times what they took in the run after TODO/42 with the
+same action counts (123.8s against 11.7s for 516 cache hits; 139.1s against 40.9s for 158
+executions): the cluster was slower on this run, and the split rows are to be read against
+the plain rows of the same run.
 
 ### After TODO/42
 
@@ -52,9 +73,10 @@ three declines in the fallback column; the columns have been separated since.
 
 ## Reading the tables
 
-**The body edit, after TODO/42: 40.9s plain against 16.8s with the split produced here and
-22.5s with it produced on the cluster** — 158 remote compiles against 38 and 26. The 3
-declined units are compiled whole on every header edit; the rest re-slice.
+**The body edit, after TODO/44: 139.1s plain against 13.9s with the split produced here and
+14.5s with it produced on the cluster** — 158 remote compiles against 23 and 23. After
+TODO/42 the same rows read 40.9s against 16.8s and 22.5s — 158 compiles against 38 and 26 —
+the 3 declined units being compiled whole on every header edit. Now every unit re-slices.
 
 **The split-on-cluster body row's 4043 executions are gone.** They read 26 now, with 501
 cache hits. The cause was the libclang parse: built around a prefix PCH that could not find
@@ -69,11 +91,13 @@ that followed found them cached.
 
 ## Caveats
 
-- Everything in `opencv-local-split.md`'s caveats applies: three units are declined, and
-  the split archives are not symbol-identical to the plain ones.
+- Everything in `opencv-local-split.md`'s caveats applies: the split archives are not
+  symbol-identical to the plain ones.
 - The plain `full` row is served from cache because a plain build of the same tree preceded
-  the run; its cold figure, 163.8s, is from a smoke test.
-- Wall times are from one run.
+  the run; its cold figure, 163.8s, is from a smoke test. The split `full` rows after
+  TODO/44 are served from cache too, from the run before.
+- Wall times are from one run, and the cluster's speed differs between runs: the plain rows
+  after TODO/44 are three times the plain rows after TODO/42 for identical action counts.
 
 ## Reproducing
 

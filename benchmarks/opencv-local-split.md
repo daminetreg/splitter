@@ -1,8 +1,8 @@
 # A minimal OpenCV, split and built on one machine
 
-Two measurement sets, each from a single run of `./benchmark-opencv.sh`: the first on 13
-September 2026, before TODO/42; the second on the same day after it. The first is kept because
-the second is its consequence.
+Three measurement sets, each from a single run of `./benchmark-opencv.sh`, all on 13
+September 2026: before TODO/42, after it, and after TODO/44. The earlier ones are kept because
+each later one is their consequence.
 
 ## What was built
 
@@ -40,6 +40,35 @@ mirrored into all **158** unit split directories, and `nzcount()` is emitted as 
 whose content changed.
 
 ## Results
+
+### After TODO/44
+
+| scenario | plain | split | ratio | fallbacks | declined |
+|---|---:|---:|---:|---:|---:|
+| full | 16.3s | 322.2s | 19.8x slower | 0 | 0 |
+| no-op | 0.2s | 0.2s | — | 0 | 0 |
+| one source | 1.3s | 0.3s | 4.3x faster | 0 | 0 |
+| one header | 16.0s | 1.0s | **16x faster** | 0 | 0 |
+| one body | 15.9s | 4.6s | **3.5x faster** | 0 | 0 |
+
+**All 158 units split; 0 fall back, 0 are declined.** `alloc.cpp` and `array.cpp` keep the
+static variable and every function that uses it together in the definitions object
+(TODO/44 A); `arithm.dispatch.cpp` splits each inclusion of `arithm.simd.hpp` on its own,
+the second into `include/_inclusion/2/`, with its pieces compiled in that inclusion's macro
+state (TODO/44 B). On the header row nothing is compiled whole any more: 158 launcher runs
+reuse their split, 1.0s in all. On the body row 158 units re-slice and 0 parse; 35 pieces
+recompile, as before.
+
+| artefact | plain | split |
+|---|---:|---:|
+| `libopencv_core.a` | 6,392,568 bytes | 10,715,094 bytes |
+| `libopencv_imgproc.a` | 7,164,534 bytes | 9,727,204 bytes |
+| build tree | 30M | 5.7G |
+| generated pieces | — | 8641 |
+
+`nm --defined-only -g`: `libopencv_core.a` 4118 external symbols plain, 5231 split, 85 only
+in the plain archive, 1198 only in the split one (`imgproc`: 2604 / 3125; 352 / 873) — the
+same shape as after TODO/42, 190 more pieces from the three units.
 
 ### After TODO/42
 
@@ -99,22 +128,19 @@ unnamed struct type became one object per piece.
 
 ## Why the rows read as they do
 
-**The full build costs 19.4x**, against 11.3x on Boost.Spirit's suite: `-O3` compiles of
-8451 pieces on one machine.
+**The full build costs 19.8x**, against 11.3x on Boost.Spirit's suite: `-O3` compiles of
+8641 pieces on one machine.
 
-**The header touch is 3.1x faster than plain.** 158 launcher runs; 155 units reuse their
-split, 3 are compiled whole. Before TODO/42 the 61 fallback units were compiled whole on every
-touch.
+**The header touch is 16x faster than plain.** 158 launcher runs, every one reusing its
+split. After TODO/42 the 3 declined units were compiled whole on every touch, and the row
+read 5.3s; before it the 61 fallback units were, and it read 17.6s.
 
-**The body edit is 2.2x faster than plain.** 155 re-slices without a parse and 35 piece
-compiles, against 158 whole compiles.
+**The body edit is 3.5x faster than plain.** 158 re-slices without a parse and 35 piece
+compiles, against 158 whole compiles. After TODO/42, with 3 whole compiles among them, the
+row read 7.3s.
 
 ## Caveats
 
-- Three units are declined; the reasons are stated by the splitter and are limits of the
-  approach, not defects: a static of a type no other translation unit can name, and a header
-  included twice with no guard that defines external functions. `TODO/44` proposes how to
-  split both. Before this distinction was drawn they were counted as fallbacks.
 - The split archives are not symbol-identical to the plain ones; see above.
 - `-j16` on 32 cores, as for the Boost measurements.
 - Wall times are from one run.
