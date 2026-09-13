@@ -793,6 +793,9 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     std::string cursor_filename =
         fs::absolute(cx_to_string(clang_getFileName(cursor_file)), fec).lexically_normal().string();
     const bool wanted_file = !fec && vd->wanted->count(cursor_filename) != 0;
+    // Every cursor seen in a file to split says which inclusion of it is being read -- the
+    // macro expansions of the preprocessing record included, which is how a fragment of a
+    // function body with no declaration of its own gets its inclusions told apart.
     if (wanted_file) note_inclusion_base(cursor_filename, loc);
 
     CXCursorKind kind = clang_getCursorKind(cursor);
@@ -4084,6 +4087,7 @@ static void attribute_pair_inclusions(HarvestMap& harvest,
                                       const std::string& main_file,
                                       const std::string& source,
                                       const std::vector<std::string>& inc_dirs,
+                                      const std::string& output_dir,
                                       bool verbose,
                                       std::ostream& out) {
     for (const auto& path : g_pair_headers) {
@@ -4136,6 +4140,18 @@ static void attribute_pair_inclusions(HarvestMap& harvest,
         }
         const std::string rel = header_mirror_relpath(path, inc_dirs);
         for (size_t n = 2; n <= count; ++n) {
+            // Only an inclusion that gets a copy is named: one that defines nothing is not
+            // split, and the preamble keeps reading the original. OpenCV's
+            // ccl_bolelli_forest_singleline.inc.hpp is a fragment of a function body,
+            // included in two functions.
+            const std::string key = inclusion_key(path, static_cast<unsigned>(n));
+            const bool has_copy =
+                harvested ? (harvest.count(key) && !harvest[key].empty()) ||
+                                (var_harvest.count(key) && !var_harvest[key].empty())
+                          : fs::exists((fs::path(split_include_root(output_dir)) /
+                                        inclusion_mirror_relpath(rel, static_cast<unsigned>(n)))
+                                           .string());
+            if (!has_copy) continue;
             const auto& site = sites->second[n - 1];
             PreambleIncludeRewrite rw;
             rw.unit = main_file;
@@ -5550,7 +5566,7 @@ static SplitResult do_split(const std::string& input_path,
     if (!g_pair_headers.empty()) {
         attribute_pair_inclusions(harvest, var_harvest, candidates,
                                   files_with_external_definitions(tu), abs_path, source,
-                                  unit_include_dirs(extra_flags), verbose, out);
+                                  unit_include_dirs(extra_flags), output_dir, verbose, out);
         if (!g_unsplittable_header.empty()) {
             decline_for_header();
             return result;
