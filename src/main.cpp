@@ -23,9 +23,36 @@
 
 namespace fs = std::filesystem;
 
-static std::vector<std::string> detect_system_includes(const std::string& compiler = "g++") {
+// The flags of a compile that change where the driver looks for its system headers, and so
+// have to be on the probe too: p4c is compiled with -stdlib=libc++, and a probe without it
+// handed libclang libstdc++ 13's <chrono>, which clang 13 cannot parse in C++20 -- every
+// unit parsed with errors and the harvest was wrong. TODO/47.
+static std::vector<std::string> include_path_flags(const std::vector<std::string>& flags) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i < flags.size(); ++i) {
+        const std::string& f = flags[i];
+        if (f.rfind("-stdlib=", 0) == 0 || f.rfind("--gcc-toolchain", 0) == 0 ||
+            f.rfind("--sysroot", 0) == 0 || f.rfind("--target=", 0) == 0 ||
+            f == "-m32" || f == "-m64" || f == "-nostdinc" || f == "-nostdinc++" ||
+            f == "-nostdlibinc" || f.rfind("-isysroot", 0) == 0)
+            out.push_back(f);
+        if ((f == "-target" || f == "-isysroot" || f == "--sysroot" || f == "-stdlib") &&
+            i + 1 < flags.size()) {
+            out.push_back(f);
+            out.push_back(flags[++i]);
+        }
+    }
+    return out;
+}
+
+static std::string shell_quote(const std::string& s);
+
+static std::vector<std::string> detect_system_includes(const std::string& compiler = "g++",
+                                                       const std::vector<std::string>& flags = {}) {
     std::vector<std::string> includes;
-    std::string cmd = compiler + " -E -x c++ /dev/null -v 2>&1";
+    std::string cmd = compiler;
+    for (const auto& f : flags) cmd += " " + shell_quote(f);
+    cmd += " -E -x c++ /dev/null -v 2>&1";
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) return includes;
 
@@ -121,6 +148,20 @@ struct FunctionInfo {
     // `= default;` or `= delete;` out of line: the extent was carried through the `;`, and
     // there is no body to re-slice.
     bool is_defaulted_or_deleted = false;
+    // The function's type carries an exception specification -- `throw()`, `noexcept` --
+    // that the definition's own text may not spell: a definition over a declaration in a
+    // system header inherits it, as p4c's `void free(void *)` does from <stdlib.h>. The
+    // compiler allows the omission only against a declaration from a system header, so no
+    // declaration is written into the preamble for such a function: the one it inherited
+    // from is already there. TODO/47.
+    bool has_exception_spec = false;
+    bool has_prior_declaration = false;   // an earlier declaration in the translation unit
+    // The body holds a function-local `static` that is not a constant: state. Kept in the
+    // preamble with internal linkage, the function is one per piece and so is its state.
+    // p4c's lib/cstring.cpp interns strings through `auto &cache()` in an unnamed namespace,
+    // whose local `static node_hash_set g_cache` became one cache per piece, and cstrings
+    // compared by pointer stopped comparing equal. Such a unit is declined. TODO/47.
+    bool has_local_static = false;
 
     // Set by prepare_functions() once the whole file has been visited.
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
@@ -261,6 +302,12 @@ struct VariableInfo {
     std::vector<ScopeEntry> scope_chain;
     bool is_member = false;           // out-of-class static data member: the class declares it
     bool move_out = false;            // may exist in only one object
+    // The names of the other declarators of the same declaration, when several are moved
+    // together (`static bool done_init, started_init;`): renamed like the first. TODO/47.
+    std::vector<std::string> other_names;
+    // Of an empty type -- a captureless lambda, an empty struct: one copy per piece is the
+    // same object for every purpose, so a `static` one may stay in the preamble.
+    bool is_empty_type = false;
     // Kept where it is and marked `inline`, rather than moved to the definitions header.
     // Only from C++17, where inline variables exist.
     bool inline_in_place = false;
@@ -276,7 +323,14 @@ struct VariableInfo {
     // routinely a macro -- Boost.Filesystem writes BOOST_CONSTEXPR_OR_CONST -- and such a
     // variable has to stay where its users can see it as a constant expression.
     bool is_const = false;
-    bool in_unnamed_ns = false;
+    bool in_unnamed_ns = false;       // an unnamed namespace encloses it beyond the innermost run
+    // Innermost consecutive unnamed namespaces around it. A variable in one is moved out
+    // and renamed like a static, its definition hoisted into the enclosing named scope and
+    // the `extern` left behind placed there too, by closing and reopening the unnamed
+    // namespaces around it. p4c's bison-generated ir-generator.cpp keeps its parser state
+    // -- `static IrNamespace *current_namespace` -- in one; left in the preamble it was one
+    // per piece and the generated IR header had every method twice. TODO/47.
+    unsigned unnamed_ns_depth = 0;
     // Moved out and renamed, the way a `static` function in a .cpp already is. Only for the
     // translation unit's own source: see TODO 26.
     bool rename_and_move = false;
@@ -638,6 +692,7 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
     std::vector<ScopeEntry> scope_parts;
     CXCursor up = parent;
     bool in_template = false;
+    bool innermost = true;
     while (true) {
         const CXCursorKind uk = clang_getCursorKind(up);
         if (uk != CXCursor_Namespace && uk != CXCursor_ClassDecl &&
@@ -651,8 +706,12 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
             in_template = true;
         const std::string uname = cx_to_string(clang_getCursorSpelling(up));
         if (uname.empty()) {
-            if (uk == CXCursor_Namespace) info.in_unnamed_ns = true;
+            if (uk == CXCursor_Namespace) {
+                if (innermost) ++info.unnamed_ns_depth;
+                else info.in_unnamed_ns = true;
+            }
         } else {
+            innermost = false;
             scope_parts.push_back(
                 {uname, uk == CXCursor_Namespace ? ScopeKind::Namespace : ScopeKind::Class});
         }
@@ -690,12 +749,14 @@ static void harvest_variable(VisitorData* vd, CXCursor cursor, const std::string
             // the preamble, as it did before the rule; the rule is for a variable whose
             // copies would diverge.
             const long long size = clang_Type_getSizeOf(t);
+            if (size >= 0 && size <= 1) info.is_empty_type = true;
             if (info.type_lacks_linkage && size >= 0 && size <= 1)
                 info.type_lacks_linkage = false;
         }
     }
     info.is_const =
         clang_isConstQualifiedType(clang_getCanonicalType(clang_getCursorType(cursor))) != 0;
+
     info.move_out = clang_getCursorLinkage(cursor) == CXLinkage_External && !in_template;
     if (info.move_out) {
         const std::string pretty = cx_to_string(clang_getCursorPrettyPrinted(cursor, nullptr));
@@ -893,6 +954,33 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     // is kept for some cheaper reason first. prepare_functions() asks only about the ones
     // that would otherwise be split.
     info.fn_type = clang_getCursorType(cursor);
+    {
+        auto find_static = [](CXCursor c, CXCursor, CXClientData d) -> CXChildVisitResult {
+            if (clang_getCursorKind(c) == CXCursor_VarDecl &&
+                clang_Cursor_getStorageClass(c) == CX_SC_Static &&
+                !clang_isConstQualifiedType(clang_getCanonicalType(clang_getCursorType(c)))) {
+                *static_cast<bool*>(d) = true;
+                return CXChildVisit_Break;
+            }
+            // Not into a lambda or a local class: their statics are theirs.
+            const CXCursorKind k = clang_getCursorKind(c);
+            if (k == CXCursor_LambdaExpr || k == CXCursor_ClassDecl || k == CXCursor_StructDecl)
+                return CXChildVisit_Continue;
+            return CXChildVisit_Recurse;
+        };
+        clang_visitChildren(cursor, find_static, &info.has_local_static);
+    }
+    {
+        const CXCursor_ExceptionSpecificationKind es =
+            static_cast<CXCursor_ExceptionSpecificationKind>(
+                clang_getCursorExceptionSpecificationType(cursor));
+        info.has_exception_spec = es != CXCursor_ExceptionSpecificationKind_None &&
+                                  es != CXCursor_ExceptionSpecificationKind_Unevaluated &&
+                                  es != CXCursor_ExceptionSpecificationKind_Uninstantiated &&
+                                  es != CXCursor_ExceptionSpecificationKind_Unparsed;
+        info.has_prior_declaration =
+            !clang_equalCursors(clang_getCanonicalCursor(cursor), cursor);
+    }
 
     // An explicit specialization is introduced by a `template< >` prefix that sits outside
     // the cursor's extent. Moving the definition out would strand that prefix in the
@@ -1320,6 +1408,15 @@ static std::string terminate_declaration(const std::string& decl) {
 // the end of the preamble also means it precedes every use the original file had: a
 // function pointer initialised at namespace scope just below the definition would
 // otherwise refer to a name that has not been declared yet.
+// An exception specification the type has and the text does not spell was inherited from
+// an earlier declaration, which the preamble already carries; a declaration written
+// without it would be rejected, and one written with it is not needed.
+static bool inherits_exception_spec(const FunctionInfo& fn, const std::string& sig) {
+    if (!fn.has_exception_spec || !fn.has_prior_declaration) return false;
+    const std::string blanked = blank_code_noise(sig);
+    return !contains_decl_token(blanked, "noexcept") && !contains_decl_token(blanked, "throw");
+}
+
 static std::string generate_forward_decl_inplace(const FunctionInfo& fn,
                                                  const std::string& stem) {
     // Members keep their declaration inside the class body instead -- except an explicit
@@ -1338,6 +1435,8 @@ static std::string generate_forward_decl_inplace(const FunctionInfo& fn,
 
     std::string sig = trim_ws(fn.body.substr(0, decl_end));
     if (sig.empty())
+        return "";
+    if (inherits_exception_spec(fn, sig))
         return "";
 
     sig = strip_decl_specifier(sig, "inline");
@@ -1374,6 +1473,8 @@ static std::string generate_forward_decl_wrapped(const FunctionInfo& fn,
 
     std::string sig = extract_source_signature(source, fn);
     if (sig.empty())
+        return "";
+    if (inherits_exception_spec(fn, sig))
         return "";
 
     sig = strip_decl_specifier(sig, "inline");
@@ -1531,6 +1632,9 @@ static StaticRenameMap build_static_rename_map(const std::vector<FunctionInfo>& 
         if (!var.rename_and_move) continue;
         if (seen.insert(var.name).second)
             renames.emplace_back(var.name, make_static_mangled_name(unit_tag, var.name));
+        for (const auto& other : var.other_names)
+            if (seen.insert(other).second)
+                renames.emplace_back(other, make_static_mangled_name(unit_tag, other));
     }
 
     for (const auto& fn : functions) {
@@ -1653,6 +1757,18 @@ static size_t find_declarator(const std::string& blanked, const std::string& nam
         pos += name.size();
     }
     return std::string::npos;
+}
+
+// Offset of the last whole-token occurrence of `name`: a variable's declarator, which the
+// type's own tokens precede and an array bound or nothing follows.
+static size_t find_variable_name(const std::string& blanked, const std::string& name) {
+    if (name.empty()) return std::string::npos;
+    size_t found = std::string::npos, pos = 0;
+    while ((pos = blanked.find(name, pos)) != std::string::npos) {
+        if (token_at(blanked, pos, name.size())) found = pos;
+        pos += name.size();
+    }
+    return found;
 }
 
 // `override` and `final` are legal only on the in-class declaration. They can appear only
@@ -2413,6 +2529,14 @@ static void warn_pre_cxx17_variable_move(const VariableInfo& var) {
     std::cerr << "; its initialiser now runs in link order -- see example/static-init-order/\n";
 }
 
+// A `static` variable no rule could move out of the preamble. Left there it is one object
+// per piece and the link says nothing -- internal linkage -- so the program is wrong rather
+// than the build: p4c's gc.cpp had `static bool done_init, started_init;` and
+// `static char emergency_pool[16 * 1024];` duplicated into every piece, and the split
+// irgenerator initialised the collector once per copy and aborted. Such a unit is declined
+// (do_split()), with the variable named. TODO/47.
+static std::string g_unmovable_static_variable;
+
 static void prepare_variables(std::vector<VariableInfo>& variables,
                               const std::vector<FunctionInfo>& functions,
                               const std::string& source,
@@ -2586,11 +2710,27 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
                 // definition itself is rewritten by apply_static_renames(); only the
                 // declaration left behind has to name the mangled form directly, because
                 // `replacement` goes into the preamble verbatim.
-                if (type_spelling_is_simple(group.type_spelling)) {
+                //
+                // The declaration left behind is the source's own declarator with the name
+                // mangled, which carries an array bound or a pointer as written --
+                // `static char emergency_pool[16 * 1024]` -- and the pretty-printed type
+                // only when the text gives no declarator. TODO/47.
+                const std::string mangled = make_static_mangled_name(unit_tag, group.name);
+                std::string decl;
+                // `extern auto x;` is not a declaration; a deduced type has to be spelled.
+                if (!head.empty() && !contains_decl_token(head_blanked, "auto")) {
+                    std::string h = strip_decl_specifier(head, "static");
+                    const size_t name_pos = find_variable_name(blank_code_noise(h), group.name);
+                    if (name_pos != std::string::npos) {
+                        h.replace(name_pos, group.name.size(), mangled);
+                        decl = h;
+                    }
+                }
+                if (decl.empty() && type_spelling_is_simple(group.type_spelling))
+                    decl = group.type_spelling + " " + mangled;
+                if (!decl.empty()) {
                     group.text = strip_decl_specifier(group.text, "static");
-                    group.replacement =
-                        "extern " + group.type_spelling + " " +
-                        make_static_mangled_name(unit_tag, group.name) + ";";
+                    group.replacement = terminate_declaration("extern " + decl);
                 } else {
                     usable_group = false;
                 }
@@ -2608,18 +2748,35 @@ static void prepare_variables(std::vector<VariableInfo>& variables,
             // rebuilt from its type. A declarator whose type cannot be written that way
             // takes the whole declaration out of the running -- it moves whole or not at
             // all, and half of it moving would be worse than none.
+            //
+            // Several `static` declarators are renamed together, each declared under its
+            // mangled name, the text moved with `static` off -- apply_static_renames()
+            // reaches every name through `other_names`. TODO/47.
             for (size_t k = i; k < j && usable_group; ++k) {
-                if (usable[k].is_member || usable[k].rename_and_move ||
-                    !type_spelling_is_simple(usable[k].type_spelling))
+                if (usable[k].is_member || !type_spelling_is_simple(usable[k].type_spelling) ||
+                    usable[k].rename_and_move != group.rename_and_move)
                     usable_group = false;
             }
             if (usable_group) {
                 group.replacement.clear();
-                for (size_t k = i; k < j; ++k)
+                for (size_t k = i; k < j; ++k) {
+                    const std::string declared =
+                        group.rename_and_move ? make_static_mangled_name(unit_tag, usable[k].name)
+                                              : usable[k].name;
                     group.replacement +=
-                        "extern " + usable[k].type_spelling + " " + usable[k].name + ";\n";
+                        "extern " + usable[k].type_spelling + " " + declared + ";\n";
+                    if (k > i) group.other_names.push_back(usable[k].name);
+                }
+                if (group.rename_and_move)
+                    group.text = strip_decl_specifier(group.text, "static");
             }
         }
+
+        // A static that cannot be moved must not stay either: every piece would get one --
+        // unless its type is empty, in which case every copy is the same object.
+        if (!usable_group && group.rename_and_move && !group.is_empty_type &&
+            g_unmovable_static_variable.empty())
+            g_unmovable_static_variable = group.name;
 
         // Nothing that can be moved safely. It stays in the preamble, where every piece
         // gets a copy -- which is the defect, so the link fails and the unit falls back to
@@ -2656,7 +2813,20 @@ static std::string variable_declaration_head(const std::string& text) {
     for (size_t i = 0; i < blanked.size(); ++i) {
         const char c = blanked[i];
         if (depth == 0) {
-            if (c == '=' || c == '(' || c == '{' || c == ';')
+            // A `(` opens a direct-initialiser -- `int x(5)` -- unless what follows it is
+            // `*` or `&`, which makes it a declarator: p4c's
+            // `static size_t (*mod_hashsize[])(size_t x) = {...}`. TODO/47.
+            // The parameter list that follows such a declarator's `)` is one as well.
+            bool declarator_paren = false;
+            if (c == '(') {
+                size_t j = i + 1;
+                while (j < blanked.size() && blanked[j] == ' ') ++j;
+                declarator_paren = j < blanked.size() && (blanked[j] == '*' || blanked[j] == '&');
+                size_t k = i;
+                while (k > 0 && blanked[k - 1] == ' ') --k;
+                if (k > 0 && blanked[k - 1] == ')') declarator_paren = true;
+            }
+            if (c == '=' || (c == '(' && !declarator_paren) || c == '{' || c == ';')
                 return trim_ws(text.substr(0, i));
             if (c == ',') return "";
         }
@@ -2896,10 +3066,28 @@ static std::string generate_preamble(const std::string& source,
             if (r.var->inline_in_place) {
                 // C++17: it stays, marked `inline`, so the copies merge and the order
                 // relative to its neighbours is the order the source had.
+                //
+                // And `__attribute__((used))`, for the same reason a header's split-out
+                // function carries it: an inline variable is emitted only in a translation
+                // unit that uses it, and the pieces of the unit that defines it may use it
+                // nowhere -- p4c's indent.cpp defines `int indent_t::tabsz = 2;` and only
+                // log.cpp reads it, through indent.h's `operator<<`. Every piece then
+                // emits a weak copy and the linker keeps one (TODO/47).
+                //
+                // Not on a template -- a member of a class template, which is instantiated
+                // where it is used and takes no attribute in front of `template` -- nor on a
+                // declaration a macro produces, whose text cannot be told apart from one:
+                // Boost.Random's BOOST_RANDOM_MT_DEFINE_CONSTANT(UIntType, default_seed)
+                // expands to exactly that template.
                 std::string text = apply_static_renames(r.var->text, renames);
                 const std::string blanked = blank_code_noise(text);
-                if (!contains_decl_token(blanked, "inline"))
-                    text.insert(0, "inline ");
+                if (!contains_decl_token(blanked, "inline")) {
+                    const std::string lead = trim_ws(blanked);
+                    const bool is_template = lead.rfind("template", 0) == 0;
+                    text.insert(0, is_template || is_macro_invocation_text(lead)
+                                       ? "inline "
+                                       : "__attribute__((used)) inline ");
+                }
                 preamble += text;
             } else if (!definitions) {
                 // No definitions header to move it to: leave it exactly where it was.
@@ -2908,7 +3096,14 @@ static std::string generate_preamble(const std::string& source,
                 *definitions += wrap_in_namespaces(
                     apply_static_renames(r.var->text, renames), r.var->scope_chain);
                 *definitions += "\n";
-                if (!r.var->replacement.empty()) preamble += r.var->replacement + "\n";
+                if (!r.var->replacement.empty()) {
+                    // Hoisted out of its unnamed namespaces: the declaration goes where the
+                    // definition went, the enclosing named scope, and the namespaces are
+                    // closed and reopened around it so every use still follows it.
+                    for (unsigned i = 0; i < r.var->unnamed_ns_depth; ++i) preamble += "}\n";
+                    preamble += r.var->replacement + "\n";
+                    for (unsigned i = 0; i < r.var->unnamed_ns_depth; ++i) preamble += "namespace {\n";
+                }
             }
         } else if (r.fn) {
             // The definition moved to a split file, so a declaration has to take its
@@ -3450,6 +3645,9 @@ struct SplitHeaderInfo {
 static std::unordered_map<std::string, SplitHeaderInfo> g_split_headers;
 // Variant copies of pair headers with the definitions in place -> the original. TODO/44 (B).
 static std::map<std::string, std::string> g_definition_variants;
+// Headers copied as they are because they include a split header beside themselves ->
+// the original. TODO/47.
+static std::map<std::string, std::string> g_verbatim_mirrors;
 
 
 static void inclusion_visitor(CXFile included_file, CXSourceLocation* /*stack*/,
@@ -3514,15 +3712,14 @@ static std::vector<std::string> include_dirs_from_flags(const std::vector<std::s
 // unreachable at the path the source spells -- the original wins the lookup and its
 // definitions collide with the split pieces that also define them.
 static std::string g_unit_source_dir;
+static std::string g_unit_main_file;   // the unit itself, normalised; its directives are the preamble's
 
 static std::vector<std::string> unit_include_dirs(const std::vector<std::string>& flags) {
     std::vector<std::string> dirs = include_dirs_from_flags(flags);
-    if (!g_unit_source_dir.empty()) {
-        if (std::find(dirs.begin(), dirs.end(), g_unit_source_dir) == dirs.end())
-            dirs.push_back(g_unit_source_dir);
-        std::sort(dirs.begin(), dirs.end(),
-                  [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
-    }
+    // Last, not sorted in: it only stands in for a directive the record did not see.
+    if (!g_unit_source_dir.empty() &&
+        std::find(dirs.begin(), dirs.end(), g_unit_source_dir) == dirs.end())
+        dirs.push_back(g_unit_source_dir);
     return dirs;
 }
 
@@ -3533,11 +3730,84 @@ static std::string path_hash(const std::string& s) {
     return std::string(buf);
 }
 
-// Where a header's rewritten copy lives, relative to <split_dir>/include: the path it was
-// included as. A header under no include directory falls back to a hash of its absolute
-// path, which keeps the mapping unique rather than colliding on the basename.
+// How each file the translation unit read was first spelled: the file that included it and
+// the name written in the directive, from the preprocessing record. Filled once per parse
+// by collect_inclusion_record(); header_mirror_relpath() reads it.
+struct IncludeSpelling {
+    std::string includer;   // absolute path of the file holding the directive
+    std::string spelled;    // the name as written
+};
+static std::map<std::string, IncludeSpelling> g_include_spellings;
+static std::map<std::string, std::string> g_mirror_rel_cache;
+
+static std::string header_mirror_relpath(const std::string& abs_header,
+                                         const std::vector<std::string>& include_dirs);
+
+// Where a header's rewritten copy lives, relative to <split_dir>/include, decided from how
+// the unit spelled its inclusion, so that the same directive finds the copy through
+// -I<split_dir>/include:
+//
+//  - `#include "lib/cstring.h"` resolved through an include directory: the copy is at
+//    `lib/cstring.h`. p4c includes everything relative to its root and sits its sources
+//    in `lib/`; matching the longest include directory put the copy at `cstring.h`, where
+//    the directive never looked, and the original's definitions came back into every piece
+//    (TODO/47);
+//  - `#include "cstring.h"` from `lib/bitrange.h`, resolved beside its includer: the copy
+//    goes beside the includer's copy, `lib/cstring.h`, so that the copied directive finds
+//    it the same way;
+//  - a file the unit spelled two ways gets one copy, at the first spelling.
+//
+// Without a record of the inclusion -- a file named only by the AST -- the include
+// directory that contains it decides, longest first, the unit's own directory last, and a
+// header under none falls back to a hash of its absolute path, which keeps the mapping
+// unique rather than colliding on the basename.
+static std::string mirror_relpath_from_spelling(const std::string& abs_header,
+                                                const std::vector<std::string>& include_dirs,
+                                                int depth) {
+    auto it = g_include_spellings.find(abs_header);
+    if (it == g_include_spellings.end() || depth > 32) return std::string();
+    const fs::path spelled = it->second.spelled;
+    if (spelled.empty() || spelled.is_absolute()) return std::string();
+    const fs::path h = fs::path(abs_header).lexically_normal();
+    std::error_code ec;
+    auto resolves_from = [&](const fs::path& dir) {
+        return (dir / spelled).lexically_normal() == h;
+    };
+    auto usable = [](const std::string& rel) {
+        return !rel.empty() && rel.rfind("..", 0) != 0 && rel[0] != '/';
+    };
+    const fs::path includer_dir = fs::path(it->second.includer).parent_path();
+    const bool from_unit = it->second.includer == g_unit_main_file;
+    // Beside its includer, which is what a quoted include tries first: the includer's copy
+    // decides where this one goes, so that the copied directive finds it the same way. The
+    // unit itself is not copied; its directory is an include directory of the pieces.
+    if (!from_unit && resolves_from(includer_dir)) {
+        const std::string inc_rel =
+            mirror_relpath_from_spelling(it->second.includer, include_dirs, depth + 1);
+        if (!inc_rel.empty()) {
+            const std::string rel =
+                (fs::path(inc_rel).parent_path() / spelled).lexically_normal().string();
+            if (usable(rel)) return rel;
+        }
+    }
+    for (const auto& d : include_dirs)
+        if (resolves_from(fs::path(d))) {
+            const std::string rel = spelled.lexically_normal().string();
+            if (usable(rel)) return rel;
+        }
+    return std::string();
+}
+
 static std::string header_mirror_relpath(const std::string& abs_header,
                                          const std::vector<std::string>& include_dirs) {
+    auto cached = g_mirror_rel_cache.find(abs_header);
+    if (cached != g_mirror_rel_cache.end()) return cached->second;
+    const std::string from_spelling =
+        mirror_relpath_from_spelling(abs_header, include_dirs, 0);
+    if (!from_spelling.empty()) {
+        g_mirror_rel_cache[abs_header] = from_spelling;
+        return from_spelling;
+    }
     fs::path h = fs::path(abs_header).lexically_normal();
     for (const auto& d : include_dirs) {
         fs::path rel = h.lexically_relative(fs::path(d));
@@ -4053,6 +4323,9 @@ static void collect_inclusion_sites(CXTranslationUnit tu,
                                     const std::string& main_file,
                                     const std::string& prefix_file) {
     g_inclusion_sites.clear();
+    g_include_spellings.clear();
+    g_mirror_rel_cache.clear();
+    g_verbatim_mirrors.clear();
     struct Ctx { const std::string* main; const std::string* prefix; };
     Ctx ctx{&main_file, &prefix_file};
     auto directives = [](CXCursor c, CXCursor, CXClientData d) -> CXChildVisitResult {
@@ -4066,15 +4339,25 @@ static void collect_inclusion_sites(CXTranslationUnit tu,
         std::error_code ec;
         const std::string in_path =
             fs::absolute(cx_to_string(clang_getFileName(in)), ec).lexically_normal().string();
-        if (ec || (in_path != *ctx->main && in_path != *ctx->prefix))
-            return CXChildVisit_Continue;
+        if (ec) return CXChildVisit_Continue;
         const std::string target =
             fs::absolute(cx_to_string(clang_getFileName(included)), ec).lexically_normal().string();
-        if (!ec)
-            g_inclusion_sites[target].emplace_back(line, cx_to_string(clang_getCursorSpelling(c)));
+        if (ec) return CXChildVisit_Continue;
+        const std::string spelled = cx_to_string(clang_getCursorSpelling(c));
+        // The first spelling of every file, from whichever file wrote it; a directive in
+        // the prefix belongs to the unit, whose lines the prefix's are.
+        if (!g_include_spellings.count(target))
+            g_include_spellings[target] =
+                IncludeSpelling{in_path == *ctx->prefix ? *ctx->main : in_path, spelled};
+        if (in_path == *ctx->main || in_path == *ctx->prefix)
+            g_inclusion_sites[target].emplace_back(line, spelled);
         return CXChildVisit_Continue;
     };
     clang_visitChildren(clang_getTranslationUnitCursor(tu), directives, &ctx);
+    if (std::getenv("CPP_SPLITTER_DUMP_INCLUDES"))
+        for (const auto& e : g_include_spellings)
+            std::cerr << "[include] " << e.first << " <- " << e.second.includer << " as \""
+                      << e.second.spelled << "\"\n";
 }
 
 // Once the translation unit is harvested: re-key what each pair header defines by inclusion
@@ -4345,8 +4628,36 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
     prepare_functions(functions, source, referenced, input_is_header);
+    g_unmovable_static_variable.clear();
     prepare_variables(variables, functions, source, unit_tag, input_is_header);
     dump_keep_decisions(functions);
+
+    // A function with internal linkage kept in the preamble is one per piece; with a local
+    // `static` in it, so is its state. Decline rather than duplicate it. TODO/47.
+    if (!input_is_header)
+        for (const auto& fn : functions)
+            if (fn.keep_in_header && fn.has_local_static && !fn.external_linkage &&
+                !fn.is_inlined && !fn.is_template && !fn.in_class_template) {
+                g_declined = true;
+                std::cerr << "[cpp-splitter] not splitting " << input_path << ": '"
+                          << fn.qualified_name << "' has internal linkage, is kept in the"
+                             " preamble (" << keep_reason(fn) << ") and holds a local static;"
+                             " every piece would get its own\n";
+                result.success = false;
+                return result;
+            }
+
+    // A `static` variable no rule could move: left in the preamble it would be one object
+    // per piece and the link would not say so. Decline instead. TODO/47.
+    if (!g_unmovable_static_variable.empty()) {
+        g_declined = true;
+        std::cerr << "[cpp-splitter] not splitting " << input_path << ": the static variable '"
+                  << g_unmovable_static_variable
+                  << "' has a shape no rule can move out of the preamble, and left there it"
+                     " would be one object per piece\n";
+        result.success = false;
+        return result;
+    }
 
     // A pair header's conditionals test the macros the unit defines before each #include
     // and undefines after it; replayed at the end of the preamble they are all false and the
@@ -4510,6 +4821,53 @@ static SplitResult split_unit(CXTranslationUnit tu,
 // known in advance. A header on the candidate list can still produce no copy -- it may have no
 // definitions of its own, or fail to parse standalone -- so asking the filesystem afterwards
 // is the only answer that is actually true.
+// A header that is not split but includes a split header beside itself -- p4c's
+// ir-generator.h, `#include "irclass.h"` -- is read as the original, and the quoted include
+// then finds the original irclass.h next to it before any -I reaches the copy: every piece
+// got the definitions back. Such a header is mirrored as it is, at its own mirror path, so
+// that its copied directive finds the copy beside it; fix_mirror_quoted_includes() then
+// points its other quoted includes at their originals. The walk goes up through includers
+// until the unit itself, which the preamble stands in for. TODO/47.
+static void mirror_includers_of_split_headers(const std::string& output_dir,
+                                              const std::vector<std::string>& inc_dirs,
+                                              const std::string& main_file,
+                                              bool verbose, std::ostream& out) {
+    const std::string mirror_root = split_include_root(output_dir);
+    std::set<std::string> mirrored;
+    for (const auto& entry : g_split_headers) mirrored.insert(decode_inclusion_key(entry.first).first);
+    std::vector<std::string> work(mirrored.begin(), mirrored.end());
+    while (!work.empty()) {
+        const std::string header = work.back();
+        work.pop_back();
+        auto sp = g_include_spellings.find(header);
+        if (sp == g_include_spellings.end()) continue;
+        const std::string& includer = sp->second.includer;
+        if (includer == main_file || mirrored.count(includer) || is_stdlib_header(includer)) continue;
+        const fs::path includer_dir = fs::path(includer).parent_path();
+        if ((includer_dir / sp->second.spelled).lexically_normal().string() !=
+            fs::path(header).lexically_normal().string())
+            continue;   // resolved through -I: the copy is found the same way
+        const std::string rel = header_mirror_relpath(includer, inc_dirs);
+        if (rel.empty()) continue;
+        const std::string copy = (fs::path(mirror_root) / rel).string();
+        const std::string text = read_file(includer);
+        if (text.empty()) continue;
+        std::error_code ec;
+        fs::create_directories(fs::path(copy).parent_path(), ec);
+        if (!fs::exists(copy) || read_file(copy) != text) {
+            std::ofstream ofs(copy);
+            if (!ofs.is_open()) continue;
+            ofs << text;
+        }
+        g_verbatim_mirrors[copy] = includer;
+        mirrored.insert(includer);
+        work.push_back(includer);
+        if (verbose)
+            out << "[auto-split] mirrored as it is: " << includer << " (includes "
+                << sp->second.spelled << " beside itself)\n";
+    }
+}
+
 static void fix_mirror_quoted_includes(const std::string& output_dir,
                                        const std::vector<std::string>& inc_dirs,
                                        bool verbose, std::ostream& out) {
@@ -4530,6 +4888,8 @@ static void fix_mirror_quoted_includes(const std::string& output_dir,
             entry.first.find("/_inclusion/") == std::string::npos;
         copies.push_back({entry.second, entry.first, parallel});
     }
+    for (const auto& entry : g_verbatim_mirrors)
+        copies.push_back({entry.second, entry.first, true});
     for (const auto& copy : copies) {
         const std::string& original = copy.original;
         const bool parallel_to_original = copy.parallel_to_original;
@@ -4859,10 +5219,21 @@ static std::string g_compiler;
 //
 // -- and the unit fall back. Nothing in Boost reached it until Boost.Geometry, which pulls it
 // in through Boost.Multiprecision; then it accounted for most of Geometry's test suite.
+// Probed once per set of include-path flags (include_path_flags()); the set of the unit
+// being split is remembered so that is_stdlib_header() asks about the right toolchain.
+static std::vector<std::string> g_include_path_flags;
+
 static const std::vector<std::string>& cached_system_includes() {
-    static std::vector<std::string> includes =
-        g_compiler.empty() ? detect_system_includes() : detect_system_includes(g_compiler);
-    return includes;
+    static std::map<std::string, std::vector<std::string>> by_flags;
+    std::string key;
+    for (const auto& f : g_include_path_flags) key += f + "\x1f";
+    auto it = by_flags.find(key);
+    if (it == by_flags.end())
+        it = by_flags.emplace(key, g_compiler.empty()
+                                       ? detect_system_includes("g++", g_include_path_flags)
+                                       : detect_system_includes(g_compiler, g_include_path_flags))
+                 .first;
+    return it->second;
 }
 
 // The language standard the *driver* would use for this compile, as a flag to hand libclang.
@@ -4951,6 +5322,7 @@ static std::vector<std::string> build_clang_flags(const std::vector<std::string>
     if (!std_flag.empty()) all_flags.insert(all_flags.begin(), std_flag);
     if (force_cxx)
         all_flags.insert(all_flags.begin(), {"-x", "c++-header"});
+    g_include_path_flags = include_path_flags(extra_flags);
     const auto& sys_includes = cached_system_includes();
     for (const auto& inc : sys_includes) {
         all_flags.push_back("-isystem");
@@ -5518,6 +5890,7 @@ static SplitResult do_split(const std::string& input_path,
     }
 
     g_unit_source_dir = fs::absolute(abs_path).parent_path().lexically_normal().string();
+    g_unit_main_file = fs::absolute(abs_path).lexically_normal().string();
 
     // One walk of this translation unit yields the inventory for the file itself and for
     // every header it should split, each seen in the context its includer establishes.
@@ -5525,6 +5898,9 @@ static SplitResult do_split(const std::string& input_path,
     g_pair_headers.clear();
     g_file_bases.clear();
     g_preamble_include_rewrites.clear();
+    g_include_spellings.clear();
+    g_mirror_rel_cache.clear();
+    g_verbatim_mirrors.clear();
     if (!input_is_header) {
         std::error_code ec;
         collect_inclusion_sites(tu, fs::path(abs_path).lexically_normal().string(),
@@ -5605,6 +5981,9 @@ static SplitResult do_split(const std::string& input_path,
         resolve_header_deps(tu, harvest, var_harvest, referenced, candidates, tu_preamble,
                             pair_contexts, result, output_dir,
                             all_flags, extra_flags, parse_errors == 0, verbose, out);
+        mirror_includers_of_split_headers(output_dir, unit_include_dirs(extra_flags),
+                                          fs::path(abs_path).lexically_normal().string(),
+                                          verbose, out);
         // Once every copy that is going to exist does, and not before. TODO/31.
         fix_mirror_quoted_includes(output_dir, unit_include_dirs(extra_flags), verbose, out);
     }

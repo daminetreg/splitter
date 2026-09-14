@@ -157,6 +157,8 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   defaulted_out_of_line_main  `T::~T() = default;` written out of line (TODO/42 4)
 #   static_defines_type_main  a static whose declaration defines its type (TODO/42 2)
 #   static_stateless_lambda_main  a static captureless lambda, kept per piece (TODO/42 4)
+#   system_decl_main    a definition whose exception specification a system header holds (TODO/47)
+#   static_shapes_main  `static bool a, b;` and `static char pool[N];`, renamed and moved (TODO/47)
 #   static_unnamed_type_main  a static of an unnamed struct type: its users stay with it (TODO/44)
 #   static_unnamed_ns_type_main  a static of a class from an unnamed namespace, likewise (TODO/44)
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
@@ -168,7 +170,8 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
                 tail_include_main macro_group_main static_name_shared_main
                 conditional_declarator_main defaulted_out_of_line_main
                 static_defines_type_main static_stateless_lambda_main
-                static_unnamed_type_main static_unnamed_ns_type_main)
+                static_unnamed_type_main static_unnamed_ns_type_main
+            system_decl_main static_shapes_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -190,6 +193,60 @@ add_test(
           -DWORKDIR=${cpp_splitter_test_output}/pair_header
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunPairHeaderSplitTest.cmake)
+
+# A variable one unit defines and only another reads. Left in the preamble as `inline` it
+# is emitted only where used, and the defining unit's pieces use it nowhere. TODO/47.
+add_test(
+  NAME launcher.variable_read_elsewhere
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE_DIR=${cpp_splitter_test_dir}/variable_read_elsewhere
+          -DWORKDIR=${cpp_splitter_test_output}/variable_read_elsewhere
+          -DCXX=${CMAKE_CXX_COMPILER}
+          "-DEXPECT=2 5 3"
+          -P ${cpp_splitter_test_dir}/cmake/RunTwoUnitsTest.cmake)
+
+# A unit the splitter must decline -- split nothing, say why, compile whole, be right.
+#   local_static_intern_main  an unnamed-namespace function interning through a local static
+#                             (TODO/47): kept in the preamble it would be one cache per piece
+add_test(
+  NAME split.local_static_intern_declines
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/local_static_intern_main.cpp
+          -DWORKDIR=${cpp_splitter_test_output}/local_static_intern
+          -DCXX=${CMAKE_CXX_COMPILER}
+          "-DEXPECT_MESSAGE=holds a local static"
+          -DEXPECT_OUTPUT=1
+          -P ${cpp_splitter_test_dir}/cmake/RunDeclineTest.cmake)
+
+# The libclang parse reads the standard library the compile's -stdlib names. TODO/47.
+if(NOT APPLE)
+  add_test(
+    NAME launcher.stdlib_libcxx
+    COMMAND ${CMAKE_COMMAND}
+            -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+            -DSOURCE=${cpp_splitter_test_dir}/stdlib_probe_main.cpp
+            -DWORKDIR=${cpp_splitter_test_output}/stdlib_probe
+            -DCXX=${CMAKE_CXX_COMPILER}
+            "-DFLAGS=-std=c++17;-stdlib=libc++"
+            "-DLDFLAGS=-Wl,-rpath,${clang_toolchain_root}/lib"
+            -DEXPECT=1
+            -P ${cpp_splitter_test_dir}/cmake/RunFlagsTest.cmake)
+endif()
+
+# Includes spelled from an include directory above the unit's own, one through a header
+# that is not split and includes the split one beside itself. TODO/47.
+add_test(
+  NAME launcher.spelled_include
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/spelled_include/src/unit.cpp
+          -DINCLUDE_DIR=${cpp_splitter_test_dir}/spelled_include
+          -DWORKDIR=${cpp_splitter_test_output}/spelled_include
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -DEXPECT=19
+          -P ${cpp_splitter_test_dir}/cmake/RunSpelledIncludeTest.cmake)
 
 # The libclang prefix PCH, built from a copy of the include block, has to resolve quoted
 # includes against the unit's own directory. TODO/42 (5).

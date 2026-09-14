@@ -1,0 +1,38 @@
+# The launcher on a unit whose includes are spelled from an include directory above the
+# unit's own, one of them through a header that is not split and includes the split one
+# beside itself. The split copies have to be found by exactly those directives. TODO/47.
+foreach(required SPLITTER SOURCE INCLUDE_DIR WORKDIR CXX EXPECT)
+  if(NOT DEFINED ${required})
+    message(FATAL_ERROR "${required} must be defined")
+  endif()
+endforeach()
+file(REMOVE_RECURSE "${WORKDIR}")
+file(MAKE_DIRECTORY "${WORKDIR}")
+set(object "${WORKDIR}/unit.o")
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E env CPP_SPLITTER_VERBOSE=1
+          "${SPLITTER}" "${CXX}" -std=c++17 "-I${INCLUDE_DIR}" -c -o "${object}" "${SOURCE}"
+  OUTPUT_VARIABLE o ERROR_VARIABLE e RESULT_VARIABLE rc)
+set(log "${o}${e}")
+if(NOT rc EQUAL 0)
+  message(FATAL_ERROR "launcher failed (${rc}):\n${log}")
+endif()
+if(log MATCHES "fallback|falling back|not splitting")
+  message(FATAL_ERROR "the unit was not split:\n${log}")
+endif()
+if(NOT EXISTS "${object}.split/include/src/api.h")
+  message(FATAL_ERROR "the copy of api.h is not at include/src/api.h, where \"src/api.h\" looks")
+endif()
+if(NOT EXISTS "${object}.split/include/src/wrapper.h")
+  message(FATAL_ERROR "wrapper.h, which includes api.h beside itself, was not mirrored")
+endif()
+execute_process(COMMAND "${CXX}" -o "${WORKDIR}/program" "${object}" RESULT_VARIABLE lrc OUTPUT_VARIABLE lo ERROR_VARIABLE le)
+if(NOT lrc EQUAL 0)
+  message(FATAL_ERROR "link failed:\n${lo}${le}")
+endif()
+execute_process(COMMAND "${WORKDIR}/program" OUTPUT_VARIABLE out RESULT_VARIABLE prc)
+string(STRIP "${out}" out)
+if(NOT prc EQUAL 0 OR NOT out STREQUAL "${EXPECT}")
+  message(FATAL_ERROR "program wrong: rc=${prc} out='${out}' expected '${EXPECT}'")
+endif()
+message(STATUS "ok: the copies sit where the unit's directives find them")
