@@ -10,7 +10,7 @@ explicit. Builds are atomic, so an authoring error leaves the last successful
 deck untouched. Errors name the Markdown file and source line.
 
 `slides/manifest.txt` is the sole ordering mechanism. Each listed file is one
-visible slide, and all 26 source files are deliberately separate. A slide has
+visible slide, and all 27 source files are deliberately separate. A slide has
 front matter:
 
 ```markdown

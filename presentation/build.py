@@ -181,9 +181,10 @@ def render_block(block, snippets):
             fail(block.path, block.line, "code-columns needs two fenced code blocks separated by ---")
         code = []
         for part in parts:
-            match = re.fullmatch(r"\s*```[^\n]*\n(.*?)\n```\s*", part, re.S)
+            match = re.fullmatch(r"\s*```([^\n]*)\n(.*?)\n```\s*", part, re.S)
             if not match: fail(block.path, block.line, "code-columns contents must be fenced code")
-            code.append(f'<pre class="code">{html.escape(match.group(1))}</pre>')
+            language = f' data-language="{html.escape(match.group(1), quote=True)}"' if match.group(1) else ""
+            code.append(f'<pre class="code"{language}>{html.escape(match.group(2))}</pre>')
         return '<div class="grid two">' + "".join(code) + "</div>"
     if k == "tree":
         return f'<div class="tree">{inline(b)}</div>'
