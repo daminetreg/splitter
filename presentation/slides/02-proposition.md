@@ -1,15 +1,21 @@
 ---
 chapter: Opening
 chapter-label: The proposition
-notes: The question is layout: change the compilation unit without changing the build system’s requested object.
+notes: A translation unit is the atom of a C++ build — the smallest thing the compiler, the cache and the scheduler can take. Touch one function, the whole atom recompiles, misses the cache, goes out as one action. The proposition is to split the atom, one piece per function, while the build system still gets the object it asked for.
 ---
-## One source file is not one unit of work.
+## The translation unit is the {accent}atom{/accent} of the build.
 
-::: flow
-- compile command | 
-- launcher | teal
-- function pieces | split
-- ordinary .o | violet
+::: fission
+- 📄 use_mylib.cpp\none unit of work | violet
+- 📄 add.cpp | split
+- 📄 multiply.cpp | split
+- 📄 greet.cpp | split
+- 📄 average.cpp | split
+- 📄 definitions.cpp | split
 :::
 
-Keep the build contract. Change the layout behind it.
+Split the atom: one piece per function. Finer to compile, finer to cache, finer to distribute.
+
+::: tiny
+The build still asks for use_mylib.o — and still gets it.
+:::

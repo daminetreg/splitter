@@ -34,6 +34,10 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .node.violet{border-color:var(--violet);color:var(--violet)}
 .node.split{border-color:var(--split);color:var(--split)}
 .arrow{color:var(--teal);font-size:1.5rem}
+.fission{display:flex;align-items:center;gap:clamp(.6rem,2vw,2rem);margin-top:3rem;flex-wrap:wrap}
+.fission .atom .node{font-size:1.15rem;padding:1.6rem 1.9rem}
+.fission .pieces{display:flex;flex-wrap:wrap;gap:.55rem;max-width:640px}
+.fission .pieces .node{min-width:0;padding:.7rem .85rem}
 .rationale{margin-top:2rem;border-left:3px solid var(--teal);padding:.8rem 1rem;color:#c9d5d0;max-width:850px;font-size:clamp(.9rem,1.5vw,1.1rem);line-height:1.4}
 .code{font:.75rem/1.6 var(--mono);white-space:pre-wrap;color:#c8d8d2;background:#0c1312;border:1px solid var(--line);padding:1.2rem;margin:0}
 .kw{color:var(--violet)}

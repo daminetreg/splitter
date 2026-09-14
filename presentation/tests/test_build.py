@@ -89,6 +89,16 @@ class BuildTests(unittest.TestCase):
             with self.assertRaisesRegex(build.SourceError, "duplicate section-map"):
                 build.render(source)
 
+    def test_fission_renders_one_whole_into_pieces(self):
+        block = build.Block("fission", "", "- 📄 whole.cpp | violet\n- 📄 a.cpp | split\n- 📄 b.cpp | split", 3)
+        block.path = Path("atom.md")
+        result = build.render_block(block, {})
+        self.assertIn('<div class="fission"><div class="atom"><div class="node violet">📄 whole.cpp</div></div>', result)
+        self.assertEqual(2, result.count('<div class="node split">📄 '))
+        block.body = "- 📄 whole.cpp | violet"
+        with self.assertRaisesRegex(build.SourceError, "at least one piece"):
+            build.render_block(block, {})
+
     def test_missing_reference_and_unknown_directive(self):
         with tempfile.TemporaryDirectory() as directory:
             source = self.source(directory)
