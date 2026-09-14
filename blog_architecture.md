@@ -362,3 +362,37 @@ flowchart LR
 > `benchmarks/boost-spirit-rbe-summary-9-Sep-2026.md`: the body edit executes one compile
 > with 268 units re-slicing locally; the cold build's remaining cost is transferring the split
 > trees back, not parsing.
+
+## 10. What the split does to the binary
+
+`example/binary-impact/` builds the same fixture eight ways and compares the executables
+section by section, function by function, and with `diffoscope`. Against plain `-O2`, the
+split executable differs in the code: `main` calls `add`, `multiply` and `average` instead
+of inlining them (91 → 122 instructions), the `std::vector` that plain folded to the constant
+`3.0` is allocated, and the three functions exist as weak symbols because
+`__attribute__((used))` made their pieces emit them: `.text` +15%, three symbols more, none
+fewer. `-ffunction-sections` with `--gc-sections` alone changes nothing, since `main` calls
+the copies.
+
+Under `-flto=thin` the pieces are bitcode, and with `CPP_SPLITTER_LINKER=ld.lld` the
+relocatable link runs LTO over the unit's pieces before writing the object: `main` comes
+back instruction for instruction as plain's, and `--gc-sections` at the final link then
+discards the three `used` copies nothing calls any more.
+
+| `split-lto-relink-gc` against `plain-gc` | |
+|---|---|
+| byte-identical | `.text` `.plt` `.rodata` `.eh_frame` `.eh_frame_hdr` `.gcc_except_table` `.got` `.got.plt` `.init` `.fini` `.init_array` `.fini_array` `.dynamic` — 18 sections, every loaded one |
+| different | `.symtab` `.strtab` (five `FILE` symbols for one, local numbering) and the dynamic symbol tables, in another order — 10 sections |
+| stripped | 6752 bytes each, 385 bytes differ, all in that ordering |
+
+Every instruction the CPU executes, every call target and every constant loaded is the
+same; the executables differ only in how their symbols are named and numbered.
+
+> 💡 **Rationale.** The archive symbol counts in `benchmarks/opencv-local-split.md` -- 5231
+> external symbols in the split `libopencv_core.a` against 4118 -- said that the symbol
+> table changed and nothing said whether the code did; TODO/46 measured it (`b603421f`,
+> `e4fdaf99`, `b332f32a`). GNU `ld -r` does not read bitcode, so a split under `-flto` needs
+> `ld.lld` or `llvm-link` as the relocatable linker; the `llvm-link` form, which keeps LTO for
+> the final link, inlines less than a plain LTO build (`main` 110 instructions against 91),
+> because the pieces were each optimised at `-O2` before the merge. `used` does not imply the
+> linker-side `retain` with this clang, which is what lets `--gc-sections` remove the copies.
