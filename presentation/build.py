@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HERE = Path(__file__).resolve().parent
-KNOWN = {"flow", "cards", "tree", "rationale", "metrics", "bars", "legend",
+KNOWN = {"flow", "fission", "cards", "tree", "rationale", "metrics", "bars", "legend",
          "callout", "tiny", "popup", "map",
          "section-map", "sizes", "binary-trace", "paths", "single-bars",
          "code-columns", "semantic", "logic", "flag"}
@@ -210,6 +210,13 @@ def render_block(block, snippets):
             merge = int(match[1])
         return '<div class="flow">' + '<div class="arrow">→</div>'.join(
             ["".join(nodes[:merge]), *nodes[merge:]]) + "</div>"
+    if k == "fission":
+        # One whole on the first row, the pieces it breaks into after it: one -> many.
+        rows = pipe_rows(block, 2, ["label", "tone"])
+        if len(rows) < 2: fail(block.path, block.line, "fission needs the whole on the first row and at least one piece after it")
+        atom, *pieces = [f'<div class="node {html.escape(tone)}">{inline(label).replace(chr(92)+"n","<br>")}</div>'
+                         for label, tone in rows]
+        return f'<div class="fission"><div class="atom">{atom}</div><div class="arrow">→</div><div class="pieces">{"".join(pieces)}</div></div>'
     if k == "logic":
         rows = pipe_rows(block, 3, ["left node", "decision", "right node"])
         if len(rows) != 1: fail(block.path, block.line, "logic has exactly one row")

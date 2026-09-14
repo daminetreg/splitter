@@ -34,6 +34,9 @@ The small layout vocabulary is shown by the migrated slides:
 * `::: flow` has `- label | tone` rows (`tone` may be blank, `teal`, `violet`,
   or `split`); an optional third field is a shared popup reference. See
   `02-proposition.md` and `08-mirror.md`.
+* `::: fission` has `- label | tone` rows: the first row is the whole, every
+  later row one of the pieces it breaks into, rendered one → many. See
+  `02-proposition.md`.
 * `::: cards 2`, `::: cards 3`, and `::: metrics 3` use
   `- title-or-value | tone | description`; cards accept an optional fourth
   popup reference. See `06-classification.md` and `21-benchmark-actions.md`.
