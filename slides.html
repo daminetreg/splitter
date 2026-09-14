@@ -124,4 +124,57 @@ const trace={main:['int main() { add(...); multiply(...); average(vals); greet(.
 <script>
 (()=>{const board=document.querySelector('#sizeBoard');if(!board)return;const metrics={executable:[8696,8880,'B','+184 B · 2.12%'],text:[3314,3314,'B','equal'],data:[584,584,'B','equal'],stripped:[6752,6752,'B','equal size · 385 B differ']};function draw(which='all'){board.innerHTML='<div class="legend"><span><i></i>plain-gc</span><span><i class="s"></i>split-LTO+GC</span><span>0–8,880 B shared scale</span></div>';Object.entries(metrics).filter(([k])=>which==='all'||k===which).forEach(([k,v])=>{const row=document.createElement('div');row.className='size-row';row.innerHTML=`<b>${k}</b><div class="size-track" aria-label="plain-gc ${v[0]} bytes, scale 0 to 8880"><div class="size-fill" style="width:${v[0]/8880*100}%"></div></div><div class="size-track" aria-label="split LTO GC ${v[1]} bytes, scale 0 to 8880"><div class="size-fill splitfill" style="width:${v[1]/8880*100}%"></div></div><span class="size-value">plain ${v[0]} · split ${v[1]} ${v[2]}<br>${v[3]}</span>`;board.append(row)})}document.querySelectorAll('.metricpick').forEach(b=>b.onclick=()=>{document.querySelectorAll('.metricpick').forEach(x=>x.classList.toggle('active',x===b));draw(b.dataset.metric)});draw()})();
 </script>
+<style>
+/* Speaker-sized code, with a self-contained high-contrast token palette. */
+.code{font-size:clamp(16px,1.48vw,22px);line-height:1.55;padding:1.35rem 1.5rem;tab-size:4;overflow-wrap:anywhere}
+.code.syntax{background:linear-gradient(135deg,#101d20,#0b1416);border-color:#3c5558;box-shadow:inset 3px 0 #55ddc3}
+.tok-comment{color:#91a7a3;font-style:italic}
+.tok-keyword{color:#c8b3ff;font-weight:600}
+.tok-type{color:#83cfff}
+.tok-string{color:#f1cf8b}
+.tok-number{color:#ffb28d}
+.tok-function{color:#66e5cb;font-weight:600}
+.tok-directive{color:#ed9dc5}
+.tok-operator{color:#d4e1e7}
+.modalbox{width:min(1160px,96vw);padding:1.6rem;max-height:92dvh}
+.modal h3{padding-right:5rem;overflow-wrap:anywhere}
+#modalCode{font-size:clamp(18px,1.6vw,24px);line-height:1.65}
+.slide:has(pre.code) h2{font-size:clamp(2.5rem,5.3vw,5.5rem)}
+.slide:has(pre.code) .grid{margin-top:1.7rem}
+#binaryTraceResult{font-size:clamp(15px,1.3vw,19px)}
+@media(max-width:700px){.code{padding:1rem;font-size:16px}.modalbox{padding:1rem}#modalCode{font-size:17px}}
+@media print{.code{font-size:16px;box-shadow:none}}
+</style>
+<script>
+// Tokenize original text once per update; never interpret source as HTML.
+(()=>{
+  const keywords=new Set('alignas alignof auto break case catch class constexpr consteval constinit const continue decltype default delete do else enum explicit extern false for friend if inline mutable namespace new noexcept nullptr operator override private protected public register reinterpret_cast return sizeof static static_assert static_cast struct switch template this thread_local throw true try typedef typename union using virtual volatile while __attribute__'.split(' '));
+  const types=new Set('void bool char short int long float double signed unsigned wchar_t size_t string vector numeric iterator T std'.split(' '));
+  const tokenPattern=/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(^[ \t]*#[ \t]*[a-zA-Z_]\w*)|\b(0[xX][\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?[uUlLfF]*)\b|\b([A-Za-z_]\w*)\b|(::|->|&&|\|\||==|!=|<=|>=|[{}()[\];,+*/%=<>!&|~?:.-])/gm;
+  function highlight(block){
+    const source=block.textContent;
+    if(block.dataset.highlightedSource===source)return;
+    block.dataset.highlightedSource=source;
+    const out=document.createDocumentFragment();
+    let end=0;
+    tokenPattern.lastIndex=0;
+    for(const match of source.matchAll(tokenPattern)){
+      out.append(document.createTextNode(source.slice(end,match.index)));
+      const [text,comment,string,directive,number,word,operator]=match;
+      let kind=comment?'comment':string?'string':directive?'directive':number?'number':operator?'operator':keywords.has(word)?'keyword':types.has(word)?'type':word&&/^\s*(?:<[^;\n{}]*>)?\s*\(/.test(source.slice(match.index+text.length))?'function':'';
+      if(kind){const span=document.createElement('span');span.className='tok-'+kind;span.textContent=text;out.append(span)}
+      else out.append(document.createTextNode(text));
+      end=match.index+text.length;
+    }
+    out.append(document.createTextNode(source.slice(end)));
+    block.replaceChildren(out);
+    block.classList.add('syntax');
+  }
+  const codeBlocks=[...document.querySelectorAll('[data-chapter="Architecture"] pre.code,#modalCode,#binaryTraceSource')];
+  codeBlocks.forEach(block=>{
+    highlight(block);
+    new MutationObserver(()=>highlight(block)).observe(block,{childList:true,characterData:true,subtree:true});
+  });
+})();
+</script>
 </body></html>
