@@ -20,6 +20,8 @@
 #   results/<a>-vs-<b>.symbols        `nm` symbol sets: only in a, only in b, binding changes
 #   results/<a>-vs-<b>.asm            per-function disassembly diff (asmdiff.py)
 #   results/<a>-vs-<b>.diffoscope     diffoscope's text report on the executables
+#   results/<a>-vs-<b>.sections       which sections of the two executables are byte-identical,
+#                                     and whether the stripped executables are
 #
 # The toolchain is the repository's (environments/monolithic.cmake); the splitter is the one
 # built in $REPO/build. diffoscope is optional: set DIFFOSCOPE to the program to run.
@@ -75,8 +77,31 @@ symbols() {  # symbols <file> -> "binding name" lines, sorted
 
 is_bitcode() { [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "4243c0de" ]; }
 
+# Section by section: the contents of every section with data in it, hashed, plus a byte
+# comparison of the two executables stripped of their symbol tables. Says exactly what
+# "identical" means when two executables differ in size.
+sections() {  # sections <a> <b> <out>
+    local a="$1" b="$2" out="$3" sec ha hb
+    : > "$out"
+    # readelf -x dumps any section, loaded or not, which objcopy -O binary does not.
+    for sec in $(readelf -S -W "$RESULTS/$a/use_mylib" | sed 's/^ *\[ *[0-9]*\] //' | awk '$1 ~ /^\./ && $2 != "NOBITS" {print $1}'); do
+        ha=$(readelf -x "$sec" "$RESULTS/$a/use_mylib" 2>/dev/null | tail -n +2 | cut -c14-48 | md5sum | cut -c1-12)
+        hb=$(readelf -x "$sec" "$RESULTS/$b/use_mylib" 2>/dev/null | tail -n +2 | cut -c14-48 | md5sum | cut -c1-12)
+        if [ "$ha" = "$hb" ]; then echo "identical  $sec"; else echo "DIFFERS    $sec"; fi
+    done | sort -k1,1r -k2 >> "$out"
+    local sa="$RESULTS/$a/use_mylib.stripped" sb="$RESULTS/$b/use_mylib.stripped"
+    [ -f "$sa" ] || { cp "$RESULTS/$a/use_mylib" "$sa"; strip "$sa"; }
+    [ -f "$sb" ] || { cp "$RESULTS/$b/use_mylib" "$sb"; strip "$sb"; }
+    if cmp -s "$sa" "$sb"; then
+        echo "stripped: byte-identical ($(stat -c %s "$sa") bytes)" >> "$out"
+    else
+        echo "stripped: $(stat -c %s "$sa") and $(stat -c %s "$sb") bytes, $(cmp -l "$sa" "$sb" 2>/dev/null | wc -l) bytes differ" >> "$out"
+    fi
+}
+
 compare() {  # compare <a> <b>
     local a="$1" b="$2" tag="$1-vs-$2" f
+    sections "$a" "$b" "$RESULTS/$tag.sections"
     for what in use_mylib use_mylib.o; do
         {
             echo "== $what: symbols only in $a"
@@ -142,6 +167,12 @@ for pair in $PAIRS; do
         echo
         echo '```'
         cat "$RESULTS/$a-vs-$b.asm.summary"
+        echo '```'
+        echo
+        echo "Sections of the executable, then the stripped executables:"
+        echo
+        echo '```'
+        cat "$RESULTS/$a-vs-$b.sections"
         echo '```'
         echo
         echo "Symbols (executable, then object):"

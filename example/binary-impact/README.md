@@ -155,6 +155,44 @@ offsets, the dynamic table, `.eh_frame`, `.gcc_except_table`, `.rodata`, `.strta
 - `-ffunction-sections` + `--gc-sections` removes the `used` copies only once nothing calls
   them, which on this fixture takes the relink LTO: `split-lto-relink-gc` is plain-gc's
   code, size and symbol table. Without the LTO the copies are the callees and stay.
+- Section by section, `split-lto-relink-gc` and `plain-gc` are byte-identical in every
+  loaded section, `.text` included; they differ only in symbol names and numbering. See the
+  conclusion below.
+
+## Conclusion: is `split-lto-relink-gc` the same binary as `plain-gc`?
+
+Not byte for byte: 8880 bytes against 8696, and `cmp` differs from byte 41. Section by
+section (`results/plain-gc-vs-split-lto-relink-gc.sections`, every section's contents
+hashed through `readelf -x`):
+
+| | sections |
+|---|---|
+| byte-identical (18) | `.text` `.plt` `.rodata` `.eh_frame` `.eh_frame_hdr` `.gcc_except_table` `.init` `.fini` `.init_array` `.fini_array` `.got` `.got.plt` `.dynamic` `.interp` `.note.ABI-tag` `.tm_clone_table` `.comment` `.shstrtab` |
+| different (10) | `.symtab` `.strtab` `.dynsym` `.dynstr` `.hash` `.gnu.hash` `.gnu.version` `.gnu.version_r` `.rela.dyn` `.rela.plt` |
+
+What differs is symbol-table metadata, nothing that executes:
+
+- `.symtab` / `.strtab` (+184 bytes): the split binary names five source files
+  (`use_mylib.cpp_0_definitions.cpp`, `mylib.h_1_add.cpp`, … `mylib.h_4_average.cpp`)
+  where plain names one, and its two `GCC_except_table` locals are both numbered 0.
+- The dynamic tables: the same 19 imported symbols, the same PLT slots at the same
+  addresses, in a different order in `.dynsym` -- the combined object presents its
+  undefined symbols in another order after the relink -- and `.dynstr`, the two hash tables,
+  the version tables and the relocation entries follow that numbering.
+
+Stripped of their symbol tables the two executables are 6752 bytes each and differ in 385
+bytes, all in the dynamic-symbol ordering above.
+
+**The code that runs is equal.** `.text` and `.plt` are byte-identical, at the same
+addresses, with the same `.rodata`, `.got.plt` and unwind tables behind them: every
+instruction the CPU executes, including the addresses it calls and the constants it loads,
+is the same in both. So the accurate statement is: with `-ffunction-sections`,
+`--gc-sections` and LTO at the relink, the split executable is the plain one in every loaded
+section, and differs from it only in how its symbols are named and numbered.
+
+For comparison, `split-lto-relink` without `--gc-sections` differs from plain in `.text`,
+`.rodata` and the unwind tables as well -- the three `used` copies are in them -- and
+`split` differs in `.plt` too (one more import, `operator new`).
 
 ## Reproducing
 
