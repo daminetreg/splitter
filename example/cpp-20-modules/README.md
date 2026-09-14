@@ -57,3 +57,15 @@ cmake-re --host -S . -B build/cmake-re-macos-apple-clang \
          -Dcpp_splitter_modules_cxx=$(brew --prefix llvm)/bin/clang++
 ctest-re --test-dir build/cmake-re-macos-apple-clang -R example.cpp_20_modules --output-on-failure
 ```
+
+## What a BMI holds, and when it changes
+
+`bmi-probe/probe.sh` measures, on a small module, what `-fmodules-reduced-bmi` drops
+(non-inline bodies, in-class member bodies included) and shows that the reduced BMI still
+changes on every body edit through the definition's ODR hash in the `DECL_FUNCTION` record,
+while an interface that only declares the function stays byte-identical. The numbers are in
+TODO/43.
+
+```sh
+CXX=$(brew --prefix llvm)/bin/clang++ SDKROOT=$(xcrun --show-sdk-path) example/cpp-20-modules/bmi-probe/probe.sh
+```
