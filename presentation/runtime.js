@@ -34,14 +34,12 @@
   const progress = document.querySelector("#progress");
   const notes = document.querySelector("#notes");
   const notesToggle = document.querySelector("#notesToggle");
-  const overviewButton = document.querySelector("#overview");
   const chapters = document.querySelector("#chapters");
   const modal = document.querySelector("#modal");
   const closeButton = document.querySelector("#close");
   const modalTitle = document.querySelector("#modalTitle");
   const modalCode = document.querySelector("#modalCode");
   let current = 0;
-  let overview = false;
   let opener = null;
 
   slides.forEach((slide, i) => {
@@ -55,9 +53,6 @@
   }
   function show(n, updateHash = true) {
     current = Math.min(slides.length - 1, Math.max(0, Number.isFinite(n) ? n : 0));
-    overview = false;
-    document.body.classList.remove("overview");
-    overviewButton.textContent = "OVERVIEW";
     slides.forEach((slide, i) => slide.classList.toggle("active", i === current));
     progress.style.width = `${(current + 1) / slides.length * 100}%`;
     notes.textContent = slides[current].dataset.notes;
@@ -73,13 +68,6 @@
   notesToggle.onclick = () => {
     notes.classList.toggle("show");
     notesToggle.setAttribute("aria-expanded", String(notes.classList.contains("show")));
-  };
-  overviewButton.onclick = () => {
-    if (overview) return show(current);
-    overview = true;
-    document.body.classList.add("overview");
-    overviewButton.textContent = "CLOSE";
-    slides.forEach(s => s.classList.add("active"));
   };
   function closeModal() {
     modal.classList.remove("show");
@@ -270,7 +258,6 @@
     if (e.key === "End") { e.preventDefault(); show(slides.length - 1); }
     if (e.key.toLowerCase() === "n") notesToggle.click();
     if (e.key.toLowerCase() === "p") window.print();
-    if (e.key === "Escape" && overview) show(current);
   });
   let touchStart = null;
   document.addEventListener("touchstart", e => {

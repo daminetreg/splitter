@@ -7,6 +7,7 @@ fenced code, and ::: directives documented in presentation/README.md.
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 import math
@@ -407,7 +408,8 @@ def render(source):
                       separators=(",", ":"), sort_keys=True).replace("<", "\\u003c")
     template_path, style_path, runtime_path = HERE / "template.html", HERE / "theme.css", HERE / "runtime.js"
     template, style, runtime = asset(template_path), asset(style_path), asset(runtime_path)
-    for marker, replacement in (("/*__STYLE__*/", style), ("/*__RUNTIME__*/", runtime), ("/*__DECK__*/", data)):
+    logo = "data:image/svg+xml;base64," + base64.b64encode(asset(HERE / "engflow.svg").encode("utf-8")).decode("ascii")
+    for marker, replacement in (("/*__STYLE__*/", style), ("/*__RUNTIME__*/", runtime), ("/*__DECK__*/", data), ("/*__LOGO__*/", logo)):
         if marker not in template:
             fail(template_path, 1, f"missing template marker {marker}")
         template = template.replace(marker, replacement)
@@ -437,7 +439,7 @@ def watch_inputs(source, output=None):
     manifest = source / "manifest.txt"
     if not manifest.exists(): fail(manifest, 1, "missing explicit manifest.txt")
     names = [x.strip() for x in manifest.read_text().splitlines() if x.strip() and not x.startswith("#")]
-    paths = [manifest, source.parent / "snippets.md", HERE / "template.html", HERE / "theme.css", HERE / "runtime.js"]
+    paths = [manifest, source.parent / "snippets.md", HERE / "template.html", HERE / "theme.css", HERE / "runtime.js", HERE / "engflow.svg"]
     for name in names:
         if "/" not in name and name.endswith(".md"):
             paths.append(source / name)

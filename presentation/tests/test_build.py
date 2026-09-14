@@ -24,9 +24,10 @@ class BuildTests(unittest.TestCase):
         self.old_here = build.HERE
         build.HERE = Path(self.assets_tmp.name)
         (build.HERE / "template.html").write_text(
-            "<style>/*__STYLE__*/</style><script>const DECK=/*__DECK__*/;\n/*__RUNTIME__*/</script>")
+            '<img src="/*__LOGO__*/"><style>/*__STYLE__*/</style><script>const DECK=/*__DECK__*/;\n/*__RUNTIME__*/</script>')
         (build.HERE / "theme.css").write_text("body{color:green}")
         (build.HERE / "runtime.js").write_text("void DECK;")
+        (build.HERE / "engflow.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
 
     def tearDown(self):
         build.HERE = self.old_here
@@ -139,6 +140,7 @@ class BuildTests(unittest.TestCase):
             self.assertIn((build.HERE / "template.html").resolve(), paths)
             self.assertIn((build.HERE / "theme.css").resolve(), paths)
             self.assertIn((build.HERE / "runtime.js").resolve(), paths)
+            self.assertIn((build.HERE / "engflow.svg").resolve(), paths)
             self.assertNotIn(output.resolve(), paths)
 
     def test_cli_source_error_has_no_traceback(self):
