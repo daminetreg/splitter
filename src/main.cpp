@@ -2422,8 +2422,12 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
             if (ret_begin < name_pos)
                 ret_src = trim_ws(decl.substr(ret_begin, name_pos - ret_begin));
         }
-        if (ret_src == "auto" || ret_src == "decltype(auto)") {
-            // A deduced return type has to stay visible to callers.
+        // A deduced return type has to stay visible to callers -- `auto`, `auto &`,
+        // `const auto &`, `auto *`, `decltype(auto)`: any spelling with `auto` in it, since
+        // the type is deduced whatever qualifiers or declarators surround the word. p4c's
+        // IR writes `inline auto &getExpr()` and `inline const auto &getExpr() const`, and a
+        // caller before the definition is an error. TODO/47.
+        if (contains_decl_token(blank_code_noise(ret_src), "auto")) {
             fn.keep_in_header = true;
             continue;
         }
@@ -2870,6 +2874,7 @@ static bool extent_is_a_definition(const FunctionInfo& fn, const std::string& te
 // rule has to get right on its own.
 static std::string wrap_in_namespaces(const std::string& body,
                                       const std::vector<ScopeEntry>& scope_chain);
+static size_t conditionals_closed_by(const std::string& text);
 
 static std::string generate_preamble(const std::string& source,
                                      const std::vector<FunctionInfo>& functions,
@@ -2940,6 +2945,29 @@ static std::string generate_preamble(const std::string& source,
         ranges.swap(merged);
     }
 
+    // A group's union of extents can be a fragment of the invocation -- `DEFINE_APPLY)` of
+    // `ALL_OPS(DEFINE_APPLY)`, when every definition's first token came from the argument.
+    // Left in place it reproduces the source; moved, it would leave `ALL_OPS(` behind. The
+    // range is widened to the whole invocation, as a single macro-produced definition's is
+    // in prepare_functions(). TODO/47.
+    {
+        const std::string blanked_source = blank_code_noise(source);
+        for (size_t i = 0; i < ranges.size(); ++i) {
+            Range& r = ranges[i];
+            if (r.group.empty() || r.end > source.size()) continue;
+            if (is_macro_invocation_text(blanked_source.substr(r.start, r.end - r.start)))
+                continue;
+            unsigned start = r.start, end = r.end;
+            if (!widen_to_macro_invocation(blanked_source, start, end)) continue;
+            const bool clear_before = i == 0 || ranges[i - 1].end <= start;
+            const bool clear_after = i + 1 == ranges.size() || end <= ranges[i + 1].start;
+            if (clear_before && clear_after && end <= source.size()) {
+                r.start = start;
+                r.end = end;
+            }
+        }
+    }
+
     // The emit loop's correctness depends on this and nothing else states it: the ranges
     // must be strictly increasing and non-overlapping, or text is duplicated or dropped.
     for (size_t i = 1; i < ranges.size(); ++i)
@@ -3006,8 +3034,12 @@ static std::string generate_preamble(const std::string& source,
                         !g->member_decl.empty() || g->in_class_template ||
                         g->in_anonymous_class || g->is_static || g->in_unnamed_ns)
                         group_moves = false;
-                    for (const auto& sc : g->scope_chain)
-                        if (sc.kind == ScopeKind::Class) group_moves = false;
+                    // An out-of-line member is fine: the invocation spells its qualified
+                    // name and the class already declares it, so nothing is left behind.
+                    // p4c's dbprint-expression.cpp defines IR::UPlus::dbprint and a dozen
+                    // more through ALL_UNARY_OPS(UNOP_DBPRINT); kept in the preamble they
+                    // were in every piece. A member written inside its class is not.
+                    if (g->defined_in_class) group_moves = false;
                 }
             }
             if (group_moves) {
@@ -3019,7 +3051,12 @@ static std::string generate_preamble(const std::string& source,
                     // resolved: the result type and the display name, which is the name
                     // with its parameter types. Default arguments are not carried; a piece
                     // relying on one fails to compile and the unit falls back, which is
-                    // the visible outcome rather than the silent one.
+                    // the visible outcome rather than the silent one. A member needs none:
+                    // its class declares it.
+                    bool member = false;
+                    for (const auto& sc : g->scope_chain)
+                        if (sc.kind == ScopeKind::Class) member = true;
+                    if (member) continue;
                     std::string decl = generate_forward_decl_inplace(*g, stem);
                     if (decl.empty() && !g->return_type.empty() && !g->qualified_name.empty())
                         decl = g->return_type + " " + g->qualified_name + ";";
@@ -3128,6 +3165,20 @@ static std::string generate_preamble(const std::string& source,
                     for (unsigned i = 0; i < r.fn->unnamed_ns_depth; ++i) preamble += "}\n";
                     preamble += decl + "\n";
                     for (unsigned i = 0; i < r.fn->unnamed_ns_depth; ++i) preamble += "namespace {\n";
+                }
+            }
+            // The body taken out may close conditionals it did not open: p4c's
+            // parseInput.cpp writes `#ifdef SUPPORT_P4_14 T f(a, b) { #else T f(a) { #endif`
+            // and the body after -- the `#endif` is past the `{`, so the declaration left
+            // behind (the declarator up to the `{`) loses it and the `#ifdef` stays open.
+            // What the removed part closed is closed again here; the piece does the same
+            // for what it replays (conditionals_closed_by()). TODO/47.
+            {
+                const std::string blanked = blank_code_noise(r.fn->body);
+                const size_t decl_end = definition_decl_end(blanked);
+                if (decl_end != std::string::npos && decl_end < r.fn->body.size()) {
+                    const size_t closed = conditionals_closed_by(r.fn->body.substr(decl_end));
+                    for (size_t ci = 0; ci < closed; ++ci) preamble += "#endif\n";
                 }
             }
         }

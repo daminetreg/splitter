@@ -159,6 +159,9 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   static_stateless_lambda_main  a static captureless lambda, kept per piece (TODO/42 4)
 #   system_decl_main    a definition whose exception specification a system header holds (TODO/47)
 #   static_shapes_main  `static bool a, b;` and `static char pool[N];`, renamed and moved (TODO/47)
+#   deduced_ref_return_main  `auto &f()`, `const auto &f() const`, `auto *f()` kept in place (TODO/47)
+#   macro_member_group_main  one macro defining out-of-line members of several classes (TODO/47)
+#   conditional_body_endif_main  a branch-dependent declarator whose `#endif` is in the body (TODO/47)
 #   static_unnamed_type_main  a static of an unnamed struct type: its users stay with it (TODO/44)
 #   static_unnamed_ns_type_main  a static of a class from an unnamed namespace, likewise (TODO/44)
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
@@ -171,7 +174,8 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
                 conditional_declarator_main defaulted_out_of_line_main
                 static_defines_type_main static_stateless_lambda_main
                 static_unnamed_type_main static_unnamed_ns_type_main
-            system_decl_main static_shapes_main)
+            system_decl_main static_shapes_main deduced_ref_return_main
+            macro_member_group_main conditional_body_endif_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
