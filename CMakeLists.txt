@@ -388,6 +388,24 @@ set_tests_properties(
   launcher.static_variable
   PROPERTIES TIMEOUT 300)
 
+# TODO/47: Kitware's C++20 named modules example, built plain with the suite's compiler --
+# the launcher does not take module units yet (TODO/43). Skips where CMake cannot drive
+# modules: clang < 16 (the tipi clang 13), Apple's clang (no clang-scan-deps), CMake < 3.28.
+# Point cpp_splitter_modules_cxx at another clang to run it anyway, e.g. Homebrew's on macOS.
+set(cpp_splitter_modules_cxx "${CMAKE_CXX_COMPILER}" CACHE FILEPATH
+    "C++ compiler for example.cpp_20_modules (clang >= 16 or GCC >= 14)")
+add_test(
+  NAME example.cpp_20_modules
+  COMMAND ${CMAKE_COMMAND}
+          -DPROJECTDIR=${CMAKE_SOURCE_DIR}/example/cpp-20-modules
+          -DWORKDIR=${cpp_splitter_test_output}/cpp_20_modules
+          -DCXX=${cpp_splitter_modules_cxx}
+          -DSYSROOT=${CMAKE_OSX_SYSROOT}
+          -P ${cpp_splitter_test_dir}/cmake/RunCpp20ModulesExample.cmake)
+set_tests_properties(example.cpp_20_modules PROPERTIES
+  SKIP_REGULAR_EXPRESSION "cpp-splitter-test-skip:"
+  TIMEOUT 300)
+
 # The drivers hand ${CXX} to cpp-splitter, which runs it bare: no -isysroot, none of the
 # toolchain's CMAKE_CXX_FLAGS. CMake adds those to its own compiles but not to theirs. tipi's
 # clang is not Apple's and has no idea where the SDK is unless SDKROOT says so -- without it
