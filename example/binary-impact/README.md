@@ -1,7 +1,7 @@
 # What splitting does to the binary
 
 `compare.sh` builds the `use_mylib` fixture of the test suite -- one source, one header of
-four `inline` functions and a function template -- five ways from the same CMake project and
+four `inline` functions and a function template -- eight ways from the same CMake project and
 compares the executables: sizes, symbols, per-function machine code, `diffoscope`. Measured
 on 14 September 2026 with clang 13.0.0 (tipi toolchain `4f846ee`), `-O2`, lld as the final
 linker in every configuration. TODO/46.
@@ -13,6 +13,9 @@ linker in every configuration. TODO/46.
 | split | `cpp-splitter` | `-O2` | `ld -r` |
 | split-lto-relink | `cpp-splitter` | `-O2 -flto=thin` | `ld.lld -r`: LTO over the unit's pieces, native object out |
 | split-lto-final | `cpp-splitter` | `-O2 -flto=thin` | `llvm-link` (`llvm-link-r.sh`): one bitcode object out, LTO at the final link |
+| plain-gc | — | `-O2 -ffunction-sections -fdata-sections`, `-Wl,--gc-sections` | — |
+| split-gc | `cpp-splitter` | the same | `ld -r` |
+| split-lto-relink-gc | `cpp-splitter` | the same, `-flto=thin` | `ld.lld -r` |
 
 ## Enabling LTO with the splitter
 
@@ -46,8 +49,11 @@ in the header copy.
 | split | 9968 | 3947 | 608 | 7416 | 1537 | 29 | 9 |
 | split-lto-relink | 9672 | 3695 | 600 | 7152 | 1366 | 29 | 10 |
 | split-lto-final | 9600 | 3835 | 608 | 9924 | bitcode | 29 | 5 |
+| plain-gc | 8696 | 3314 | 584 | 5096 | 1058 | 22 | 5 |
+| split-gc | 9568 | 3837 | 592 | 7520 | 1534 | 25 | 9 |
+| split-lto-relink-gc | 8880 | 3314 | 584 | 7152 | 1366 | 22 | 10 |
 
-Bytes; `symbols` counts `llvm-nm --defined-only`. All five programs print the same five
+Bytes; `symbols` counts `llvm-nm --defined-only`. All eight programs print the same five
 lines.
 
 ### Symbols
@@ -104,6 +110,31 @@ instructions against plain's 91) and calls `average`. Each piece was already opt
 single-function compilation found. Compared with plain-lto (157 instructions, `greet`
 inlined), it inlines less, not more.
 
+### With `-ffunction-sections` and `--gc-sections`
+
+The question is whether the final link can discard the weak copies `__attribute__((used))`
+made the pieces emit. Every piece is compiled with `-ffunction-sections -fdata-sections`,
+`ld -r` keeps the sections apart in the combined object (`.text._Z3addii`,
+`.text._Z8multiplyii`, … beside `.text.main`), and the final link runs `--gc-sections`.
+
+| against plain-gc | identical | differ | only in the other | instructions | `.text` |
+|---|---:|---|---|---:|---:|
+| plain | all 3 | none | — | 178 = 178 | 3422 → 3314 |
+| split-gc | `greet`, … | `main` 91 → 122 | `add`, `multiply`, `average` | 178 → 236 | 3314 → 3837 |
+| split-lto-relink-gc | all 3 | none | none | 178 = 178 | 3314 = 3314 |
+
+**split-gc** keeps the three copies: `main` calls them, so they are referenced, and
+`--gc-sections` has nothing to collect. The attribute is not what keeps them here; the
+missing inlining is.
+
+**split-lto-relink-gc** is plain-gc: the same three functions, the same 178 instructions,
+the same 3314 bytes of `.text`, 22 symbols against 22. `ld.lld -r` inlined the three into
+`main` and left their `used` copies as sections of their own in the combined object (10
+symbols there against plain-gc's 5); `--gc-sections` at the final link discarded them,
+which also says that with this clang `used` does not imply the linker-side `retain`. The
+only remaining difference between the two executables is the numbering of one
+`GCC_except_table` local symbol.
+
 ### diffoscope
 
 The text reports are `results/<a>-vs-<b>.diffoscope` (1400–1650 lines each). Beyond the
@@ -121,6 +152,9 @@ offsets, the dynamic table, `.eh_frame`, `.gcc_except_table`, `.rodata`, `.strta
 - LTO at the relink (`ld.lld -r`) brings `main` back to plain's code exactly; the `used`
   copies remain. LTO at the final link (`llvm-link`) does not: pre-optimised pieces merge
   into something the LTO pipeline inlines less than a plain LTO build does.
+- `-ffunction-sections` + `--gc-sections` removes the `used` copies only once nothing calls
+  them, which on this fixture takes the relink LTO: `split-lto-relink-gc` is plain-gc's
+  code, size and symbol table. Without the LTO the copies are the callees and stay.
 
 ## Reproducing
 

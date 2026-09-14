@@ -9,6 +9,10 @@
 #                      bitcode
 #   split-lto-final    -flto=thin; pieces merged with llvm-link into one bitcode object, so
 #                      the final link optimises across the whole program as plain-lto does
+#   plain-gc           plain, -ffunction-sections -fdata-sections, linked with --gc-sections
+#   split-gc           split, the same: does the final link discard the weak copies that
+#                      __attribute__((used)) made the pieces emit?
+#   split-lto-relink-gc  split-lto-relink, the same
 #
 # Everything is written under results/: one build tree per configuration, the executable and
 # the unit's object of each, and the reports:
@@ -32,19 +36,23 @@ RESULTS="$HERE/results"
 rm -rf "$RESULTS"
 mkdir -p "$RESULTS"
 
-CONFIGS="plain plain-lto split split-lto-relink split-lto-final"
+CONFIGS="plain plain-lto split split-lto-relink split-lto-final plain-gc split-gc split-lto-relink-gc"
 
 build() {  # build <config>
-    local cfg="$1" dir="$RESULTS/build-$1" lto=OFF launcher="" linker=""
+    local cfg="$1" dir="$RESULTS/build-$1" lto=OFF gc=OFF launcher="" linker=""
     case "$cfg" in
         plain) ;;
         plain-lto) lto=ON ;;
         split) launcher="$SPLITTER" ;;
         split-lto-relink) lto=ON; launcher="$SPLITTER"; linker="$CLANG_BIN/ld.lld" ;;
         split-lto-final) lto=ON; launcher="$SPLITTER"; linker="$HERE/llvm-link-r.sh" ;;
+        plain-gc) gc=ON ;;
+        split-gc) gc=ON; launcher="$SPLITTER" ;;
+        split-lto-relink-gc) gc=ON; lto=ON; launcher="$SPLITTER"; linker="$CLANG_BIN/ld.lld" ;;
     esac
     local args=(-GNinja -S "$HERE" -B "$dir" -DCMAKE_BUILD_TYPE=Release
                 -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DBINARY_IMPACT_LTO=$lto
+                -DBINARY_IMPACT_GC=$gc
                 -DCMAKE_CXX_FLAGS_RELEASE=-O2)
     [ -n "$launcher" ] && args+=(-DCMAKE_CXX_COMPILER_LAUNCHER="$launcher")
     cmake "${args[@]}" > "$dir.configure.log" 2>&1
@@ -123,7 +131,7 @@ REPORT="$RESULTS/report.md"
     echo '```'
 } > "$REPORT"
 
-PAIRS="plain:split plain:plain-lto plain:split-lto-relink plain:split-lto-final plain-lto:split-lto-relink plain-lto:split-lto-final"
+PAIRS="plain:split plain:plain-lto plain:split-lto-relink plain:split-lto-final plain-lto:split-lto-relink plain-lto:split-lto-final plain:plain-gc plain-gc:split-gc plain-gc:split-lto-relink-gc plain:split-gc plain:split-lto-relink-gc"
 for pair in $PAIRS; do
     a="${pair%%:*}"; b="${pair##*:}"
     echo "==> $a vs $b"

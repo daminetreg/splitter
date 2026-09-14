@@ -63,4 +63,9 @@ compilation inlined a function now in another piece (`main` 91 → 122 instructi
 of every header function in the object (3 symbols more, none fewer); `ld.lld -r` under
 `-flto=thin` brings `main` back to plain's exact code with the copies still present;
 `llvm-link` with LTO at the final link inlines less than a plain LTO build. Program output
-identical in all five configurations.
+identical in all configurations.
+
+Added afterwards: three configurations with `-ffunction-sections -fdata-sections` and
+`--gc-sections`. The copies are discarded only when nothing calls them: `split-gc` keeps them
+(`main` calls them), `split-lto-relink-gc` is plain-gc's code, `.text` size and symbol table
+to the byte.
