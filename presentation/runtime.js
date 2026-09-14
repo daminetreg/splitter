@@ -63,8 +63,6 @@
     }
     window.scrollTo(0, 0);
   }
-  document.querySelector("#prev").onclick = () => show(current - 1);
-  document.querySelector("#next").onclick = () => show(current + 1);
   notesToggle.onclick = () => {
     notes.classList.toggle("show");
     notesToggle.setAttribute("aria-expanded", String(notes.classList.contains("show")));
