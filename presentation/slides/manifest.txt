@@ -1,0 +1,27 @@
+# This is the only ordering authority. One entry is one visible slide.
+01-opening.md
+02-proposition.md
+03-input.md
+04-contract.md
+05-parse.md
+06-classification.md
+07-preambles.md
+08-mirror.md
+09-header-piece.md
+10-context.md
+11-paths.md
+12-records.md
+13-recompose.md
+14-remote.md
+15-controlled-comparison.md
+16-semantic-diff.md
+17-section-map.md
+18-paired-sizes.md
+19-convergence.md
+20-benchmark-wall.md
+21-benchmark-actions.md
+22-benchmark-remote.md
+23-benchmark-host.md
+24-costs.md
+25-limitations.md
+26-closing.md
