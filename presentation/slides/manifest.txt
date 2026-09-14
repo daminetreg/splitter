@@ -1,5 +1,6 @@
 # This is the only ordering authority. One entry is one visible slide.
 01-opening.md
+01a-about.md
 02-proposition.md
 02a-header-only.md
 03-input.md
@@ -13,12 +14,14 @@
 11-paths.md
 12-records.md
 13-recompose.md
+13a-modules.md
 14-remote.md
 15-controlled-comparison.md
 16-semantic-diff.md
 17-section-map.md
 18-paired-sizes.md
 19-convergence.md
+19a-fission-quote.md
 20-benchmark-wall.md
 21-benchmark-actions.md
 22-benchmark-remote.md
