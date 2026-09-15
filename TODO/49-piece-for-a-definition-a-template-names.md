@@ -57,3 +57,24 @@ piece serves an emitted function today: the copy declares, the piece defines, `i
 - Boost.Spirit: 0 fallbacks, 0 declined, 268 programs link and pass; the body row
   measured again with `MODES="plain split" ./benchmark-spirit-cmake-re.sh --host`, with
   the full row's new cost beside it.
+
+## Outcome
+
+Implemented at `040b7ab8`. Two things the rungs found on the way:
+
+- A body that refers to a function the unit declares and does not define cannot have a
+  piece: `boost::math::concepts::acosh()` calls the template `boost::math::acosh` with only
+  `math_fwd.hpp` read, the plain build never emits it, and a piece forced into existence
+  referenced an instantiation nothing defines -- nine Spirit programs failed to link. Such
+  definitions keep their body, and so does every vague-linkage caller that would emit them
+  (`record_reference()`, `g_lacks_definition`; 1504 across the suite). Callees declared in
+  system headers are exempt: libc and libstdc++ define them.
+- The include prefix precompiled for the parse was cut inside a `#define` continued with
+  backslashes, so Boost.Filesystem's `utf8_codecvt_facet.cpp` parsed with 20 errors that
+  a passthrough had hidden; the pieces TODO/49 added exposed it as a fallback.
+  `include_prefix_of()` cuts on logical lines and `RunSplitTest` fails on any parse error.
+
+Boost.Spirit, `benchmarks/boost-spirit-summary-14-Sep-2026.md`: the body row goes from
+128.0s to 34.1s, 267 piece compiles and no PCH, 1.66x faster than plain; the full split
+build from 438.1s to 882.4s and the no-op from 11.8s to 29.2s, on 37538 pieces against
+4408. The acceptance criteria hold; the cost stated in the proposal is measured.

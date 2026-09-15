@@ -1,4 +1,4 @@
-# Boost.Spirit's test suite, split and built on one machine, 14 September 2026
+# Boost.Spirit's test suite, split and built on one machine, 14 and 15 September 2026
 
 One run of `BUILD_TYPE=Release CMAKE_RE_JOBS=16 MODES="plain split" ./benchmark-spirit-cmake-re.sh --host`
 at cpp-splitter `a3e256df` (after TODO/44, TODO/47, TODO/48 and the preamble PCH being loaded
@@ -74,3 +74,42 @@ the absent second candidate before the loop skips it. The re-slice is not affect
 
 **The touch rows and the no-op row are unchanged**: 5.9s against 5.6s for a touch, 11.8s
 against 5.6s for a no-op. The no-op cost is the launcher validating 279 splits.
+
+## After TODO/49, 15 September
+
+Same command, cpp-splitter `040b7ab8`. A header definition the unit does not emit but a
+template names is now split like an emitted one: the copy declares it and a piece defines it
+(`inline`, `__attribute__((used))`). The Spirit suite goes from 4408 pieces to 37538.
+
+| scenario | splitter | build | fallbacks | declined | what the splitter did |
+|---|---|---:|---:|---:|---|
+| full | no | 57.7s | 0 | 0 | — |
+| full | yes | 882.4s | 0 | 0 | 279 parsed and split, 557 PCH, 37538 piece compiles |
+| no-op | no | 5.7s | 0 | 0 | — |
+| no-op | yes | 29.2s | 0 | 0 | none: every unit reused its split |
+| one source | no | 5.6s | 0 | 0 | — |
+| one source | yes | 5.9s | 0 | 0 | none, not re-mirrored |
+| one header | no | 5.7s | 0 | 0 | — |
+| one header | yes | 5.9s | 0 | 0 | none, not re-mirrored |
+| **one body** | **no** | **56.6s** | 0 | 0 | — |
+| **one body** | **yes** | **34.1s** | 0 | 0 | 267 re-sliced, 1 declared only, 0 PCH rebuilt, 267 piece compiles |
+
+Speed-ups, plain over split: full 0.07x, no-op 0.20x, one source 0.95x, one header 0.95x,
+one body **1.66x**.
+
+**The body edit recompiles one piece per unit and no PCH.** `toucs4` has a piece in each of
+the 267 copies that used to keep its body; the edit re-slices that piece and recompiles it
+against the unchanged PCH: 267 compiles against 4228 the day before, 34.1s against 128.0s,
+and 1.66x faster than plain's 56.6s. `x3/tst.cpp` still declares it only and compiles nothing.
+
+**The full build doubles and the no-op more than doubles.** 37538 pieces against 4408:
+882.4s against 438.1s for the full split, 29.2s against 11.8s for the no-op, which is the
+launcher checking every piece of every unit. That is the price of option 1 of TODO/49, one
+piece per named definition; option 2, all of a unit's named definitions in its one
+definitions unit, would have added no piece and cost one compile per unit on the edit.
+
+**Kept with their body, 1504 definitions across the suite:** those whose body refers to a
+function the unit declares and does not define, `boost::math::concepts::acosh()` calling
+`boost::math::acosh` with only `math_fwd.hpp` read. A piece for one of those carries a
+reference the plain build never made and the link fails; the first run of TODO/49 lost
+`qi/real1..5`, `karma/real1..3` and `x3/real4` to exactly that.
