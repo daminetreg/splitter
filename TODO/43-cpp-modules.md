@@ -324,6 +324,38 @@ attempt to split the interface unit, no fallback, `42 7 14`. Skips like the rest
 Both fixtures skip with `cpp-splitter-test-skip:` when the compiler has no
 `-fmodule-output` — the Linux clang 13 job — and run on the Homebrew-LLVM macOS build.
 
+## Outcome (14 September 2026)
+
+Phases 1 and 2 are in, Phase 3's local measurement is done; commit `0724611` and the ones
+after it.
+
+- `environments/macos-brew-llvm.cmake`; the suite passes on it (58 tests, one skipped for
+  want of a cluster), `example.cpp_20_modules` included.
+- The launcher expands `@modmap`, splits the interface unit as designed -- interface with
+  declarations and inline bodies, one implementation unit per body replaying the global
+  module fragment, BMI published only on a byte change and touched otherwise, `modules.hash`
+  for the pieces' staleness -- and an importer's pieces restate their imports.
+  `launcher.module_interface_split` runs the four steps.
+- Two things the design did not foresee. libclang does not visit the children of an
+  `export` declaration, so the interface is parsed from a copy with its module syntax
+  blanked in place (`blank_module_syntax()`). And what may exist in only one object -- a
+  defaulted member written out of line, as Kitware's `foo` has -- stays in the interface,
+  since a module has no definitions header to move it to.
+- Three pre-existing bugs found on the way and fixed: the system-include probe pushed
+  `-isysroot <sdk>` twice and lost the SDK on macOS; the probed directories were not
+  normalised, so Homebrew's libc++ headers were split candidates; the source was recorded
+  twice in `inputs.hash` under CMake's absolute paths, so the re-slice never ran there.
+- Measured, `benchmarks/cpp20-modules.md`: a body edit in the interface leaves the BMI
+  byte-identical and the 30 importers idle in the split build (1 compile against 31), and
+  changes it in the plain build with the reduced BMI on. Wall time at this size is 0.77x for
+  the edit that keeps its line count and 1.16x for one that inserts a line, because the
+  re-slice renumbers the `#line` of the 22 pieces after it. The inline-body control changes
+  the BMI in both builds; the split build then also recompiles the interface's own 40
+  implementation units, which a finer key than the BMI's hash would spare.
+
+Still open: implementation units and partitions are compiled whole; in-class member bodies
+stay in the interface; the cluster and GCC criteria below.
+
 ## Acceptance Criteria
 
 - The existing suite passes on the `macos-brew-llvm` build (Homebrew clang 21 driving and

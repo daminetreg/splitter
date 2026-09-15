@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.28)
+project(cpp20_modules_bench CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_EXTENSIONS OFF)
+add_library(mathlib)
+target_sources(mathlib PUBLIC FILE_SET CXX_MODULES FILES mathlib.cppm)
+add_executable(bench main.cpp use_0.cpp use_1.cpp use_2.cpp use_3.cpp use_4.cpp use_5.cpp use_6.cpp use_7.cpp use_8.cpp use_9.cpp use_10.cpp use_11.cpp use_12.cpp use_13.cpp use_14.cpp use_15.cpp use_16.cpp use_17.cpp use_18.cpp use_19.cpp use_20.cpp use_21.cpp use_22.cpp use_23.cpp use_24.cpp use_25.cpp use_26.cpp use_27.cpp use_28.cpp use_29.cpp)
+target_link_libraries(bench mathlib)
