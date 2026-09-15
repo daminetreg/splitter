@@ -3474,7 +3474,21 @@ static std::string shell_quote(const std::string& s) {
 // follows is then a no-op, the PCH carrying the file's pragma-once state. The header is
 // read off the piece's first quoted include, which names the unit's preamble or, for a pair
 // header's inclusion, its context preamble (TODO/44). TODO/47.
-static bool pch_is_current(const std::string& pch_file);
+// Whether the compiler's PCH still matches the contents of everything it was built from:
+// `<gch>.deps` holds one `<content hash> <path>` per prerequisite. By content, not by
+// time: a header touched and not changed keeps the PCH, as it keeps the split (TODO/28).
+static std::string file_content_hash(const std::string& path);
+static bool gch_is_current(const std::string& gch_file) {
+    std::ifstream ifs(gch_file + ".deps");
+    if (!ifs.is_open()) return false;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        const size_t space = line.find(' ');
+        if (space == std::string::npos) continue;
+        if (file_content_hash(line.substr(space + 1)) != line.substr(0, space)) return false;
+    }
+    return true;
+}
 
 // The prerequisites a compiler wrote with -MD: everything after the colon, backslashes
 // dropped. Spaces in paths are not handled, as rewrite_depfile() does not.
@@ -3539,7 +3553,7 @@ static bool build_pch(const std::string& preamble_file,
     // whose inputs moved: `file ... has been modified since the precompiled header`. The
     // compiler is asked for the PCH's prerequisites (-MD) and they are checked the way
     // pch_is_current() checks the libclang one's. TODO/47.
-    if (fs::exists(gch_file) && pch_is_current(gch_file)) {
+    if (fs::exists(gch_file) && gch_is_current(gch_file)) {
         if (verbose) out << "  PCH up-to-date: " << gch_file << "\n";
         return true;
     }
@@ -3577,9 +3591,10 @@ static bool build_pch(const std::string& preamble_file,
         return false;
     }
     {
-        // One prerequisite per line, as pch_is_current() reads.
+        // `<content hash> <path>` per prerequisite, as gch_is_current() reads.
         std::ofstream deps(gch_file + ".deps");
-        for (const auto& dep : depfile_prerequisites(dep_file)) deps << dep << "\n";
+        for (const auto& dep : depfile_prerequisites(dep_file))
+            deps << file_content_hash(dep) << " " << dep << "\n";
     }
 
     if (verbose) out << "  PCH built: " << gch_file << "\n";
