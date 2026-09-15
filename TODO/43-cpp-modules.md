@@ -1,7 +1,9 @@
 # 43 — C++20 named modules: where the splitter applies, and what it costs
 
-Design only. Decisions taken: C++20 named modules first; the toolchain move to clang ≥ 20 is
-part of this entry. Rewritten on 14 September 2026 after measuring what a BMI holds, with
+Design only. Decisions taken: C++20 named modules first; developed and iterated on macOS
+with Homebrew's LLVM (clang 21 as the compiler, its libclang for the parse), not behind a
+Linux toolchain move — the tipi clang 13 stays for everything else, and a clang ≥ 20 image
+for CI is a follow-up once the split works. Rewritten on 14 September 2026 after measuring what a BMI holds, with
 and without `-fmodules-reduced-bmi` — the first version assumed the whole unit was
 serialised, which is true of the full BMI only, and the question was whether the reduced
 BMI already gives what the splitter would.
@@ -106,7 +108,7 @@ and should simply be on in the split build: smaller file, less to hash, less to 
   and expects the launcher to write exactly the `.pcm` and `.o` it planned (through the
   `@….modmap` response file: `-x c++-module -fmodule-output=<pcm>`). The launcher must keep
   the BMI path and module name the scanner saw. This needs clang ≥ 16, and the reduced BMI
-  clang ≥ 20, hence the toolchain move.
+  clang ≥ 20 — Homebrew's llvm on macOS; nothing in the Linux image can drive it yet.
 - **The launcher must not rewrite an unchanged BMI.** Ninja rebuilds importers in the same
   run whatever the bytes; content caches and `inputs.hash` do not. Write the BMI to a
   temporary path and replace only on difference, so nothing downstream sees a new digest.
@@ -118,40 +120,33 @@ and should simply be on in the split build: smaller file, less to hash, less to 
   the body without the keyword and the declaration in the interface keeps it.
 - **Incremental paths.** `split.cache`, `inputs.hash` and the harvest work unchanged; the BMI
   becomes a prerequisite the depfile names (clang lists it under `-MD` when modules are on).
-- **libclang.** Parsing module units needs a libclang that understands them; libclang 20
-  beside clang 20, through `CPP_SPLITTER_LIBCLANG_ROOT` (already used on macOS for
-  Homebrew's llvm).
+- **libclang.** Parsing module units needs a libclang that understands them: Homebrew's,
+  which `environments/macos-apple-clang.cmake` already links through
+  `CPP_SPLITTER_LIBCLANG_ROOT`. Known sensitivities of the splitter under a newer libclang:
+  `probe_driver_standard()` (defaults to gnu++17), `CXCursor_LinkageSpec` against
+  `CXCursor_UnexposedDecl` (both accepted since TODO/42).
 
 ## Implementation Proposal
 
-### Phase 0 — correct on today's toolchain
+### Phase 1 — a macOS environment that can drive modules
+
+- `environments/macos-brew-llvm.cmake`: like `macos-apple-clang.cmake` but the compiler is
+  Homebrew's `clang++` too (`brew --prefix llvm`), with `CMAKE_OSX_SYSROOT` from
+  `xcrun --show-sdk-path` — a non-Apple clang does not find the SDK on its own — and the
+  same `CPP_SPLITTER_LIBCLANG_ROOT`. Build the splitter with it through
+  `cmake-re --host`; the existing suite must pass, which is the libclang-21 check.
+- `example.cpp_20_modules` (TODO/47) runs instead of skipping on that build; it is the
+  smoke test that CMake, `clang-scan-deps` and the modmap work before the launcher enters.
+- No Linux change. The tipi clang 13 image cannot build the fixtures below; they skip there
+  with the `cpp-splitter-test-skip:` marker, as `example.cpp_20_modules` does.
+
+### Phase 2 — split an interface unit
 
 - `is_source_file()`: add `.cppm`, `.ixx`, `.cxxm`, `.c++m`.
 - `inclusions_of()`: a module unit is never a header candidate. Exclude a file whose first
   non-comment line is `module`, `export module` or `import`, and a file that no inclusion
-  directive reached — one present in the AST only through an import.
-- Fixture `launcher.importer_keeps_the_interface_whole` (`test/modules/`): the BMI built by
-  the compiler by hand — skipped with the `cpp-splitter-test-skip:` marker when
-  `--precompile` is unsupported — then the launcher on `use.cpp` with `-fmodule-file=`.
-  Assert: no attempt to split the interface unit, no fallback, program prints `42 7 14`.
-  Runs on clang 13.
-
-### Phase 1 — toolchain move
-
-- `environments/ubuntu-clang-20.cmake`, `.pkr.js` and container lock: the image installs
-  clang 20 with `libclang-20-dev` and `clang-tools-20` (apt.llvm.org on Ubuntu 24.04, whose
-  own archive stops at 18 — 18 would do for CMake modules but not for the reduced BMI);
-  compiler `/usr/bin/clang++-20`; `CPP_SPLITTER_LIBCLANG_ROOT=/usr/lib/llvm-20`. On macOS
-  Homebrew's llvm 21 already serves, with `CMAKE_OSX_SYSROOT` set
-  (`example/cpp-20-modules/README.md`).
-- Build the splitter against libclang 20 and run the whole suite. Known sensitivities:
-  `probe_driver_standard()` (newer clang defaults to gnu++17); `CXCursor_LinkageSpec`
-  against `CXCursor_UnexposedDecl` (both accepted since TODO/42); libstdc++ 13 headers
-  under a newer clang; `-fuse-ld=lld` and the static libc++ link in `CMakeLists.txt`.
-- CI: a job beside the clang 13 ones; clang 13 stays until every fixture passes on 20.
-- `example.cpp_20_modules` (TODO/47) then runs instead of skipping on the Linux job.
-
-### Phase 2 — split an interface unit
+  directive reached — one present in the AST only through an import. This is what made the
+  importer split fail on 13 September.
 
 - Detect a module unit from the source — `export module` or `module` after the optional
   global module fragment — and from `-x c++-module` on the command line.
@@ -171,7 +166,12 @@ and should simply be on in the split build: smaller file, less to hash, less to 
   `ld -r` into `m.o`; rewrite the depfile to name the source and the BMI.
 - Harvest and re-slice unchanged; the BMI joins `inputs.hash`.
 
-### Phase 3 — measure
+### Phase 3 — measure, then CI
+
+- Measurements below on the macOS build.
+- Only then a Linux image with clang ≥ 20 (apt.llvm.org on Ubuntu 24.04, whose own archive
+  stops at 18 — enough for CMake modules, not for the reduced BMI) beside the clang 13 one,
+  so the fixtures run in CI on Linux too; clang 13 stays until every fixture passes there.
 
 - `example/modules/`: one module with about 40 exported non-inline functions and 30
   importers, reduced BMI on. Rows: full; one non-inline body in the interface; one inline
@@ -317,19 +317,24 @@ already. The depfile names `use.cpp`, `<cstdio>`'s headers and `math.pcm`.
 5. Byte-identity: the re-slice in step 3 produces, file for file, what a forced full split of
    the same edit produces, as `launcher.incremental_body_edit` checks.
 
-Phase 0's `launcher.importer_keeps_the_interface_whole` runs on clang 13.
+`launcher.importer_keeps_the_interface_whole`, the Phase 2 `inclusions_of()` half: the BMI
+built by the compiler by hand, then the launcher on `use.cpp` with `-fmodule-file=`; no
+attempt to split the interface unit, no fallback, `42 7 14`. Skips like the rest.
+
+Both fixtures skip with `cpp-splitter-test-skip:` when the compiler has no
+`-fmodule-output` — the Linux clang 13 job — and run on the Homebrew-LLVM macOS build.
 
 ## Acceptance Criteria
 
-- The Phase 0 fixture passes on clang 13 and the Phase 2 fixture on clang 20; each fails
-  before its phase.
-- The existing suite passes on clang 20 with libclang 20, and Boost.Filesystem and
-  Boost.Spirit build with 0 fallbacks on it.
+- The existing suite passes on the `macos-brew-llvm` build (Homebrew clang 21 driving and
+  parsing), and `example.cpp_20_modules` passes there instead of skipping.
+- Both module fixtures pass on that build and fail before Phase 2; they report *skipped*
+  on the clang 13 Linux job.
 - `example/modules`: a non-inline body edit in the interface unit recompiles one piece and no
   importer in the split build, and every importer in the plain build with
   `-fmodules-reduced-bmi` on — the control that the reduced BMI alone does not do it.
 - `example/cpp-20-modules/bmi-probe/probe.sh` prints the four `DIFFERS` and the final
-  `IDENTICAL` on the clang the Linux job uses; the same probe on GCC 14/15 records whether
+  `IDENTICAL` on Homebrew's clang; the same probe on GCC 14/15 records whether
   the `.gcm` is stable under a non-inline body edit, and the design's GCC paragraph is
   updated with the answer.
 - The BMI appears in reclient's input records for a piece and for an importer on the
