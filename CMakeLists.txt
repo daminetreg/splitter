@@ -165,6 +165,7 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   macro_group_redefined_main  one list macro invoked twice under two helper definitions (TODO/47)
 #   static_unnamed_type_main  a static of an unnamed struct type: its users stay with it (TODO/44)
 #   static_unnamed_ns_type_main  a static of a class from an unnamed namespace, likewise (TODO/44)
+#   continued_define_main  a `#define` continued across lines inside the include prefix (TODO/49)
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
                 always_inline_main impl_include_main preamble_linkage macro_members_main
                 retracted_macro_main ipp_ctor_main multiline_conditional_main
@@ -176,7 +177,8 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
                 static_defines_type_main static_stateless_lambda_main
                 static_unnamed_type_main static_unnamed_ns_type_main
             system_decl_main static_shapes_main deduced_ref_return_main
-            macro_member_group_main conditional_body_endif_main macro_group_redefined_main)
+            macro_member_group_main conditional_body_endif_main macro_group_redefined_main
+            continued_define_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}

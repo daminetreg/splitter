@@ -30,6 +30,11 @@ if(NOT split_result EQUAL 0)
   message(FATAL_ERROR "cpp-splitter failed (${split_result}) on ${SOURCE}:\n${split_log}")
 endif()
 
+# A parse that reported errors decided the split on a program that is not the source.
+if(split_log MATCHES "Parse error:")
+  message(FATAL_ERROR "libclang reported errors parsing ${SOURCE}:\n${split_log}")
+endif()
+
 if(split_log MATCHES "fallback|falling back")
   message(FATAL_ERROR
     "split output did not compile; cpp-splitter fell back to compiling ${SOURCE} whole:\n${split_log}")
