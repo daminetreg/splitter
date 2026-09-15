@@ -464,6 +464,21 @@ set_tests_properties(
   launcher.static_variable
   PROPERTIES TIMEOUT 300)
 
+# TODO/43: a module interface unit split into the interface the compiler precompiles and one
+# implementation unit per body; an importer's pieces restate the import; a body edit leaves
+# the BMI byte-identical and the importer idle. Skips where the compiler cannot write a BMI.
+add_test(
+  NAME launcher.module_interface_split
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DPROJECTDIR=${cpp_splitter_test_dir}/modules
+          -DWORKDIR=${cpp_splitter_test_output}/modules
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunModuleSplitTest.cmake)
+set_tests_properties(launcher.module_interface_split PROPERTIES
+  SKIP_REGULAR_EXPRESSION "cpp-splitter-test-skip:"
+  TIMEOUT 300)
+
 # TODO/47: Kitware's C++20 named modules example, built plain with the suite's compiler --
 # the launcher does not take module units yet (TODO/43). Skips where CMake cannot drive
 # modules: clang < 16 (the tipi clang 13), Apple's clang (no clang-scan-deps), CMake < 3.28.

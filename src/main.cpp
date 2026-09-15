@@ -31,16 +31,21 @@ static std::vector<std::string> include_path_flags(const std::vector<std::string
     std::vector<std::string> out;
     for (size_t i = 0; i < flags.size(); ++i) {
         const std::string& f = flags[i];
+        // The two-token forms first, or `-isysroot <sdk>` is pushed twice -- once bare by
+        // the prefix match below, once with its value -- and the probe runs with a sysroot
+        // called "-isysroot": on macOS with Homebrew's clang that lost the SDK's usr/include
+        // and every unit parsed with errors in <ctype.h>. TODO/43.
+        if ((f == "-target" || f == "-isysroot" || f == "--sysroot" || f == "-stdlib") &&
+            i + 1 < flags.size()) {
+            out.push_back(f);
+            out.push_back(flags[++i]);
+            continue;
+        }
         if (f.rfind("-stdlib=", 0) == 0 || f.rfind("--gcc-toolchain", 0) == 0 ||
             f.rfind("--sysroot", 0) == 0 || f.rfind("--target=", 0) == 0 ||
             f == "-m32" || f == "-m64" || f == "-nostdinc" || f == "-nostdinc++" ||
             f == "-nostdlibinc" || f.rfind("-isysroot", 0) == 0)
             out.push_back(f);
-        if ((f == "-target" || f == "-isysroot" || f == "--sysroot" || f == "-stdlib") &&
-            i + 1 < flags.size()) {
-            out.push_back(f);
-            out.push_back(flags[++i]);
-        }
     }
     return out;
 }
@@ -79,9 +84,17 @@ static std::vector<std::string> detect_system_includes(const std::string& compil
             size_t paren = path.find(" (");
             if (paren != std::string::npos)
                 path = path.substr(0, paren);
+            // Normalised: Homebrew's clang reports `<prefix>/bin/../include/c++/v1`, and
+            // libclang names files under `<prefix>/include/c++/v1`, so a prefix match on the
+            // raw line called every libc++ header a project header. TODO/43.
             if (!path.empty() && fs::exists(path))
-                includes.push_back(path);
+                includes.push_back(fs::path(path).lexically_normal().string());
         }
+    }
+    if (std::getenv("CPP_SPLITTER_VERBOSE")) {
+        std::cerr << "[cpp-splitter] system includes (" << cmd << "):";
+        for (const auto& inc : includes) std::cerr << " " << inc;
+        std::cerr << "\n";
     }
     return includes;
 }
@@ -111,6 +124,27 @@ static int standard_from_flag(const std::string& flag) {
 }
 
 enum class ScopeKind { Namespace, Class };
+
+// A C++20 named module unit, read off the source text. TODO/43.
+//
+// Only the primary interface unit is split as a module: its non-inline bodies become
+// implementation units of the module, compiled against the BMI the rewritten interface
+// produces. An implementation unit (`module M;` with no `export`) is compiled whole for now;
+// an importer is an ordinary translation unit whose pieces carry its `import` lines.
+struct ModuleUnit {
+    bool interface = false;   // `export module M;`
+    bool implementation = false;   // `module M;`
+    std::string name;
+    // The global module fragment: what stands between `module;` and the module declaration.
+    // Preprocessor directives only, by the standard, so it is replayed verbatim by every
+    // piece ahead of its own module declaration.
+    std::string gmf;
+};
+
+// The unit being split, when it is a module interface unit, and the imports of the unit
+// being split whatever it is. Set per launcher invocation.
+static ModuleUnit g_module_unit;
+static std::vector<std::string> g_unit_imports;
 
 struct ScopeEntry {
     std::string name;
@@ -615,6 +649,7 @@ struct VisitorData {
 };
 
 static std::string blank_code_noise(const std::string& text);
+static bool is_included_file(const std::string& path);
 static bool contains_decl_token(const std::string& blanked, const std::string& kw);
 
 // The source text of a variable definition, through its terminating semicolon.
@@ -1179,6 +1214,10 @@ static bool has_vague_linkage(const FunctionInfo& fn) {
 }
 
 static std::string keep_reason(const FunctionInfo& fn) {
+    if (g_module_unit.interface && !is_included_file(fn.file)) {
+        if (fn.is_inlined)        return "inline in a module interface: belongs in the BMI";
+        if (fn.defined_in_class)  return "member defined in its class in a module interface: left in place";
+    }
     if (fn.shares_extent)       return "shares its source extent with another definition";
     if (fn.macro_invocation)    return "produced by a macro invocation, which moved as a unit";
     if (fn.uses_undefined_macro) return "needs a macro the file undefines";
@@ -2212,6 +2251,16 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         fn.conditionals = active_conditionals(source, fn.start_offset);
 
         if (fn.shares_extent) {
+            fn.keep_in_header = true;
+            continue;
+        }
+
+        // In a module interface unit an `inline` body is what importers instantiate or emit
+        // themselves, so it stays in the interface, where the BMI carries it. A member
+        // defined inside its class is not inline there (P1779) and could move, but moving it
+        // rewrites the class; it stays until TODO/05's member emission covers it. TODO/43.
+        if (g_module_unit.interface && !input_is_header &&
+            (fn.is_inlined || fn.defined_in_class)) {
             fn.keep_in_header = true;
             continue;
         }
@@ -3395,7 +3444,9 @@ static bool needs_recompile(const std::string& cpp_file, const std::string& obj_
 }
 
 static bool is_source_file(const std::string& path) {
-    static const char* exts[] = {".cpp", ".cc", ".cxx", ".C", ".c++", ".cp", ".c"};
+    // The last four are the module interface unit spellings the compilers accept. TODO/43.
+    static const char* exts[] = {".cpp", ".cc", ".cxx", ".C", ".c++", ".cp", ".c",
+                                 ".cppm", ".ixx", ".cxxm", ".c++m"};
     for (const char* ext : exts) {
         size_t elen = std::strlen(ext);
         if (path.size() >= elen && path.compare(path.size() - elen, elen, ext) == 0)
@@ -3432,6 +3483,126 @@ static bool is_included_file(const std::string& path) {
 static bool is_splittable_file(const std::string& path) {
     return is_source_file(path) || is_header_file(path);
 }
+
+static ModuleUnit detect_module_unit(const std::string& source) {
+    ModuleUnit mu;
+    const std::string blanked = blank_code_noise(source);
+    size_t pos = 0;
+    size_t gmf_start = std::string::npos;
+    while (pos < blanked.size()) {
+        size_t eol = blanked.find('\n', pos);
+        if (eol == std::string::npos) eol = blanked.size();
+        const std::string line = trim_ws(blanked.substr(pos, eol - pos));
+        if (line == "module;") {
+            gmf_start = eol < blanked.size() ? eol + 1 : eol;
+        } else if (line.rfind("export module ", 0) == 0 || line.rfind("module ", 0) == 0) {
+            const bool exported = line.rfind("export ", 0) == 0;
+            std::string rest = trim_ws(line.substr(exported ? 14 : 7));
+            const size_t semi = rest.find(';');
+            if (semi == std::string::npos) break;
+            rest = trim_ws(rest.substr(0, semi));
+            // A partition (`M:part`) is not handled; treat it as an implementation unit and
+            // compile it whole.
+            if (rest.empty() || rest.find(':') != std::string::npos) break;
+            mu.name = rest;
+            if (exported) mu.interface = true; else mu.implementation = true;
+            if (gmf_start != std::string::npos && gmf_start <= pos)
+                mu.gmf = source.substr(gmf_start, pos - gmf_start);
+            break;
+        } else if (!line.empty() && line[0] != '#') {
+            // Real code before any module declaration: not a module unit.
+            break;
+        }
+        pos = eol + 1;
+    }
+    return mu;
+}
+
+// The unit's own `import` declarations, as written. An import inside a precompiled
+// preamble does not make the module's declarations visible to the piece that includes it
+// (measured, clang 21), so every piece restates them ahead of the preamble.
+static std::vector<std::string> unit_import_lines(const std::string& source) {
+    std::vector<std::string> imports;
+    const std::string blanked = blank_code_noise(source);
+    size_t pos = 0;
+    while (pos < blanked.size()) {
+        size_t eol = blanked.find('\n', pos);
+        if (eol == std::string::npos) eol = blanked.size();
+        const std::string line = trim_ws(blanked.substr(pos, eol - pos));
+        if (line.rfind("import ", 0) == 0 || line.rfind("export import ", 0) == 0) {
+            if (line.find(';') != std::string::npos)
+                imports.push_back(trim_ws(source.substr(pos, eol - pos)));
+        }
+        pos = eol + 1;
+    }
+    return imports;
+}
+
+// The module syntax of an interface unit blanked out, every other byte where it was.
+//
+// libclang reports an `export` declaration as CXCursor_UnexposedDecl and does not visit its
+// children (clang 21), so an exported definition is invisible to the harvest. Given a copy
+// with `module;`, the module declaration, each `export` keyword and the braces of an
+// `export { ... }` block replaced by spaces, libclang parses an ordinary translation unit
+// whose declarations sit at the source's own offsets -- which is all the harvest records.
+// The rewrite works on the real text, where `export` precedes each moved definition's
+// extent and so stays. TODO/43.
+static std::string blank_module_syntax(const std::string& source) {
+    std::string out = source;
+    const std::string blanked = blank_code_noise(source);
+    auto blank_range = [&](size_t from, size_t to) {
+        for (size_t i = from; i < to && i < out.size(); ++i)
+            if (out[i] != '\n') out[i] = ' ';
+    };
+    auto is_ident = [](char c) { return std::isalnum((unsigned char)c) || c == '_'; };
+    // Whole lines first: `module;` and the module declaration.
+    size_t pos = 0;
+    while (pos < blanked.size()) {
+        size_t eol = blanked.find('\n', pos);
+        if (eol == std::string::npos) eol = blanked.size();
+        const std::string line = trim_ws(blanked.substr(pos, eol - pos));
+        if (line == "module;" || line.rfind("export module ", 0) == 0 ||
+            (line.rfind("module ", 0) == 0 && line.find(';') != std::string::npos))
+            blank_range(pos, eol);
+        pos = eol + 1;
+    }
+    // Then every `export` keyword, and the braces of an `export {` block.
+    size_t at = 0;
+    while ((at = blanked.find("export", at)) != std::string::npos) {
+        const bool word = (at == 0 || !is_ident(blanked[at - 1])) &&
+                          (at + 6 >= blanked.size() || !is_ident(blanked[at + 6]));
+        if (!word) { at += 6; continue; }
+        blank_range(at, at + 6);
+        size_t after = at + 6;
+        while (after < blanked.size() && std::isspace((unsigned char)blanked[after])) ++after;
+        if (after < blanked.size() && blanked[after] == '{') {
+            int depth = 0;
+            for (size_t i = after; i < blanked.size(); ++i) {
+                if (blanked[i] == '{') ++depth;
+                else if (blanked[i] == '}' && --depth == 0) { blank_range(i, i + 1); break; }
+            }
+            blank_range(after, after + 1);
+        }
+        at = after;
+    }
+    return out;
+}
+
+// Whether a file on disk is a module unit -- a header candidate it must never be.
+static bool is_module_unit_file(const std::string& path) {
+    static std::map<std::string, bool> cache;
+    auto it = cache.find(path);
+    if (it != cache.end()) return it->second;
+    std::error_code ec;
+    bool result = false;
+    if (fs::is_regular_file(path, ec)) {
+        const ModuleUnit mu = detect_module_unit(read_file(path));
+        result = mu.interface || mu.implementation;
+    }
+    cache[path] = result;
+    return result;
+}
+
 
 static std::string shell_quote(const std::string& s) {
     if (s.find_first_of(" \t\n'\"\\$`!#&|;(){}[]<>?*~") == std::string::npos)
@@ -4288,7 +4459,19 @@ static void write_inputs_hashes(const std::string& split_dir, const std::string&
     const std::string dep_cache = (fs::path(split_dir) / "depfile.cache").string();
     if (!fs::exists(dep_cache)) return;
     std::ostringstream os;
-    os << input_file << "\t" << file_content_hash(input_file) << "\n";
+    // Each prerequisite once. The depfile already names the source -- rewrite_depfile()
+    // puts it first -- and when the build spelled it the same way (CMake passes absolute
+    // paths) it was recorded twice, so a body edit read as two changed inputs and the
+    // re-slice never ran under CMake. TODO/43.
+    std::set<std::string> seen;
+    auto record = [&](const std::string& path) {
+        std::error_code ec;
+        const std::string key = fs::absolute(path, ec).lexically_normal().string();
+        if (!seen.insert(ec ? path : key).second) return;
+        const std::string h = file_content_hash(path);
+        os << path << "\t" << (h.empty() ? "<absent>" : h) << "\n";
+    };
+    record(input_file);
     const std::string deps = read_file(dep_cache);
     const size_t colon = deps.find(':');
     if (colon == std::string::npos) return;
@@ -4296,8 +4479,7 @@ static void write_inputs_hashes(const std::string& split_dir, const std::string&
     std::string token;
     while (tokens >> token) {
         if (token == "\\") continue;
-        const std::string h = file_content_hash(token);
-        os << token << "\t" << (h.empty() ? "<absent>" : h) << "\n";
+        record(token);
     }
     std::ofstream ofs((fs::path(split_dir) / "inputs.hash").string());
     if (ofs.is_open()) ofs << os.str();
@@ -4494,8 +4676,10 @@ static std::vector<std::string> inclusions_of(CXTranslationUnit tu) {
     };
     clang_visitChildren(clang_getTranslationUnitCursor(tu), visit, &from_ast);
     std::set<std::string> reported(includes.begin(), includes.end());
+    // A module unit's definitions are in the AST through an import, not an inclusion; it is
+    // not a header and must not be mirrored as one. TODO/43.
     for (const auto& f : from_ast)
-        if (!reported.count(f)) includes.push_back(f);
+        if (!reported.count(f) && !is_module_unit_file(f)) includes.push_back(f);
     return includes;
 }
 
@@ -4795,9 +4979,15 @@ static SplitResult split_unit(CXTranslationUnit tu,
     SplitResult result;
     result.success = false;
 
+    // A module interface unit's "preamble" is the interface the compiler precompiles: the
+    // unit with its non-inline bodies replaced by declarations, under the unit's own
+    // extension so the compiler still takes it as a module unit. TODO/43.
+    const bool module_interface = !input_is_header && g_module_unit.interface;
     const std::string preamble_filename = input_is_header
         ? fs::path(abs_path).filename().string()
-        : fs::path(abs_path).stem().string() + "_preamble.h";
+        : module_interface
+            ? fs::path(abs_path).stem().string() + "_interface" + fs::path(abs_path).extension().string()
+            : fs::path(abs_path).stem().string() + "_preamble.h";
 
     std::string unit_dir = output_dir;
     if (input_is_header) {
@@ -4901,9 +5091,28 @@ static SplitResult split_unit(CXTranslationUnit tu,
         build_static_rename_map(functions, variables, unit_tag);
     std::string definitions;
     g_definitions_need_variant = false;
-    const std::string preamble =
+    // A module interface has no definitions header: what may exist in only one object -- a
+    // defaulted member written out of line, a non-inline variable -- stays where it is, in
+    // the interface, which is compiled exactly once. With no sink, generate_preamble()
+    // leaves such a definition in place.
+    std::string preamble =
         generate_preamble(source, functions, variables, unit_tag, abs_path, static_renames,
-                          &definitions);
+                          module_interface ? nullptr : &definitions);
+    if (module_interface) {
+        // Not a header: no include guard, and `#pragma once` in a main file only warns.
+        if (preamble.rfind("#pragma once\n", 0) == 0) preamble.erase(0, 13);
+        // The global module fragment, replayed by every piece ahead of `module M;`: an
+        // implementation unit imports its interface implicitly, but not the interface's
+        // global module fragment.
+        const std::string gmf_path =
+            (fs::path(unit_dir) / (fs::path(abs_path).stem().string() + "_preamble.h")).string();
+        const std::string gmf = "#pragma once\n" + g_module_unit.gmf;
+        if (!fs::exists(gmf_path) || read_file(gmf_path) != gmf) {
+            std::ofstream ofs(gmf_path);
+            if (ofs.is_open()) ofs << gmf;
+            if (verbose) out << "Generated global module fragment: " << gmf_path << "\n";
+        }
+    }
 
     std::string existing_preamble;
     if (fs::exists(preamble_path))
@@ -5610,9 +5819,21 @@ static void emit_split_files(CXTranslationUnit tu,
         // Including its rewritten copy on its own reimposes a self-containedness
         // requirement the original never had. Including the translation unit's preamble
         // first replays the include prefix the header was actually seen behind.
-        if (!context_preamble.empty())
-            content << "#include \"" << context_preamble << "\"\n";
-        content << "#include \"" << preamble_filename << "\"\n";
+        if (!input_is_header && g_module_unit.interface) {
+            // An implementation unit of the module: the interface arrives through the BMI,
+            // the global module fragment through the replay. TODO/43.
+            if (!g_module_unit.gmf.empty())
+                content << "module;\n#include \""
+                        << fs::path(abs_path).stem().string() << "_preamble.h\"\n";
+            content << "module " << g_module_unit.name << ";\n";
+        } else {
+            // The unit's imports, restated: an import inside the precompiled preamble does
+            // not make the module visible here. TODO/43.
+            for (const auto& imp : g_unit_imports) content << imp << "\n";
+            if (!context_preamble.empty())
+                content << "#include \"" << context_preamble << "\"\n";
+            content << "#include \"" << preamble_filename << "\"\n";
+        }
         // The definitions header carries what may exist in only one object, so exactly one
         // piece includes it. Which one does not matter; the first compilable one will do.
         if (!definitions_filename.empty() && !definitions_emitted && !should_keep_in_header(fn) &&
@@ -5827,6 +6048,7 @@ static void emit_split_files(CXTranslationUnit tu,
                 << "// one object. No split piece was compiled to carry them.\n";
         content << "// Source: " << input_path << "\n";
         content << "// ---\n\n";
+        for (const auto& imp : g_unit_imports) content << imp << "\n";
         if (!definitions_variant.empty()) {
             // A pair header's inclusion: the context up to its #include line, then the
             // copy's variant with the definitions in place. A unit whose moved macro group
@@ -6038,9 +6260,14 @@ static SplitResult do_split(const std::string& input_path,
         parse_source = source;
         for (size_t i = 0; i < prefix_in_pch; ++i)
             if (parse_source[i] != '\n') parse_source[i] = ' ';
+    }
+    // A module interface unit is parsed as an ordinary translation unit, its module syntax
+    // blanked: see blank_module_syntax() for why libclang cannot be given it as written.
+    if (!input_is_header && g_module_unit.interface)
+        parse_source = blank_module_syntax(parse_source.empty() ? source : parse_source);
+    if (!parse_source.empty())
         unsaved.push_back({abs_path.c_str(), parse_source.c_str(),
                            static_cast<unsigned long>(parse_source.size())});
-    }
     CXErrorCode err = clang_parseTranslationUnit2(
         index, abs_path.c_str(), args.data(),
         static_cast<int>(args.size()), unsaved.empty() ? nullptr : unsaved.data(),
@@ -6095,10 +6322,12 @@ static SplitResult do_split(const std::string& input_path,
                                     ? std::string()
                                     : fs::absolute(prefix_path, ec).lexically_normal().string());
     }
+    // A module interface unit splits no headers: its pieces are implementation units, which
+    // include nothing of the unit's but the global module fragment. TODO/43.
     std::vector<std::string> candidates =
-        input_is_header ? std::vector<std::string>()
-                        : header_split_candidates(tu, abs_path, output_dir, extra_flags,
-                                                  verbose, out);
+        (input_is_header || g_module_unit.interface)
+            ? std::vector<std::string>()
+            : header_split_candidates(tu, abs_path, output_dir, extra_flags, verbose, out);
 
     auto decline_for_header = [&]() {
         g_declined = true;
@@ -6451,8 +6680,11 @@ static bool try_incremental_split(const std::string& split_dir,
         return refuse("there is no record of what the previous run read");
     if (changed.empty())
         return refuse("nothing changed, yet the hash missed");
-    if (changed.size() != 1)
+    if (changed.size() != 1) {
+        if (verbose)
+            for (const auto& c : changed) std::cerr << "[cpp-splitter]   changed: " << c << "\n";
         return refuse("more than one input changed");
+    }
     const std::string& file = changed.front();
 
     // The harvest for that file, among the ones this unit wrote: one for the unit itself and
@@ -7009,6 +7241,75 @@ static bool try_remote_split(const std::string& real_compiler,
     return true;
 }
 
+// `@file` on the command line: the file's whitespace-separated tokens in its place. CMake
+// hands a module unit its flags this way (`@foo.cxx.o.modmap`: `-x c++-module
+// -fmodule-output=…`), and the launcher has to see them to know it is compiling a module
+// unit and where the BMI is expected. TODO/43.
+static std::vector<std::string> expand_response_files(int argc, char* argv[], int from) {
+    std::vector<std::string> args;
+    for (int i = from; i < argc; ++i) {
+        const std::string arg = argv[i];
+        std::error_code ec;
+        if (arg.size() > 1 && arg[0] == '@' && fs::is_regular_file(arg.substr(1), ec)) {
+            std::istringstream in(read_file(arg.substr(1)));
+            std::string token;
+            while (in >> token) {
+                // CMake writes one plain token per line; a quoted one is unwrapped.
+                if (token.size() >= 2 && (token.front() == '"' || token.front() == '\'') &&
+                    token.back() == token.front())
+                    token = token.substr(1, token.size() - 2);
+                args.push_back(token);
+            }
+            continue;
+        }
+        args.push_back(arg);
+    }
+    return args;
+}
+
+// The flags that make a compile a module-unit compile, taken out: neither the libclang
+// parse nor an implementation-unit piece may carry them. `-fmodule-file=` stays: importers
+// and pieces alike need the BMIs. TODO/43.
+static std::vector<std::string> without_module_output_flags(const std::vector<std::string>& flags) {
+    std::vector<std::string> kept;
+    for (size_t i = 0; i < flags.size(); ++i) {
+        const std::string& f = flags[i];
+        if (f == "-x" && i + 1 < flags.size() && flags[i + 1] == "c++-module") { ++i; continue; }
+        if (f == "-xc++-module") continue;
+        if (f.rfind("-fmodule-output", 0) == 0) continue;
+        if (f == "-fmodules-reduced-bmi" || f == "-fexperimental-modules-reduced-bmi") continue;
+        kept.push_back(f);
+    }
+    return kept;
+}
+
+// The BMIs a compile reads: every `-fmodule-file=[name=]path`.
+static std::vector<std::string> module_files_of(const std::vector<std::string>& flags) {
+    std::vector<std::string> pcms;
+    for (const auto& f : flags) {
+        if (f.rfind("-fmodule-file=", 0) != 0) continue;
+        std::string value = f.substr(14);
+        const size_t eq = value.find('=');
+        if (eq != std::string::npos) value = value.substr(eq + 1);
+        if (!value.empty()) pcms.push_back(value);
+    }
+    return pcms;
+}
+
+// Whether any BMI a unit's pieces compile against has changed since they were compiled.
+//
+// Not by timestamp: the launcher touches an unchanged BMI so that the build system's
+// dependency check stays quiet, so a timestamp says nothing. `modules.hash` beside the
+// pieces records the content hash of each BMI they were last compiled against. TODO/43.
+static std::string module_files_hash_text(const std::vector<std::string>& pcms) {
+    std::string text;
+    for (const auto& pcm : pcms) {
+        const std::string h = file_content_hash(pcm);
+        text += (h.empty() ? std::string("<absent>") : h) + " " + pcm + "\n";
+    }
+    return text;
+}
+
 static int run_as_launcher(int argc, char* argv[]) {
     bool verbose = launcher_verbose();
     std::string compiler = argv[1];
@@ -7044,21 +7345,22 @@ static int run_as_launcher(int argc, char* argv[]) {
 
     std::vector<std::string> other_flags;
 
-    for (int i = 2; i < argc; i++) {
-        std::string arg = argv[i];
+    const std::vector<std::string> args = expand_response_files(argc, argv, 2);
+    for (size_t i = 0; i < args.size(); i++) {
+        const std::string& arg = args[i];
         if (arg == "-c") {
             has_c_flag = true;
-        } else if (arg == "-o" && i + 1 < argc) {
-            output_file = argv[++i];
+        } else if (arg == "-o" && i + 1 < args.size()) {
+            output_file = args[++i];
         } else if (arg == "-MD") {
             has_md = true;
         } else if (arg == "-MMD") {
             has_mmd = true;
-        } else if (arg == "-MF" && i + 1 < argc) {
-            mf_path = argv[++i];
-        } else if (arg == "-MT" && i + 1 < argc) {
-            mt_target = argv[++i];
-        } else if (arg == "-MQ" && i + 1 < argc) {
+        } else if (arg == "-MF" && i + 1 < args.size()) {
+            mf_path = args[++i];
+        } else if (arg == "-MT" && i + 1 < args.size()) {
+            mt_target = args[++i];
+        } else if (arg == "-MQ" && i + 1 < args.size()) {
             ++i;
         } else if (is_source_file(arg)) {
             input_file = arg;
@@ -7080,6 +7382,53 @@ static int run_as_launcher(int argc, char* argv[]) {
     if (!fs::exists(input_file)) {
         std::cerr << "cpp-splitter: source file not found: " << input_file << "\n";
         return 1;
+    }
+
+    // A C++20 module unit. The interface unit is split into the interface the compiler
+    // precompiles and one implementation unit per body; an implementation unit is compiled
+    // whole for now; an importer is an ordinary unit whose pieces restate its imports.
+    // TODO/43.
+    {
+        const std::string source = read_file(input_file);
+        g_module_unit = detect_module_unit(source);
+        g_unit_imports = unit_import_lines(source);
+    }
+    // The module-unit flags as the build gave them, for the interface's own compile.
+    std::vector<std::string> interface_only_flags;
+    for (size_t i = 0; i < other_flags.size(); ++i) {
+        const std::string& f = other_flags[i];
+        if (f == "-x" && i + 1 < other_flags.size() && other_flags[i + 1] == "c++-module") {
+            interface_only_flags.push_back(f); interface_only_flags.push_back(other_flags[++i]);
+        } else if (f == "-xc++-module" || f == "-fmodules-reduced-bmi" ||
+                   f == "-fexperimental-modules-reduced-bmi") {
+            interface_only_flags.push_back(f);
+        }
+    }
+    bool interface_from_x_flag = false;
+    for (size_t i = 0; i + 1 < other_flags.size(); ++i)
+        if (other_flags[i] == "-x" && other_flags[i + 1] == "c++-module") interface_from_x_flag = true;
+    if (g_module_unit.implementation || (interface_from_x_flag && !g_module_unit.interface)) {
+        std::string cmd;
+        for (int i = 1; i < argc; i++) {
+            if (i > 1) cmd += " ";
+            cmd += shell_quote(argv[i]);
+        }
+        std::cerr << "[cpp-splitter] declined: " << input_file
+                  << " is a module implementation unit, compiling whole\n";
+        if (verbose) std::cerr << "[cpp-splitter] passthrough: " << cmd << "\n";
+        return run_command_quiet(cmd);
+    }
+    const bool module_interface = g_module_unit.interface;
+    // Where the build expects the BMI: `-fmodule-output=<path>`, or beside the object.
+    std::string planned_pcm;
+    if (module_interface) {
+        for (const auto& f : other_flags)
+            if (f.rfind("-fmodule-output=", 0) == 0) planned_pcm = f.substr(16);
+        if (planned_pcm.empty() && !output_file.empty())
+            planned_pcm = fs::path(output_file).replace_extension(".pcm").string();
+        if (planned_pcm.empty()) planned_pcm = g_module_unit.name + ".pcm";
+        // What the pieces and the parse see: the compile of an ordinary translation unit.
+        other_flags = without_module_output_flags(other_flags);
     }
 
     if (verbose) {
@@ -7221,8 +7570,30 @@ static int run_as_launcher(int argc, char* argv[]) {
         return rc;
     }
 
+    // The BMIs this unit's pieces compile against -- the ones it imports, and for an
+    // interface unit its own -- and whether any changed since the pieces were last
+    // compiled. Content, not timestamp: see module_files_hash_text(). TODO/43.
+    std::vector<std::string> piece_pcms = module_files_of(compile_flags);
+    if (module_interface) piece_pcms.push_back(planned_pcm);
+    const std::string modules_hash_path = (fs::path(split_dir) / "modules.hash").string();
+    auto pcms_changed_now = [&]() {
+        return !piece_pcms.empty() &&
+               read_file(modules_hash_path) != module_files_hash_text(piece_pcms);
+    };
+    bool pcms_changed = !module_interface && pcms_changed_now();
+    if (pcms_changed) {
+        // A PCH built against the old BMI is not one clang will load against the new.
+        std::error_code ec;
+        fs::remove_all(sr.preamble_filename + ".gch", ec);
+        for (const auto& ctx : sr.context_preambles) fs::remove_all(ctx + ".gch", ec);
+        if (verbose) std::cerr << "[cpp-splitter] a BMI changed: pieces and PCH rebuilt\n";
+    }
+
     bool tipi_compiler_driver_in_use = false;
-    if (compiler == "tipi-compiler-driver") {
+    if (module_interface) {
+      // No PCH: the "preamble" is the interface unit itself, compiled below.
+      tipi_compiler_driver_in_use = (compiler == "tipi-compiler-driver");
+    } else if (compiler == "tipi-compiler-driver") {
       std::cout << "BEGIN compiler_with_driver is: " << std::endl;
       tipi_compiler_driver_in_use = true;
       auto pch_flags = other_flags;
@@ -7252,12 +7623,80 @@ static int run_as_launcher(int argc, char* argv[]) {
     int launcher_skipped = 0;
     bool split_build_failed = false;
 
+    // The interface unit's own compile: the rewritten interface, with the module flags the
+    // build gave, writes the BMI and the interface object. The BMI lands beside the pieces
+    // first and replaces the one the build planned only when it differs -- so an edit to a
+    // body, which leaves the interface text and so the BMI byte-identical, changes no
+    // digest an importer's action or cache key is made of. It is touched otherwise, since
+    // the build system judges the edge by the timestamps of its outputs. TODO/43.
+    bool interface_recompiled = false;
+    if (module_interface) {
+        const std::string iface_src = sr.preamble_filename;
+        const std::string iface_obj =
+            (fs::path(split_dir) / (fs::path(iface_src).stem().string() + ".o")).string();
+        const std::string local_pcm =
+            (fs::path(split_dir) / (g_module_unit.name + ".pcm")).string();
+        obj_files.push_back(iface_obj);
+        // The dependency flags are the interface compile's, whether or not it runs: a piece
+        // given them lists itself as a prerequisite, and the next body edit then reads as
+        // two changed inputs and loses the re-slice. With no compile writing the depfile,
+        // rewrite_depfile() restores the cached one.
+        dep_flags_placed = true;
+        if (needs_recompile(iface_src, iface_obj) || !fs::exists(local_pcm)) {
+            std::string cmd = compile_prefix;
+            cmd += " -I" + shell_quote(split_dir);
+            cmd += " -I" + shell_quote(fs::absolute(input_file).parent_path().string());
+            for (const auto& f : compile_flags) cmd += " " + shell_quote(f);
+            for (const auto& f : interface_only_flags) cmd += " " + shell_quote(f);
+            cmd += " -fmodule-output=" + shell_quote(local_pcm);
+            if (has_md || has_mmd) {
+                cmd += has_mmd ? " -MMD" : " -MD";
+                if (!mf_path.empty()) cmd += " -MF " + shell_quote(mf_path);
+                const std::string mt = mt_target.empty() ? output_file : mt_target;
+                if (!mt.empty()) cmd += " -MT " + shell_quote(mt);
+            }
+            cmd += " -c -o " + shell_quote(iface_obj) + " " + shell_quote(iface_src);
+            if (verbose) std::cerr << "[cpp-splitter] compile (interface): " << cmd << "\n";
+            const int ret = run_command_quiet(cmd);
+            if (ret != 0) {
+                std::cerr << "cpp-splitter: compilation failed for the module interface: "
+                          << iface_src << "\n";
+                split_build_failed = true;
+            } else {
+                interface_recompiled = true;
+            }
+        } else if (verbose) {
+            std::cerr << "[cpp-splitter] up-to-date: " << iface_src << "\n";
+        }
+        if (!split_build_failed) {
+            std::error_code ec;
+            fs::create_directories(fs::path(planned_pcm).parent_path(), ec);
+            const bool differs = !fs::exists(planned_pcm) ||
+                                 file_content_hash(planned_pcm) != file_content_hash(local_pcm);
+            if (differs) {
+                fs::copy_file(local_pcm, planned_pcm, fs::copy_options::overwrite_existing, ec);
+                if (ec) {
+                    std::cerr << "cpp-splitter: cannot write the BMI to " << planned_pcm << "\n";
+                    split_build_failed = true;
+                }
+                if (verbose) std::cerr << "[cpp-splitter] BMI written: " << planned_pcm << "\n";
+            } else {
+                fs::last_write_time(planned_pcm, fs::file_time_type::clock::now(), ec);
+                if (verbose)
+                    std::cerr << "[cpp-splitter] BMI unchanged: " << planned_pcm
+                              << " (timestamp updated)\n";
+            }
+            pcms_changed = pcms_changed_now();
+        }
+    }
+
     for (size_t fi = 0; fi < sr.compilable_files.size(); ++fi) {
         const auto& cpp = sr.compilable_files[fi];
         std::string obj = cpp.substr(0, cpp.size() - 4) + ".o";
         obj_files.push_back(obj);
 
-        if (!needs_recompile(cpp, obj, sr.preamble_filename)) {
+        if (split_build_failed) break;
+        if (!needs_recompile(cpp, obj, sr.preamble_filename) && !pcms_changed) {
             if (verbose) std::cerr << "[cpp-splitter] up-to-date: " << cpp << "\n";
             ++launcher_skipped;
             continue;
@@ -7283,7 +7722,9 @@ static int run_as_launcher(int argc, char* argv[]) {
         for (const auto& f : compile_flags)
             cmd += " " + shell_quote(f);
 
-        if (fi == 0 && (has_md || has_mmd)) {
+        // The interface unit's compile took the dependency flags when there is one.
+        const bool place_deps = fi == 0 && (has_md || has_mmd) && !dep_flags_placed;
+        if (place_deps) {
             dep_flags_placed = true;
             cmd += has_mmd ? " -MMD" : " -MD";
             if (!mf_path.empty())
@@ -7293,10 +7734,14 @@ static int run_as_launcher(int argc, char* argv[]) {
                 cmd += " -MT " + shell_quote(mt);
         }
 
-        cmd += pch_include_flag(cpp, split_dir);
+        if (module_interface)
+            // An implementation unit of the module, against the BMI the build reads.
+            cmd += " -fmodule-file=" + shell_quote(g_module_unit.name + "=" + planned_pcm);
+        else
+            cmd += pch_include_flag(cpp, split_dir);
         cmd += " -c -o " + shell_quote(obj) + " " + shell_quote(cpp);
 
-        if (fi == 0 && (has_md || has_mmd)) {
+        if (place_deps) {
             if (verbose) std::cerr << "[cpp-splitter] compile (seq): " << cmd << "\n";
             int ret = run_command_quiet(cmd);
             if (ret != 0) {
@@ -7333,7 +7778,7 @@ static int run_as_launcher(int argc, char* argv[]) {
             // Against the context preamble the piece includes first, whose PCH is rebuilt
             // when a header copy changes; without it a header piece kept its object
             // across such a change.
-            if (!fs::exists(hobj) ||
+            if (!fs::exists(hobj) || pcms_changed ||
                 needs_recompile(hcpp, hobj, piece_context_header(hcpp, split_dir))) {
                 std::string cmd = compile_prefix;
                 // The unit's own preamble lives at the root of the split directory, and the
@@ -7383,6 +7828,10 @@ static int run_as_launcher(int argc, char* argv[]) {
 
     if (!split_build_failed) {
         rewrite_depfile(mf_path, split_dir, input_file, verbose);
+        if (!piece_pcms.empty()) {
+            std::ofstream ofs(modules_hash_path);
+            if (ofs.is_open()) ofs << module_files_hash_text(piece_pcms);
+        }
         if (!inputs_unchanged) {
             write_split_cache(split_dir,
                               split_inputs_hash(split_dir, input_file, split_flags), sr);
@@ -7394,7 +7843,7 @@ static int run_as_launcher(int argc, char* argv[]) {
     }
 
     if (!split_build_failed) {
-        bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file);
+        bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file) || interface_recompiled;
 
         if (!need_link) {
             // Nothing changed the object's contents, but the build system decides staleness
