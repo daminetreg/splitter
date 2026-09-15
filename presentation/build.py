@@ -149,13 +149,24 @@ def lines(block, minimum=1):
     return values
 
 def inline(text):
-    """Escape input first, then permit emphasis and {tone} semantic spans."""
+    """Escape input first, then permit GitHub-flavoured `code`, **bold**, *italic* / _italic_
+    and {tone} semantic spans. Code spans are lifted out first, so nothing inside them is
+    read as markup -- `v * 2` keeps its asterisk."""
     text = html.escape(text, quote=False)
+    codes = []
+    def stash(match):
+        codes.append(f"<code>{match.group(1)}</code>")
+        return f"\x00{len(codes) - 1}\x00"
+    text = re.sub(r"`([^`\n]+)`", stash, text)
     text = text.replace("  \n", "<br>")
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    # Italic: `*x*` anywhere, `_x_` only between non-word characters, so use_mylib.cpp and
+    # a lone `*.o` are left alone.
+    text = re.sub(r"\*(?!\s)([^*\n]+?)(?<!\s)\*", r"<em>\1</em>", text)
+    text = re.sub(r"(?<![\w])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w])", r"<em>\1</em>", text)
     text = re.sub(r"\{(accent|violet|split|red)\}(.+?)\{/\1\}",
                   r'<span class="\1">\2</span>', text)
-    return text
+    return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], text)
 
 def pipe_rows(block, count, labels):
     result = []
