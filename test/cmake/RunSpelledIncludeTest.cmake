@@ -20,6 +20,11 @@ endif()
 if(log MATCHES "fallback|falling back|not splitting")
   message(FATAL_ERROR "the unit was not split:\n${log}")
 endif()
+# The pieces load the preamble PCH: clang consults <preamble>.gch/ only for a header named
+# by -include, never for the #include in the piece's text (TODO/47).
+if(NOT log MATCHES "-include [^ ]*unit_preamble.h")
+  message(FATAL_ERROR "no piece compile names the preamble with -include; the PCH is not used:\n${log}")
+endif()
 if(NOT EXISTS "${object}.split/include/src/api.h")
   message(FATAL_ERROR "the copy of api.h is not at include/src/api.h, where \"src/api.h\" looks")
 endif()

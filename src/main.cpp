@@ -3465,6 +3465,59 @@ static std::string shell_quote(const std::string& s) {
 // build_libclang_pch(), and the CXTranslationUnit_PrecompiledPreamble parse flag. Optimising
 // the splitter means touching those; touching this one only makes the build slower. See
 // TODO/29, where a measurement that mixed the two nearly removed the wrong thing.
+// The flag that makes a piece's compile load the PCH: `-include <preamble>`. clang consults
+// `<header>.gch/` only for a header named by -include, never for an #include directive in
+// the source -- GCC does both -- so with the preamble reached through the piece's own
+// `#include "<tag>_preamble.h"` alone the PCH was built and never read, and every piece of
+// p4c's def_use.cpp parsed the 62 MB of IR headers again: 3.7s a piece against 7.1s for the
+// whole unit, and 47 minutes for a build that takes 2 plain. The textual include that
+// follows is then a no-op, the PCH carrying the file's pragma-once state. The header is
+// read off the piece's first quoted include, which names the unit's preamble or, for a pair
+// header's inclusion, its context preamble (TODO/44). TODO/47.
+static bool pch_is_current(const std::string& pch_file);
+
+// The prerequisites a compiler wrote with -MD: everything after the colon, backslashes
+// dropped. Spaces in paths are not handled, as rewrite_depfile() does not.
+static std::vector<std::string> depfile_prerequisites(const std::string& dep_file) {
+    std::vector<std::string> deps;
+    const std::string contents = read_file(dep_file);
+    const size_t colon = contents.find(':');
+    if (colon == std::string::npos) return deps;
+    std::istringstream tokens(contents.substr(colon + 1));
+    std::string token;
+    while (tokens >> token)
+        if (token != "\\") deps.push_back(token);
+    return deps;
+}
+
+// The header a piece includes first, when it sits at the root of the split directory: the
+// unit's preamble, or a pair header's context preamble. Empty otherwise.
+static std::string piece_context_header(const std::string& piece, const std::string& split_dir) {
+    std::ifstream ifs(piece);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        const size_t hash = line.find_first_not_of(" \t");
+        if (hash == std::string::npos || line[hash] != '#') continue;
+        const size_t q1 = line.find('"'), q2 = q1 == std::string::npos ? q1 : line.find('"', q1 + 1);
+        if (line.find("include", hash) == std::string::npos || q2 == std::string::npos) return "";
+        const std::string header = (fs::path(split_dir) / line.substr(q1 + 1, q2 - q1 - 1)).string();
+        std::error_code ec;
+        return fs::exists(header, ec) ? header : std::string();
+    }
+    return "";
+}
+
+static std::string pch_include_flag(const std::string& piece, const std::string& split_dir) {
+    const std::string header = piece_context_header(piece, split_dir);
+    if (header.empty()) return "";
+    std::error_code ec;
+    const std::string gch_dir = header + ".gch";
+    if (!fs::is_directory(gch_dir, ec)) return "";
+    for (const auto& entry : fs::directory_iterator(gch_dir, ec))
+        if (entry.path().extension() == ".gch") return " -include " + shell_quote(header);
+    return "";
+}
+
 static bool build_pch(const std::string& preamble_file,
                       const std::string& compiler_driver,
                       const std::string& compiler,
@@ -3481,7 +3534,12 @@ static bool build_pch(const std::string& preamble_file,
     std::string gch_dir = preamble_file + ".gch";
     std::string gch_file = gch_dir + "/" + hash + ".gch";
 
-    if (fs::exists(gch_file)) {
+    // Named after the preamble's own content, which does not change when a header it
+    // includes does -- a mirrored copy re-split after an edit -- and clang refuses a PCH
+    // whose inputs moved: `file ... has been modified since the precompiled header`. The
+    // compiler is asked for the PCH's prerequisites (-MD) and they are checked the way
+    // pch_is_current() checks the libclang one's. TODO/47.
+    if (fs::exists(gch_file) && pch_is_current(gch_file)) {
         if (verbose) out << "  PCH up-to-date: " << gch_file << "\n";
         return true;
     }
@@ -3494,10 +3552,21 @@ static bool build_pch(const std::string& preamble_file,
     }
 
     std::string cmd = shell_quote(compiler_driver) + " " + shell_quote(compiler) + " -x c++-header";
+    // Templates instantiated while the PCH is built rather than by every consumer: a
+    // clang PCH otherwise carries its pending instantiations, and each piece performed
+    // p4c's again -- 1.67s of PerformPendingInstantiations in a piece that compiled
+    // nothing else, against 0.4s with them in the PCH; a real piece 1.97s -> 0.59s. The
+    // PCH grows (61 -> 85 MB) and takes longer to build, once. clang 11 and later; GCC has
+    // no such flag and no such cost. TODO/47.
+    const std::string driver_name = fs::path(compiler_driver.empty() ? compiler : compiler_driver)
+                                        .filename().string();
+    if (driver_name.find("clang") != std::string::npos) cmd += " -fpch-instantiate-templates";
     for (const auto& f : flags)
         cmd += " " + shell_quote(f);
     if (!include_dir.empty())
         cmd += " -I" + shell_quote(include_dir);
+    const std::string dep_file = gch_file + ".d";
+    cmd += " -MD -MF " + shell_quote(dep_file) + " -MT " + shell_quote(gch_file);
     cmd += " -o " + shell_quote(gch_file) + " " + shell_quote(preamble_file);
 
     if (verbose) out << "  Building PCH: " << cmd << "\n";
@@ -3506,6 +3575,11 @@ static bool build_pch(const std::string& preamble_file,
         if (verbose) out << "  PCH build failed (exit " << ret << "), continuing without PCH\n";
         fs::remove_all(gch_dir);
         return false;
+    }
+    {
+        // One prerequisite per line, as pch_is_current() reads.
+        std::ofstream deps(gch_file + ".deps");
+        for (const auto& dep : depfile_prerequisites(dep_file)) deps << dep << "\n";
     }
 
     if (verbose) out << "  PCH built: " << gch_file << "\n";
@@ -7204,6 +7278,7 @@ static int run_as_launcher(int argc, char* argv[]) {
                 cmd += " -MT " + shell_quote(mt);
         }
 
+        cmd += pch_include_flag(cpp, split_dir);
         cmd += " -c -o " + shell_quote(obj) + " " + shell_quote(cpp);
 
         if (fi == 0 && (has_md || has_mmd)) {
@@ -7240,7 +7315,11 @@ static int run_as_launcher(int argc, char* argv[]) {
         for (const auto& hobj : sr.header_obj_files) {
             std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
             if (!fs::exists(hcpp)) continue;
-            if (!fs::exists(hobj) || needs_recompile(hcpp, hobj, "")) {
+            // Against the context preamble the piece includes first, whose PCH is rebuilt
+            // when a header copy changes; without it a header piece kept its object
+            // across such a change.
+            if (!fs::exists(hobj) ||
+                needs_recompile(hcpp, hobj, piece_context_header(hcpp, split_dir))) {
                 std::string cmd = compile_prefix;
                 // The unit's own preamble lives at the root of the split directory, and the
                 // header pieces include it for context. The split tree precedes the
@@ -7266,6 +7345,7 @@ static int run_as_launcher(int argc, char* argv[]) {
                     dep_flags_placed = true;
                 }
 
+                cmd += pch_include_flag(hcpp, split_dir);
                 cmd += " -c -o " + shell_quote(hobj) + " " + shell_quote(hcpp);
                 hdr_compile_jobs.push_back({cmd, hcpp, hobj});
             }
@@ -7561,6 +7641,7 @@ int main(int argc, char* argv[]) {
             for (const auto& hdr_dir : sr.header_obj_dirs)
                 cmd += " -I" + hdr_dir;
             cmd += " -I" + fs::absolute(input_path).parent_path().string();
+            cmd += pch_include_flag(cpp_file, output_dir);
             cmd += " -o " + obj_file +
                    " " + cpp_file;
 

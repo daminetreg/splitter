@@ -139,7 +139,10 @@ expect_refusal("the new body contains a preprocessor directive" directive)
 
 file(WRITE "${WORKDIR}/${header_name}" "${baseline}")
 split(settle log)
-string(REPLACE "inline int value() const" "inline int value(int unused_arg) const"
+# A defaulted parameter: the signature changes and the program still compiles. Without the
+# default the call in main() was an error that only a stale object hid -- the pieces were
+# not recompiled for a changed header copy while the preamble PCH went unused (TODO/47).
+string(REPLACE "inline int value() const" "inline int value(int unused_arg = 0) const"
        text "${baseline}")
 file(WRITE "${WORKDIR}/${header_name}" "${text}")
 expect_refusal("the definition's signature changed" signature)
