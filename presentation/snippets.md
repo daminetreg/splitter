@@ -43,3 +43,43 @@ double average(const std::vector<double>& values);
 template<typename T> T max_of(T a, T b) { return (a > b) ? a : b; }
 ```
 :::
+::: snippet module-original | foo.cxx (original interface unit) | Declarations and bodies in one module unit; every body edit changes the BMI.
+```cpp
+module;
+#include <iostream>
+export module foo;
+
+export class foo {
+public:
+  foo();
+  ~foo();
+  void helloworld();
+};
+
+foo::foo() = default;
+foo::~foo() = default;
+void foo::helloworld() { std::cout << "hello world\n"; }
+```
+:::
+
+::: snippet module-interface | foo.cxx.o.split/foo_interface.cxx (rewritten) | The interface the compiler precompiles: declarations only, so the BMI is byte-identical across body edits.
+```cpp
+module;
+#include <iostream>
+export module foo;
+
+export class foo {
+public:
+  foo();
+  ~foo();
+  void helloworld();
+};
+// bodies moved to foo.cxx_1_foo.cpp … foo.cxx_3_helloworld.cpp
+```
+:::
+
+::: snippet module-preamble | foo.cxx.o.split/foo_preamble.h | The global module fragment, replayed by every piece ahead of its module declaration.
+```cpp
+#include <iostream>
+```
+:::

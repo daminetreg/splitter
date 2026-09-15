@@ -159,8 +159,10 @@ and should simply be on in the split build: smaller file, less to hash, less to 
   exported or not, with declarations, keeping `export`. It is the interface unit the
   compiler sees. In-class member bodies stay in place in this phase (they move with
   TODO/05's member emission).
-- A piece is `module M;` on its first line and the body after it; no include of a preamble,
-  since an implementation unit imports its interface implicitly. Compiled with
+- A piece is an implementation unit: the body after `module M;`. It imports its interface
+  implicitly, so there is no preamble of declarations to include — but the global module
+  fragment is not visible through an import, so the piece replays it first: `module;`,
+  `#include "M_preamble.h"` (the fragment's include block), then `module M;`. Compiled with
   `-fmodule-file=M=<pcm>`.
 - Launcher flow for the interface unit's own command (`-x c++-module -c m.cppm
   -fmodule-output=<pcm> -o m.o`, flags possibly inside an `@…modmap`): write the preamble;
@@ -243,7 +245,9 @@ int seven() { return helper_kept(); }
 ```
 
 The piece is compiled with `-fmodule-file=math=math.o.split/math.pcm`, after the interface;
-an implementation unit imports its interface implicitly, so no `#include` of a preamble.
+an implementation unit imports its interface implicitly, so no preamble of declarations —
+only the global module fragment's includes, replayed ahead of `module math;` when the
+interface has one (`math.cppm` here has none).
 `.keeps` records `twice` as *inline: belongs in the BMI* and `plus_one` as *declared only*.
 An edit to `seven()`'s body changes `math.cppm_2_seven.cpp` and nothing else: the interface
 text, and so `math.pcm`, is byte-identical — the probe's step 3, measured. Without the

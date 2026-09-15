@@ -15,6 +15,9 @@
 12-records.md
 13-recompose.md
 13a-modules.md
+13b-modules-tree.md
+13c-modules-mirror.md
+13d-modules-piece.md
 14-remote.md
 15-controlled-comparison.md
 16-semantic-diff.md
