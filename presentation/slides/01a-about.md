@@ -7,6 +7,9 @@ eyebrow: About me
 
 Co-founder of tipi.build by EngFlow.
 
+::: logo
+:::
+
 What keeps us awake:  
 
 ::: cards 2

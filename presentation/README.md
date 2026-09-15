@@ -40,6 +40,7 @@ The small layout vocabulary is shown by the migrated slides:
 * `::: cards 2`, `::: cards 3`, and `::: metrics 3` use
   `- title-or-value | tone | description`; cards accept an optional fourth
   popup reference. See `06-classification.md` and `21-benchmark-actions.md`.
+* `logo` (no body) places the deck's EngFlow logo, large, as in `01a-about.md`.
 * `tree`, `rationale`, `tiny`, `callout`, and `flag` contain normal prose;
   see `03-input.md` and `15-controlled-comparison.md`.
 * `legend` has `- label | class`, and `bars` has

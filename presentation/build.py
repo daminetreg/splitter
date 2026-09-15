@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 KNOWN = {"flow", "fission", "cards", "tree", "rationale", "metrics", "bars", "legend",
          "callout", "tiny", "popup", "map",
          "section-map", "sizes", "binary-trace", "paths", "single-bars",
-         "code-columns", "semantic", "logic", "flag"}
+         "code-columns", "semantic", "logic", "flag", "logo"}
 
 class SourceError(Exception):
     def __init__(self, path, line, message):
@@ -186,6 +186,9 @@ def render_block(block, snippets):
             language = f' data-language="{html.escape(match.group(1), quote=True)}"' if match.group(1) else ""
             code.append(f'<pre class="code"{language}>{html.escape(match.group(2))}</pre>')
         return '<div class="grid two">' + "".join(code) + "</div>"
+    if k == "logo":
+        # The deck's one embedded EngFlow SVG; the runtime fills src from the footer logo.
+        return '<img class="logo-large" alt="EngFlow" data-logo="engflow">'
     if k == "tree":
         return f'<div class="tree">{inline(b)}</div>'
     if k in ("rationale", "callout", "tiny", "flag"):

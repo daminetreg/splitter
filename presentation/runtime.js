@@ -242,6 +242,8 @@
     block.classList.add("syntax");
   }
   root.querySelectorAll('[data-chapter="Architecture"] pre.code, pre[data-language="cpp"]').forEach(highlight);
+  const footerLogo = document.querySelector(".engflow-logo");
+  if (footerLogo) root.querySelectorAll("img[data-logo]").forEach(img => { img.src = footerLogo.src; });
 
   document.addEventListener("keydown", e => {
     if (modal.classList.contains("show")) {
