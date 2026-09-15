@@ -461,7 +461,23 @@ def atomic_write(path, content):
         except FileNotFoundError: pass
         raise
 
+def render_diagrams(source):
+    """Draw any `::: mermaid` block that has no SVG yet, through render-mermaid.py, so a
+    diagram edited under --watch is picked up like any other change."""
+    import importlib.util
+    script = HERE / "render-mermaid.py"
+    if not script.exists():
+        return 0   # a copy of the builder on its own; a missing SVG still fails the render
+    spec = importlib.util.spec_from_file_location("render_mermaid", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.render_missing(source)
+    except RuntimeError as e:
+        raise SourceError(str(e))
+
 def build(source, output):
+    render_diagrams(source)
     document, count = render(source)
     atomic_write(output, document)
     return count
@@ -492,10 +508,11 @@ def main(argv=None):
     args = p.parse_args(argv)
     def once():
         if args.check:
+            render_diagrams(args.source)
             _, count = render(args.source)
         else:
             count = build(args.source, args.output)
-        print(f"presentation: {'validated' if args.check else 'built'} {count} slides")
+        print(f"presentation: {'validated' if args.check else 'built'} {count} slides", flush=True)
     try:
         once()
         if args.watch:

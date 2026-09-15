@@ -39,26 +39,34 @@ try {{ await mermaid.run(); document.title = 'OK'; }} catch (e) {{ document.titl
                           "--dump-dom", "file://" + path], capture_output=True, text=True).stdout
     title = re.search(r"<title>(.*?)</title>", dom)
     if not title or title.group(1) != "OK":
-        sys.exit(f"mermaid failed: {title.group(1) if title else 'no render'}\n{source}")
+        raise RuntimeError(f"mermaid failed: {title.group(1) if title else 'no render'}\n{source}")
     svg = re.search(r"<svg[^>]*id=\"mermaid[^>]*>.*?</svg>", dom, re.S)
     if not svg:
-        sys.exit("no <svg> came back")
+        raise RuntimeError("no <svg> came back")
     return svg.group(0)
 
-def main():
+def render_missing(slides_dir=None):
+    """Render every diagram of the manifest that has no SVG yet; returns how many. build.py
+    calls this before each build, so `--watch` picks up an edited diagram on its own."""
+    slides_dir = Path(slides_dir) if slides_dir else HERE / "slides"
     OUT.mkdir(exist_ok=True)
-    manifest = (HERE / "slides" / "manifest.txt").read_text().splitlines()
+    manifest = (slides_dir / "manifest.txt").read_text().splitlines()
     done = 0
     for name in manifest:
         name = name.strip()
         if not name or name.startswith("#"): continue
-        for source in blocks((HERE / "slides" / name).read_text()):
+        for source in blocks((slides_dir / name).read_text()):
             target = OUT / (digest(source) + ".svg")
             if target.exists(): continue
+            if not Path(CHROME).exists():
+                raise RuntimeError(f"{name}: diagram {target.name} needs rendering and Chrome is not at {CHROME}")
             target.write_text(render(source))
-            print(f"{name}: rendered {target.name}")
+            print(f"{name}: rendered {target.name}", flush=True)
             done += 1
-    print(f"{done} diagram(s) rendered")
+    return done
+
+def main():
+    print(f"{render_missing()} diagram(s) rendered")
 
 if __name__ == "__main__":
     main()
