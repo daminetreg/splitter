@@ -1,5 +1,5 @@
 ---
-chapter: Architecture
+chapter: splitter waltkthrough
 chapter-label: 04 / Two preambles
 notes: Section 4 — two preamble layers. Do not claim -fkeep-inline-functions.
 ---

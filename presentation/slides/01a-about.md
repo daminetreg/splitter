@@ -1,5 +1,5 @@
 ---
-chapter: Opening
+chapter: Build Atomiticity
 notes: Who is talking. Co-founder of tipi.build, now part of EngFlow — the reproducible, cached, remote build layer for CMake and Bazel that the benchmarks later run on. Three reasons to come and talk afterwards.
 eyebrow: Co-founder tipi.build by EngFlow
 ---

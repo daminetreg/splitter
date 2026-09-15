@@ -1,7 +1,7 @@
 ---
-chapter: Architecture
+chapter: splitter waltkthrough
 chapter-label: 01 / Input · split
-notes: The same graph as the opening one, with the launcher in the compile edge. The build system still sees one edge — the same inputs, the same use_mylib.o out. Inside it the splitter parses once, writes the preamble and its PCH, a rewritten mylib.h with declarations only, one source per body — add, multiply, greet, average, and the definitions piece that owns main — compiles each into its own object, and ld -r joins them into the object the build asked for. Every one of those inner compiles is an edge the build system does not know about, and the launcher runs only the ones whose input changed. The link edge is untouched.
+notes: The same graph as the Build Atomiticity one, with the launcher in the compile edge. The build system still sees one edge — the same inputs, the same use_mylib.o out. Inside it the splitter parses once, writes the preamble and its PCH, a rewritten mylib.h with declarations only, one source per body — add, multiply, greet, average, and the definitions piece that owns main — compiles each into its own object, and ld -r joins them into the object the build asked for. Every one of those inner compiles is an edge the build system does not know about, and the launcher runs only the ones whose input changed. The link edge is untouched.
 ---
 ## The same graph, {split}split{/split}.
 
@@ -31,4 +31,4 @@ flowchart LR
     o --> l(["🔗 link<br/>clang++ -o use_mylib"]) --> exe["🚀 use_mylib"]
 :::
 
-One edge for the build system, the same inputs and the same object out. Inside it: one compile per body, each an edge the launcher reruns only when its input changed.
+Same inputs, same object out. Original TU compilation, expands to one compile per body.
