@@ -5,10 +5,13 @@ eyebrow: About me
 ---
 ## Damien Buhl · {accent}daminetreg{/accent}
 
-Co-founder of **tipi.build** by EngFlow.
+Co-founder of tipi.build by EngFlow.
 
-::: cards 3
-- Builds too slow? | teal | Remote execution and caching for C++ builds — CMake and Bazel — on your own cluster or ours.
-- Reproducible builds? | violet | Hermetic, container-defined toolchains, so every build has the same answer on every machine.
-- Modernizing your builds? | split | Moving to CMake or Bazel without stopping the team: let's talk.
+What keeps us awake:  
+
+::: cards 2
+- Boring and Slow builds?  | teal | {violet}**No Space Left on Device?**{/violet} {accent}**AI Agent limited by your local machine?**{/accent}
+- CI Cloud Costs too high ? | teal | **On-prem CPUs waiting in queue?**
+- Modernizing / Migrating CMake or Bazel? | split | 
+- C++ and Pragmatic Safety with Sanitizers builds | violet |
 :::
