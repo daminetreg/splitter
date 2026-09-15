@@ -2,8 +2,10 @@
 01-opening.md
 01a-about.md
 01b-build-graph.md
+01cb-how-tus-are-sized.md
 01d-graph-optimizations.md
 01c-unity-build.md
+01ca-split-build.md
 02-proposition.md
 02a-header-only.md
 03-input.md

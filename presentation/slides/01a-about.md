@@ -4,7 +4,7 @@ notes: Who is talking. Co-founder of tipi.build, now part of EngFlow — the rep
 eyebrow: Co-founder tipi.build by EngFlow
 ---
 ## Damien Buhl
-## {accent}daminetreg{/accent}
+## {accent}@daminetreg{/accent}
 ::: logo
 :::
 What keeps us awake:  

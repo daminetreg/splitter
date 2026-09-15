@@ -10,9 +10,11 @@ flowchart LR
     h["📄 mylib.h"] --> c
     s["📄 use_mylib.cpp"] --> c
     sys["📚 &lt;string&gt; &lt;vector&gt;<br/>&lt;numeric&gt; &lt;algorithm&gt;"] --> c
-    c(["⚙️ compile<br/>clang++ -c use_mylib.cpp"]) --> o["🧱 use_mylib.o"]
+    c(["⚙️ compile TU<br/>clang++ -c use_mylib.cpp"]) --> o["🧱 use_mylib.o"]
     o --> l(["🔗 link<br/>clang++ -o use_mylib"])
     l --> exe["🚀 use_mylib"]
 :::
 
-Files are nodes, actions are edges. The build system reruns an edge when an input is newer than its output; the cache and the cluster key on the same edges. The compile edge is the {violet}atom{/violet}: nothing inside it is visible to any of them.
+The build system reruns when a file changes; The atoms of builds are {violet}TUs{/violet} (Translation Units).
+
+It's the finest-granular action that can be taken in a C++ build.
