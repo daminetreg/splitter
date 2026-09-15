@@ -74,5 +74,11 @@ of 218 copies, costs 23.0s against 684.1s for `cstring::size()`, which every uni
 no copy declares only -- 0.22x of plain's 102.6s. The acceptance criterion "the 204
 non-emitting units recompile nothing" holds for a function the unit does not name; it
 cannot hold for one whose name a template in the unit uses, and `size` is such a name in
-every unit. OpenCV's and Spirit's body rows are still to be measured again with the PCH in
-use.
+every unit.
+
+On Boost.Spirit (`benchmarks/boost-spirit-summary-14-Sep-2026.md`, 14 September): the
+`toucs4` body edit costs 128.0s against 56.8s plain. `toucs4` is named inside templates in
+`char_class.hpp` and `qi/char/char.hpp`, so 265 of 268 copies keep its body; one unit
+(`x3/tst.cpp`) declares it only and compiles nothing. The 11 September figure of 14.2s was
+measured with stale piece objects. OpenCV's body row is still to be measured again with the
+PCH in use.
