@@ -167,6 +167,14 @@ def inline(text):
     text = re.sub(r"\{(accent|violet|split|red)\}(.+?)\{/\1\}",
                   r'<span class="\1">\2</span>', text)
     text = re.sub(r":fa-([a-z0-9-]+):", fa_icon, text)
+    # Links: `[text](url)`, and a bare http(s) URL on its own. Opened in a new tab, so the
+    # deck stays where it is. The text was escaped above, so the URL only needs its quotes.
+    def anchor(url, label):
+        if not re.match(r"(https?://|mailto:|#)", url):
+            fail(*_inline_at, f"link to '{url}': only http(s), mailto and # links are allowed")
+        return f'<a href="{url.replace(chr(34), "&quot;")}" target="_blank" rel="noopener">{label}</a>'
+    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", lambda m: anchor(m.group(2), m.group(1)), text)
+    text = re.sub(r"(?<![\w\"'>/])(https?://[^\s<]*[^\s<.,;:)\]])", lambda m: anchor(m.group(1), m.group(1)), text)
     return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], text)
 
 def fa_icon(match):
@@ -176,7 +184,7 @@ def fa_icon(match):
     name = match.group(1)
     path = HERE / "icons" / f"{name}.svg"
     if not path.exists():
-        raise SourceError(f"unknown icon :fa-{name}: (no presentation/icons/{name}.svg)")
+        fail(*_inline_at, f"unknown icon :fa-{name}: (no presentation/icons/{name}.svg)")
     svg = re.sub(r"<!--.*?-->", "", path.read_text(), flags=re.S).strip()
     svg = svg.replace("<svg ", '<svg class="fa-icon" aria-hidden="true" fill="currentColor" ', 1)
     return svg
@@ -197,7 +205,13 @@ def popup_attrs(reference):
         return ""
     return f' tabindex="0" role="button" data-popup="{html.escape(reference, quote=True)}"'
 
+# Where inline() is working, for the errors it raises: it is called from every kind of
+# block and does not take the block.
+_inline_at = ("slide", 0)
+
 def render_block(block, snippets):
+    global _inline_at
+    _inline_at = (getattr(block, "path", "slide"), block.line)
     k, a, b = block.kind, block.arg, block.body
     if k == "semantic":
         labels = [x.strip() for x in a.split("|")]
