@@ -15,7 +15,12 @@ use_mylib.o.split/
 ├── {accent}prefix.h{/accent} · libclang PCH  
 ├── {accent}preamble.h{/accent} · compiler PCH  
 ├── definitions header + owner  
-├── mirrored include/ tree  
-├── one source + object per piece  
+├── **one source + object per piece**, under the mirrored include/ tree  
+│   ├── {accent}mylib.h{/accent} · rewritten: declarations only  
+│   ├── {split}mylib.h_1_add.cpp{/split} → .o  
+│   ├── {split}mylib.h_2_multiply.cpp{/split} → .o  
+│   ├── {split}mylib.h_3_greet.cpp{/split} → .o  
+│   ├── {split}mylib.h_4_average.cpp{/split} → .o  
+│   └── max_of · template, kept in mylib.h, no piece  
 └── cache · hash · harvest · depfile
 :::
