@@ -94,7 +94,8 @@ fallbacks() { [ -r "$SPLIT_LOG" ] || { echo 0; return; }; grep -c 'falling back'
 declined() { [ -r "$SPLIT_LOG" ] || { echo 0; return; }; grep -c '\[cpp-splitter\] not splitting ' "$SPLIT_LOG" || true; }
 
 build() {  # build <dir> -> elapsed ms of the build alone
-    local dir="$1" start end log="$dir.log"
+    local dir="$1" start end log
+    log="$dir.log"
     [ "$dir" = "$SPLIT" ] && log="$SPLIT_LOG"
     start=$(ms)
     CPP_SPLITTER_VERBOSE=1 tipi run ninja -C "$dir" -j"$JOBS" > "$log" 2>&1 \
@@ -103,18 +104,26 @@ build() {  # build <dir> -> elapsed ms of the build alone
     echo $((end - start))
 }
 
+# The values with spaces and semicolons go through an initial cache file: `tipi run` re-splits
+# its arguments and breaks them on the command line.
+CACHE_INIT="$DEPS/p4c-cache.cmake"
+cat > "$CACHE_INIT" <<EOF
+set(CMAKE_BUILD_TYPE Release CACHE STRING "")
+set(CMAKE_TOOLCHAIN_FILE "$REPO/environments/monolithic.cmake" CACHE FILEPATH "")
+set(CMAKE_CXX_FLAGS "-stdlib=libc++" CACHE STRING "")
+set(CMAKE_EXE_LINKER_FLAGS "-stdlib=libc++ -L$CLANG_ROOT/lib -Wl,-rpath,$CLANG_ROOT/lib" CACHE STRING "")
+set(CMAKE_PREFIX_PATH "$DEPS/boost;$DEPS/root/usr" CACHE STRING "")
+set(CMAKE_INCLUDE_PATH "$DEPS/root/usr/include" CACHE STRING "")
+set(CMAKE_LIBRARY_PATH "$DEPS/root/usr/lib/x86_64-linux-gnu" CACHE STRING "")
+set(ENABLE_CONTROL_PLANE OFF CACHE BOOL "")
+set(ENABLE_GTESTS OFF CACHE BOOL "")
+set(BUILD_LINK_WITH_LLD ON CACHE BOOL "")
+EOF
+
 configure() {  # configure <dir> [cmake args...]
     local dir="$1"; shift
     rm -rf "$dir"
-    tipi run cmake -GNinja -S "$P4C" -B "$dir" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_TOOLCHAIN_FILE="$REPO/environments/monolithic.cmake" \
-        "-DCMAKE_CXX_FLAGS=-stdlib=libc++" \
-        "-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -L$CLANG_ROOT/lib -Wl,-rpath,$CLANG_ROOT/lib" \
-        "-DCMAKE_PREFIX_PATH=$DEPS/boost;$DEPS/root/usr" \
-        -DCMAKE_INCLUDE_PATH="$DEPS/root/usr/include" \
-        -DCMAKE_LIBRARY_PATH="$DEPS/root/usr/lib/x86_64-linux-gnu" \
-        -DENABLE_CONTROL_PLANE=OFF -DENABLE_GTESTS=OFF -DBUILD_LINK_WITH_LLD=ON \
+    tipi run cmake -GNinja -S "$P4C" -B "$dir" -C "$CACHE_INIT" \
         "$@" > "$dir.cfg.log" 2>&1 || { echo "CONFIGURE FAILED in $dir, see $dir.cfg.log" >&2; exit 1; }
 }
 
