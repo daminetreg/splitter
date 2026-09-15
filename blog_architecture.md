@@ -396,3 +396,232 @@ same; the executables differ only in how their symbols are named and numbered.
 > the final link, inlines less than a plain LTO build (`main` 110 instructions against 91),
 > because the pieces were each optimised at `-O2` before the merge. `used` does not imply the
 > linker-side `retain` with this clang, which is what lets `--gc-sections` remove the copies.
+
+## 11. Inside `src/main.cpp`: the groups of functions
+
+One file, about 8000 lines, and no classes to speak of: the state that crosses function
+boundaries is a handful of `struct`s and the `g_` globals set once per launcher invocation.
+Read as groups, the file is thirteen of them. The diagram names each group's functions and
+the data it produces, and the arrows say who calls whom; the numbered sections above are
+where each group is explained.
+
+```mermaid
+classDiagram
+    direction TB
+
+    class Launcher["Launcher (§1, §8)"] {
+        decides: reuse · re-slice · remote · parse
+        compiles the pieces, ld -r into the object
+        run_as_launcher()
+        expand_response_files()
+        main()
+        print_usage()
+    }
+    class DriverProbes["Driver probes (§2)"] {
+        what libclang is given so it parses the compiler's program
+        detect_system_includes()
+        probe_driver_standard()
+        cached_system_includes()
+        cached_driver_standard()
+        include_path_flags()
+        build_clang_flags()
+    }
+    class Parse["Parse (§2)"] {
+        one libclang parse per unit, the include prefix precompiled
+        do_split()
+        include_prefix_of()
+        build_libclang_pch()
+        pch_is_current()
+        check_diagnostics()
+    }
+    class Harvest["Harvest (§2)"] {
+        every definition's extent, linkage, scope chain, references
+        visitor()
+        harvest_variable()
+        collect_emitted()
+        build_emit_graph()
+        record_reference()
+        inclusions_of()
+        collect_inclusion_sites()
+        type_lacks_linkage()
+    }
+    class Classification["Classification (§3)"] {
+        per definition: piece, kept in the preamble, or definitions header
+        prepare_functions()
+        prepare_variables()
+        should_keep_in_header()
+        keep_reason()
+        has_vague_linkage()
+        build_static_rename_map()
+    }
+    class TextRewriting["Text rewriting (§3, §6)"] {
+        pure functions over source text; no libclang
+        blank_code_noise()
+        generate_forward_decl_inplace()
+        strip_decl_specifier()
+        strip_default_args()
+        strip_virt_specifiers()
+        find_declarator()
+        definition_decl_end()
+        active_conditionals()
+        conditionals_closed_by()
+        undefined_macros()
+        widen_to_macro_invocation()
+        wrap_in_namespaces()
+        apply_static_renames()
+        terminate_declaration()
+        strip_always_inline()
+        inline_insertion_point()
+    }
+    class Emit["Emit (§4, §5)"] {
+        preamble · definitions header · pieces · .harvest · .keeps
+        split_unit()
+        generate_preamble()
+        emit_split_files()
+        write_harvest()
+        write_pair_context_preambles()
+        write_skipped_header_manifest()
+        claim_output_path()
+    }
+    class Headers["Headers: candidates and mirror (§5, §6)"] {
+        which included files to split, and where their copies go
+        header_split_candidates()
+        resolve_header_deps()
+        attribute_pair_inclusions()
+        files_with_external_definitions()
+        header_mirror_relpath()
+        inclusion_mirror_relpath()
+        split_include_root()
+        mirror_includers_of_split_headers()
+        fix_mirror_quoted_includes()
+        write_header_manifest()
+        register_header_manifest()
+        load_header_manifests()
+        header_has_include_guard()
+        is_stdlib_header()
+    }
+    class Modules["C++20 modules (TODO/43)"] {
+        interface unit → interface + implementation units; BMI published on change
+        detect_module_unit()
+        unit_import_lines()
+        is_module_unit_file()
+        blank_module_syntax()
+        without_module_output_flags()
+        module_files_of()
+        module_files_hash_text()
+    }
+    class CompileAndPCH["Compile and PCH (§4, §8)"] {
+        the preamble PCH, the pieces in parallel, ld -r
+        build_pch()
+        gch_is_current()
+        pch_include_flag()
+        piece_context_header()
+        compile_parallel()
+        run_command()
+        run_command_quiet()
+        needs_recompile()
+        relocatable_linker()
+        which_on_path()
+    }
+    class CacheAndReslice["Cache and re-slice (§7)"] {
+        split.cache · inputs.hash · depfile.cache · modules.hash
+        split_inputs_hash()
+        write_split_cache()
+        read_split_cache()
+        read_split_cache_any()
+        write_inputs_hashes()
+        changed_prerequisites()
+        try_incremental_split()
+        read_harvest()
+        patch_file_once()
+        rewrite_depfile()
+        cache_passthrough_depfile()
+        depfile_prerequisites()
+    }
+    class RemoteSplit["Remote split (§9)"] {
+        rewrapper: emit-only on a worker, the tree comes back
+        remote_split_enabled()
+        remote_split_env()
+        try_remote_split()
+    }
+    class FilesAndPaths["Files and paths"] {
+        is_source_file()
+        is_header_file()
+        is_included_file()
+        sanitize_filename()
+        shell_quote()
+        read_file()
+        file_content_hash()
+        hash_bytes()
+        build_line_offsets()
+        offset_to_line()
+        unit_include_dirs()
+        include_dirs_from_flags()
+    }
+
+    class FunctionInfo {
+        name · qualified_name · usr · signature
+        start_offset · end_offset · body
+        scope_chain · member_decl · conditionals
+        is_inlined · is_template · is_static · is_virtual …
+        keep_in_header
+    }
+    class VariableInfo {
+        name · text · usr · scope_chain
+        inline_in_place · anchors_users · replacement
+    }
+    class SplitResult {
+        preamble_filename
+        compilable_files
+        header_obj_files · header_obj_dirs
+        context_preambles
+        success
+    }
+    class HarvestDef {
+        start · end · body_open
+        start_line · end_line
+        body_hash · prefix_hash
+        piece · piece_body_off
+    }
+    class ModuleUnit {
+        interface · implementation
+        name · gmf
+    }
+
+    Launcher --> DriverProbes : g_compiler, probes lazily
+    Launcher --> CacheAndReslice : reuse? re-slice?
+    Launcher --> RemoteSplit : or the cluster
+    Launcher --> Parse : or parse here
+    Launcher --> Modules : detect, expand @modmap
+    Launcher --> CompileAndPCH : PCH, pieces, link
+    Parse --> DriverProbes : build_clang_flags
+    Parse --> Harvest : clang_visitChildren
+    Parse --> Headers : candidates, mirror
+    Parse --> Emit : split_unit
+    Parse --> Modules : blank_module_syntax
+    Harvest --> FunctionInfo : produces
+    Harvest --> VariableInfo : produces
+    Emit --> Classification : prepare_functions
+    Emit --> TextRewriting : declarations, bodies
+    Emit --> HarvestDef : writes .harvest
+    Emit --> SplitResult : returns
+    Emit --> Modules : g_module_unit, g_unit_imports
+    Headers --> Emit : split_unit per header
+    Classification --> TextRewriting : blank_code_noise …
+    CacheAndReslice --> HarvestDef : reads .harvest
+    CacheAndReslice --> TextRewriting : patch_file_once
+    Modules --> ModuleUnit : produces
+    RemoteSplit --> SplitResult : from the downloaded tree
+    Emit ..> FilesAndPaths
+    Headers ..> FilesAndPaths
+    CacheAndReslice ..> FilesAndPaths
+```
+
+Two things the diagram makes visible that the text does not. *Text rewriting* has no arrow
+into libclang: every declarator rebuilt, every specifier stripped, every conditional
+replayed is done on the source bytes, with the AST only ever supplying offsets and
+linkage — which is why a re-slice (§7) can run without parsing at all. And *Modules* hangs
+off four groups rather than being one step in a pipeline: the launcher sees the module
+flags, the parse blanks the module syntax, emit writes implementation units instead of
+pieces that include a preamble, and the cache keys on the BMI — the same split, with the
+interface unit where the header used to be.
