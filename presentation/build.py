@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 KNOWN = {"flow", "fission", "cards", "tree", "rationale", "metrics", "bars", "legend",
          "callout", "tiny", "popup", "map",
          "section-map", "sizes", "binary-trace", "paths", "single-bars",
-         "code-columns", "semantic", "logic", "flag", "logo", "mermaid"}
+         "code-columns", "semantic", "logic", "flag", "logo", "mermaid", "mermaid-columns"}
 
 class SourceError(Exception):
     def __init__(self, path, line, message):
@@ -186,16 +186,25 @@ def render_block(block, snippets):
             language = f' data-language="{html.escape(match.group(1), quote=True)}"' if match.group(1) else ""
             code.append(f'<pre class="code"{language}>{html.escape(match.group(2))}</pre>')
         return '<div class="grid two">' + "".join(code) + "</div>"
-    if k == "mermaid":
+    if k in ("mermaid", "mermaid-columns"):
         # Pre-rendered by render-mermaid.py, keyed on the block's text, so the deck stays
         # one offline file. The source stays here, in the slide, as the thing to edit.
+        # `mermaid-columns` holds two diagrams separated by `---`, side by side.
         import hashlib
-        digest = hashlib.sha1(b.strip().encode()).hexdigest()[:12]
-        svg = HERE / "diagrams" / (digest + ".svg")
-        if not svg.exists():
-            fail(block.path, block.line,
-                 f"mermaid diagram not rendered yet ({digest}); run presentation/render-mermaid.py")
-        return f'<figure class="mermaid-figure">{svg.read_text()}</figure>'
+        sources = re.split(r"^---$", b, flags=re.M) if k == "mermaid-columns" else [b]
+        if k == "mermaid-columns" and len(sources) != 2:
+            fail(block.path, block.line, "mermaid-columns needs two diagrams separated by ---")
+        figures = []
+        for source in sources:
+            digest = hashlib.sha1(source.strip().encode()).hexdigest()[:12]
+            svg = HERE / "diagrams" / (digest + ".svg")
+            if not svg.exists():
+                fail(block.path, block.line,
+                     f"mermaid diagram not rendered yet ({digest}); run presentation/render-mermaid.py")
+            figures.append(f'<figure class="mermaid-figure">{svg.read_text()}</figure>')
+        if k == "mermaid":
+            return figures[0]
+        return '<div class="grid two mermaid-columns">' + "".join(figures) + "</div>"
     if k == "logo":
         # The deck's one embedded EngFlow SVG; the runtime fills src from the footer logo.
         return '<img class="logo-large" alt="EngFlow" data-logo="engflow">'

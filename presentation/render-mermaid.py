@@ -14,7 +14,10 @@ OUT = HERE / "diagrams"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 def blocks(text):
-    return re.findall(r"^::: mermaid\n(.*?)^:::$", text, re.S | re.M)
+    found = []
+    for kind, body in re.findall(r"^::: (mermaid|mermaid-columns)\n(.*?)^:::$", text, re.S | re.M):
+        found += re.split(r"^---$", body, flags=re.M) if kind == "mermaid-columns" else [body]
+    return found
 
 def digest(source):
     return hashlib.sha1(source.strip().encode()).hexdigest()[:12]
