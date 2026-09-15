@@ -26,6 +26,7 @@
 04a-parse.md
 04b-records.md
 14-remote.md
+15-binary-evidence.md
 15-controlled-comparison.md
 16-semantic-diff.md
 17-section-map.md
