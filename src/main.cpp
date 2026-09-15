@@ -203,6 +203,11 @@ struct FunctionInfo {
     // 14 of 218 units; kept in the other 204 copies, one line in its body rebuilt 194 PCHs
     // and 9689 pieces (TODO/48).
     bool declare_only = false;
+    // Named in the unit, so not declared only, and referring to a function this
+    // translation unit declares but does not define -- a template with no definition in
+    // reach, a forwarder to another object -- so a piece forced into existence would carry
+    // a reference the plain build never made. Kept with its body (TODO/49).
+    bool lacks_definition = false;
 
     // Set by prepare_functions() once the whole file has been visited.
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
@@ -418,6 +423,16 @@ struct EmitGraph {
 // that references it to the definitions unit (TODO/44), and this is how they are found.
 static std::map<std::string, std::set<std::string>> g_references;
 
+// Definitions that refer to a function this translation unit declares and does not define,
+// outside the system headers: a template whose definition is not in reach -- Boost.Math's
+// real_concept.hpp calls `boost::math::acosh` with only math_fwd.hpp read -- or a forwarder
+// to a function another object defines. The compiler emits such a body only if something
+// uses it; a piece forced into existence emits it whatever happens and the reference goes
+// unresolved. And the functions defined here with vague linkage, which a body that calls
+// them emits along with itself: what they lack, their callers lack too (TODO/49).
+static std::set<std::string> g_lacks_definition;
+static std::set<std::string> g_vague_defined;
+
 static CXChildVisitResult record_reference(CXCursor node, CXCursor, CXClientData payload) {
     auto* g = static_cast<EmitGraph*>(payload);
     const CXCursorKind k = clang_getCursorKind(node);
@@ -427,6 +442,25 @@ static CXChildVisitResult record_reference(CXCursor node, CXCursor, CXClientData
             std::string target = cx_to_string(clang_getCursorUSR(ref));
             if (!target.empty() && !g->stack.empty())
                 g->calls[g->stack.back()].insert(target);
+            const CXCursorKind rk = clang_getCursorKind(ref);
+            const bool fn_kind =
+                rk == CXCursor_FunctionDecl || rk == CXCursor_CXXMethod ||
+                rk == CXCursor_Constructor || rk == CXCursor_Destructor ||
+                rk == CXCursor_ConversionFunction || rk == CXCursor_FunctionTemplate;
+            if (fn_kind && !target.empty() && !g->stack.empty()) {
+                const CXCursor tmpl = clang_getSpecializedCursorTemplate(ref);
+                CXCursor def = clang_getCursorDefinition(ref);
+                if (clang_Cursor_isNull(def) && !clang_Cursor_isNull(tmpl))
+                    def = clang_getCursorDefinition(tmpl);
+                if (clang_Cursor_isNull(def)) {
+                    const CXCursor where = clang_Cursor_isNull(tmpl) ? ref : tmpl;
+                    if (!clang_Location_isInSystemHeader(clang_getCursorLocation(where)))
+                        g_lacks_definition.insert(g->stack.back());
+                } else if (clang_Cursor_isFunctionInlined(def) || !clang_Cursor_isNull(tmpl) ||
+                           clang_getCursorLinkage(def) != CXLinkage_External) {
+                    g_vague_defined.insert(target);
+                }
+            }
         }
     }
     return CXChildVisit_Recurse;
@@ -487,8 +521,24 @@ static void collect_emitted(CXTranslationUnit tu,
                             std::set<std::string>& out) {
     EmitGraph graph;
     graph.main_file = fs::path(main_file).lexically_normal().string();
+    g_lacks_definition.clear();
+    g_vague_defined.clear();
     clang_visitChildren(clang_getTranslationUnitCursor(tu), build_emit_graph, &graph);
     g_references = graph.calls;
+    // A body that calls a vague-linkage function lacking a definition emits that function
+    // with itself, and lacks the same definition.
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const auto& entry : graph.calls) {
+            if (g_lacks_definition.count(entry.first)) continue;
+            for (const auto& t : entry.second)
+                if (g_lacks_definition.count(t) && g_vague_defined.count(t)) {
+                    g_lacks_definition.insert(entry.first);
+                    changed = true;
+                    break;
+                }
+        }
+    }
 
     // Everything reachable from a root is emitted; nothing else is.
     out = graph.roots;
@@ -1226,6 +1276,7 @@ static std::string keep_reason(const FunctionInfo& fn) {
         if (fn.defined_in_class)  return "member defined in its class in a module interface: left in place";
     }
     if (fn.declare_only)        return "not emitted by this translation unit; declared only";
+    if (fn.lacks_definition)    return "not emitted by this translation unit; refers to a function it does not define";
     if (fn.shares_extent)       return "shares its source extent with another definition";
     if (fn.macro_invocation)    return "produced by a macro invocation, which moved as a unit";
     if (fn.uses_undefined_macro) return "needs a macro the file undefines";
@@ -2208,6 +2259,11 @@ static bool body_holds_directive(const std::string& body) {
 // bodies stays one: those bodies go too. Decided by the identifier tokens of every
 // harvested file with the candidates' extents blanked, to a fixpoint, once per parse.
 static std::set<std::string> g_declare_only;
+// The candidates the fixpoint rejected: of the same shape, but named somewhere in the
+// unit's sources, in a template as often as not. The name is no reason to keep the body in
+// the copy: they are split like an emitted definition, the copy declaring and a piece
+// defining, so an edit to the body recompiles that piece and not the PCH. TODO/49.
+static std::set<std::string> g_split_unemitted;
 
 static std::set<std::string> undefined_macros(const std::string& source);
 static bool contains_decl_token(const std::string& blanked, const std::string& kw);
@@ -2237,6 +2293,7 @@ static void declare_only_candidates(const HarvestMap& harvest,
                                     const std::string& main_file,
                                     const std::set<std::string>& emitted) {
     g_declare_only.clear();
+    g_split_unemitted.clear();
     struct Candidate { std::string file, name; unsigned start, end; };
     std::vector<Candidate> candidates;
     for (const auto& entry : harvest) {
@@ -2314,7 +2371,10 @@ static void declare_only_candidates(const HarvestMap& harvest,
             if (!g_declare_only.count(fn.usr)) continue;
             if (k < candidates.size() && candidates[k].start == fn.start_offset &&
                 candidates[k].file == entry.first) {
-                if (rejected[k]) g_declare_only.erase(fn.usr);
+                if (rejected[k]) {
+                    g_declare_only.erase(fn.usr);
+                    if (!g_lacks_definition.count(fn.usr)) g_split_unemitted.insert(fn.usr);
+                }
                 ++k;
             }
         }
@@ -2652,8 +2712,12 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
 
     // Only split what this translation unit actually emits; see collect_emitted(). What it
     // does not emit, of a shape the rules above would have split, is declared in the copy
-    // and gets no piece (TODO/48); what they would have kept stays kept, unless it is not
-    // emitted either, in which case the rules above already kept it.
+    // and gets no piece (TODO/48) -- unless something in the unit names it, in which case
+    // it is split as if emitted, a piece of its own that the copy declares (TODO/49): the
+    // emit graph does not resolve a dependent call, so the name is the only evidence, and
+    // a body kept in the copy is in the PCH and costs every piece on an edit. What the
+    // rules above would have kept stays kept, unless it is not emitted either, in which
+    // case the rules above already kept it.
     //
     // Not when the body holds a preprocessor directive: Boost's current_function.hpp
     // defines BOOST_CURRENT_FUNCTION inside the body of an inline function nothing calls,
@@ -2662,8 +2726,10 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         for (auto& fn : functions) {
             if (fn.keep_in_header || fn.usr.empty()) continue;
             if (referenced.find(fn.usr) != referenced.end()) continue;
+            if (g_split_unemitted.count(fn.usr)) continue;
             fn.keep_in_header = true;
             fn.declare_only = g_declare_only.count(fn.usr) != 0;
+            fn.lacks_definition = !fn.declare_only && g_lacks_definition.count(fn.usr) != 0;
         }
 }
 
@@ -3962,6 +4028,19 @@ static std::string include_prefix_of(const std::string& source) {
     while (pos < blanked.size()) {
         size_t eol = blanked.find('\n', pos);
         if (eol == std::string::npos) eol = blanked.size();
+        // A directive continued with a backslash is one logical line: cut in the middle of
+        // Boost.Filesystem's `#define BOOST_UTF8_BEGIN_NAMESPACE \` the prefix defined the
+        // macro empty and the parse read its continuation lines as three real namespaces
+        // opened around the rest of the unit, and every `std::` name went unresolved.
+        while (eol < blanked.size()) {
+            size_t last = eol;
+            while (last > pos && std::isspace(static_cast<unsigned char>(blanked[last - 1])) &&
+                   blanked[last - 1] != '\n')
+                --last;
+            if (last == pos || blanked[last - 1] != '\\') break;
+            eol = blanked.find('\n', eol + 1);
+            if (eol == std::string::npos) eol = blanked.size();
+        }
         const std::string line = trim_ws(blanked.substr(pos, eol - pos));
 
         if (!line.empty()) {
