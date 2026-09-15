@@ -151,11 +151,12 @@ echo "==> building cpp-splitter"
 tipi run cmake --build "$REPO/build" -j32 >/dev/null
 echo "==> p4c $(git -C "$P4C" log -1 --format=%h), no control plane, no tests, Release, -j$JOBS, build phase only"
 
-printf '\n%-12s %9s %9s %9s %11s %11s %9s %8s\n' scenario plain unity split unity/plain split/plain fallbacks declined
-printf '%-12s %9s %9s %9s %11s %11s %9s %8s\n' ------------ --------- --------- --------- ----------- ----------- --------- --------
+# The ratios say how many times faster: plain/split above 1 is the split winning.
+printf '\n%-12s %9s %9s %9s %11s %11s %11s %9s %8s\n' scenario plain unity split plain/unity plain/split unity/split fallbacks declined
+printf '%-12s %9s %9s %9s %11s %11s %11s %9s %8s\n' ------------ --------- --------- --------- ----------- ----------- ----------- --------- --------
 report() {
-    printf '%-12s %9s %9s %9s %10sx %10sx %9s %8s\n' "$1" "$(human "$2")" "$(human "$3")" "$(human "$4")" \
-        "$(ratio_of "$2" "$3")" "$(ratio_of "$2" "$4")" "$(fallbacks)" "$(declined)"
+    printf '%-12s %9s %9s %9s %10sx %10sx %10sx %9s %8s\n' "$1" "$(human "$2")" "$(human "$3")" "$(human "$4")" \
+        "$(ratio_of "$3" "$2")" "$(ratio_of "$4" "$2")" "$(ratio_of "$4" "$3")" "$(fallbacks)" "$(declined)"
 }
 
 # build_mode <mode> -> elapsed ms, or `-` when the mode is not measured.
