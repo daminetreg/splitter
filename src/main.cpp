@@ -3119,7 +3119,10 @@ static std::string generate_preamble(const std::string& source,
                     if (!decl.empty()) preamble += decl + "\n";
                 }
             } else {
-                if (r.fn && r.fn->uses_undefined_macro && !has_vague_linkage(*r.fn)) {
+                // Not in a definitions variant (no sink): there the definition exists once
+                // and must be emitted as written -- `inline` on P4Lexer::yylex made it a
+                // definition no object held.
+                if (definitions && r.fn && r.fn->uses_undefined_macro && !has_vague_linkage(*r.fn)) {
                     const std::string blanked = blank_code_noise(text);
                     const size_t at = inline_insertion_point(blanked);
                     if (at != std::string::npos &&
