@@ -2876,6 +2876,14 @@ static std::string wrap_in_namespaces(const std::string& body,
                                       const std::vector<ScopeEntry>& scope_chain);
 static size_t conditionals_closed_by(const std::string& text);
 
+// Set by generate_preamble() when a macro group it moved to the definitions header names a
+// macro the file undefines: re-expanded behind the whole preamble the invocation would not
+// mean what it meant in place. p4c's visitor.cpp invokes IRNODE_ALL_SUBCLASSES(
+// DEFINE_VISIT_FUNCTIONS) twice, each time under its own #define, with an #undef after.
+// The unit's definitions piece then compiles a variant of the unit with the definitions
+// left in place (split_unit()), as a pair header's inclusion does. TODO/47.
+static bool g_definitions_need_variant = false;
+
 static std::string generate_preamble(const std::string& source,
                                      const std::vector<FunctionInfo>& functions,
                                      const std::vector<VariableInfo>& variables,
@@ -3030,8 +3038,7 @@ static std::string generate_preamble(const std::string& source,
             if (definitions && !group.empty()) {
                 group_moves = true;
                 for (const FunctionInfo* g : group) {
-                    if (has_vague_linkage(*g) || g->uses_undefined_macro ||
-                        !g->member_decl.empty() || g->in_class_template ||
+                    if (has_vague_linkage(*g) || !g->member_decl.empty() || g->in_class_template ||
                         g->in_anonymous_class || g->is_static || g->in_unnamed_ns)
                         group_moves = false;
                     // An out-of-line member is fine: the invocation spells its qualified
@@ -3043,6 +3050,9 @@ static std::string generate_preamble(const std::string& source,
                 }
             }
             if (group_moves) {
+                const std::string group_blanked = blank_code_noise(text);
+                for (const auto& m : undefined_macros(source))
+                    if (contains_decl_token(group_blanked, m)) g_definitions_need_variant = true;
                 *definitions += wrap_in_namespaces(text, group.front()->scope_chain);
                 *definitions += "\n";
                 for (const FunctionInfo* g : group) {
@@ -3064,8 +3074,16 @@ static std::string generate_preamble(const std::string& source,
                 }
             } else if (definitions && r.fn &&
                        (r.fn->kept_with_variable ||
-                        (!has_vague_linkage(*r.fn) && !r.fn->uses_undefined_macro &&
+                        (!has_vague_linkage(*r.fn) &&
                          (r.fn->macro_invocation || extent_is_a_definition(*r.fn, text))))) {
+                // A definition that needs a macro the file retracts cannot be re-expanded
+                // behind the whole preamble, and it cannot stay here as `inline` when it is
+                // a virtual member: the class's key function made inline in one translation
+                // unit is a vtable no object emits -- flex's P4Lexer::yylex, written under
+                // YY_DECL, and `undefined symbol: vtable for P4::P4Lexer`. The definitions
+                // piece then compiles a variant of the unit with the definition in place
+                // (split_unit()), where the macro still means what it meant. TODO/47.
+                if (r.fn->uses_undefined_macro) g_definitions_need_variant = true;
                 // Kept, but it may exist in only one object. Out of the shared preamble it
                 // goes; a member is already declared by its class, and a free function gets
                 // a declaration left where its body was. The text is lifted out of whatever
@@ -3077,7 +3095,24 @@ static std::string generate_preamble(const std::string& source,
                 // the declaration left below, which names the mangled form.
                 if (r.fn->kept_with_variable && r.fn->is_static)
                     text = strip_decl_specifier(text, "static");
-                *definitions += wrap_in_namespaces(text, r.fn->scope_chain);
+                // Under the conditionals the definition was written under, as a piece
+                // replays them: a declarator written across `#ifdef ... #else ... #endif`
+                // starts inside the first branch, and its text carries the `#else` and the
+                // `#endif` without the `#ifdef` -- flex's `yyFlexLexer::LexerInput`, a
+                // virtual member moved here. TODO/47.
+                {
+                    std::string conditioned;
+                    for (const auto& c : r.fn->conditionals) conditioned += c + "\n";
+                    conditioned += text;
+                    const size_t closed = conditionals_closed_by(text);
+                    const size_t to_close = r.fn->conditionals.size() > closed
+                                                ? r.fn->conditionals.size() - closed : 0;
+                    for (size_t ci = 0; ci < to_close; ++ci) conditioned += "\n#endif";
+                    *definitions += wrap_in_namespaces(conditioned, r.fn->scope_chain);
+                    // And the preamble, which loses the whole text, closes what that text
+                    // closed for it.
+                    for (size_t ci = 0; ci < closed; ++ci) preamble += "#endif\n";
+                }
                 *definitions += "\n";
                 if (r.fn->member_decl.empty()) {
                     std::string decl = generate_forward_decl_inplace(*r.fn, stem);
@@ -3174,11 +3209,16 @@ static std::string generate_preamble(const std::string& source,
             // What the removed part closed is closed again here; the piece does the same
             // for what it replays (conditionals_closed_by()). TODO/47.
             {
+                // Counted on the whole extent less what the kept declarator itself closes:
+                // a declarator written across `#ifdef ... #else ... #endif` keeps its
+                // `#endif`, and a constructor whose initialiser list is under `#if` opens
+                // and closes inside the part removed.
                 const std::string blanked = blank_code_noise(r.fn->body);
                 const size_t decl_end = definition_decl_end(blanked);
                 if (decl_end != std::string::npos && decl_end < r.fn->body.size()) {
-                    const size_t closed = conditionals_closed_by(r.fn->body.substr(decl_end));
-                    for (size_t ci = 0; ci < closed; ++ci) preamble += "#endif\n";
+                    const size_t whole = conditionals_closed_by(r.fn->body);
+                    const size_t in_decl = conditionals_closed_by(r.fn->body.substr(0, decl_end));
+                    for (size_t ci = in_decl; ci < whole; ++ci) preamble += "#endif\n";
                 }
             }
         }
@@ -4768,6 +4808,7 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const StaticRenameMap static_renames =
         build_static_rename_map(functions, variables, unit_tag);
     std::string definitions;
+    g_definitions_need_variant = false;
     const std::string preamble =
         generate_preamble(source, functions, variables, unit_tag, abs_path, static_renames,
                           &definitions);
@@ -4818,7 +4859,8 @@ static SplitResult split_unit(CXTranslationUnit tu,
     // and everything bound for the definitions header is left where it was written, so each
     // definition is expanded once, in the macro state it had. TODO/44 (B).
     std::string definitions_variant;
-    if (!definitions_filename.empty() && !definitions_context.empty()) {
+    if (!definitions_filename.empty() &&
+        (!definitions_context.empty() || g_definitions_need_variant)) {
         definitions_variant = preamble_filename + ".definitions.h";
         const std::string variant_path = (fs::path(unit_dir) / definitions_variant).string();
         const std::string body = generate_preamble(source, functions, variables, unit_tag,
@@ -5695,8 +5737,10 @@ static void emit_split_files(CXTranslationUnit tu,
         content << "// ---\n\n";
         if (!definitions_variant.empty()) {
             // A pair header's inclusion: the context up to its #include line, then the
-            // copy's variant with the definitions in place.
-            content << "#include \"" << definitions_context << "\"\n";
+            // copy's variant with the definitions in place. A unit whose moved macro group
+            // names a macro the unit undefines: its own variant, and nothing before it.
+            if (!definitions_context.empty())
+                content << "#include \"" << definitions_context << "\"\n";
             content << "#include \"" << definitions_variant << "\"\n";
         } else {
             if (!context_preamble.empty())
@@ -6343,6 +6387,13 @@ static bool try_incremental_split(const std::string& split_dir,
     }
     if (!found) return refuse("the changed file has no harvest record");
     if (hf.defs.empty()) return refuse("the changed file contributed no split-out definition");
+    // A definitions variant carries the kept definitions a second time, and the re-slice
+    // patches only the copy; the full split rewrites both. TODO/47.
+    for (fs::directory_iterator it(harvest_dir, ec), end; it != end && !ec; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.size() > 14 && name.compare(name.size() - 14, 14, ".definitions.h") == 0)
+            return refuse("the file's definitions are compiled from a variant of it");
+    }
 
     const std::string now = read_file(file);
     if (now.empty()) return refuse("the changed file cannot be read");

@@ -19,8 +19,42 @@ int parse(const char *text) {
 
 int twice(int v) { return v * 2; }
 
+// A constructor whose initialiser list is under a conditional that opens and closes inside
+// the removed part: bison's `P4Parser::P4Parser(...) #if YYDEBUG : a(), #else : #endif b()`.
+struct Parser {
+    Parser(int seed);
+    virtual int input(char *buf, int max_size);   // virtual: kept, moved to the definitions header
+    int debug;
+    int value;
+};
+
+// A virtual member -- kept whole, moved to the definitions header -- whose declarator is
+// written across a conditional: flex's yyFlexLexer::LexerInput.
+#ifdef INTERACTIVE
+int Parser::input(char *buf, int /* max_size */)
+#else
+int Parser::input(char *buf, int max_size)
+#endif
+{
+    buf[0] = 'x';
+    return max_size + value;
+}
+Parser::Parser(int seed)
+#ifdef WITH_DEBUG
+    : debug(1),
+#else
+    : debug(0),
+#endif
+      value(seed * 3) {}
+
 int main()
 {
-    std::printf("%d %d\n", parse("123"), twice(parse("4")));
-    return parse("123") == 6 && twice(parse("4")) == 8 ? 0 : 1;
+    Parser p(5);
+    char buf[4];
+    std::printf("%d %d %d %d %d\n", parse("123"), twice(parse("4")), p.debug, p.value,
+                p.input(buf, 2));
+    return parse("123") == 6 && twice(parse("4")) == 8 && p.debug == 0 && p.value == 15 &&
+                   p.input(buf, 2) == 17
+               ? 0
+               : 1;
 }

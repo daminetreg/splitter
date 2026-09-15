@@ -1,8 +1,8 @@
-# Two translation units through the launcher, linked together and run. What one unit
+# Two translation units (UNITS, a ;-list of stems) through the launcher, linked together and run. What one unit
 # defines and only the other reads has to survive the split: a variable left in the
 # preamble as `inline` is emitted only where something uses it, and settings.cpp's pieces
 # use neither of its two (TODO/47). Both units must split; the program must print EXPECT.
-foreach(required SPLITTER SOURCE_DIR WORKDIR CXX EXPECT)
+foreach(required SPLITTER SOURCE_DIR UNITS WORKDIR CXX EXPECT)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} must be defined")
   endif()
@@ -10,7 +10,7 @@ endforeach()
 file(REMOVE_RECURSE "${WORKDIR}")
 file(MAKE_DIRECTORY "${WORKDIR}")
 set(objects)
-foreach(unit settings main)
+foreach(unit ${UNITS})
   set(object "${WORKDIR}/${unit}.o")
   execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env CPP_SPLITTER_VERBOSE=1

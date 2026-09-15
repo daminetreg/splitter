@@ -162,6 +162,7 @@ set(cpp_splitter_test_output "${CMAKE_CURRENT_BINARY_DIR}/test-output")
 #   deduced_ref_return_main  `auto &f()`, `const auto &f() const`, `auto *f()` kept in place (TODO/47)
 #   macro_member_group_main  one macro defining out-of-line members of several classes (TODO/47)
 #   conditional_body_endif_main  a branch-dependent declarator whose `#endif` is in the body (TODO/47)
+#   macro_group_redefined_main  one list macro invoked twice under two helper definitions (TODO/47)
 #   static_unnamed_type_main  a static of an unnamed struct type: its users stay with it (TODO/44)
 #   static_unnamed_ns_type_main  a static of a class from an unnamed namespace, likewise (TODO/44)
 foreach(fixture sample use_mylib static_specifier static_renames member_functions ctx_main
@@ -175,7 +176,7 @@ foreach(fixture sample use_mylib static_specifier static_renames member_function
                 static_defines_type_main static_stateless_lambda_main
                 static_unnamed_type_main static_unnamed_ns_type_main
             system_decl_main static_shapes_main deduced_ref_return_main
-            macro_member_group_main conditional_body_endif_main)
+            macro_member_group_main conditional_body_endif_main macro_group_redefined_main)
   add_test(
     NAME split.${fixture}
     COMMAND ${CMAKE_COMMAND}
@@ -205,9 +206,23 @@ add_test(
   COMMAND ${CMAKE_COMMAND}
           -DSPLITTER=$<TARGET_FILE:cpp-splitter>
           -DSOURCE_DIR=${cpp_splitter_test_dir}/variable_read_elsewhere
+          "-DUNITS=settings;main"
           -DWORKDIR=${cpp_splitter_test_output}/variable_read_elsewhere
           -DCXX=${CMAKE_CXX_COMPILER}
           "-DEXPECT=2 5 3"
+          -P ${cpp_splitter_test_dir}/cmake/RunTwoUnitsTest.cmake)
+
+# A virtual key function written under a macro the file undefines; the other unit expects
+# the vtable from this one. TODO/47.
+add_test(
+  NAME launcher.undef_macro_virtual
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE_DIR=${cpp_splitter_test_dir}/undef_macro_virtual
+          "-DUNITS=lexer;main"
+          -DWORKDIR=${cpp_splitter_test_output}/undef_macro_virtual
+          -DCXX=${CMAKE_CXX_COMPILER}
+          "-DEXPECT=15 2"
           -P ${cpp_splitter_test_dir}/cmake/RunTwoUnitsTest.cmake)
 
 # A unit the splitter must decline -- split nothing, say why, compile whole, be right.
