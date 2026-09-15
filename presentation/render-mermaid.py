@@ -27,7 +27,7 @@ import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.mi
 mermaid.initialize({{ startOnLoad: false, theme: 'dark', fontFamily: 'system-ui, sans-serif',
   themeVariables: {{ background: 'transparent', primaryColor: '#172321', primaryBorderColor: '#55ddc3',
     primaryTextColor: '#e8eeea', lineColor: '#9aaba5', secondaryColor: '#1f2d2a', tertiaryColor: '#111c19',
-    fontSize: '18px' }} }});
+    fontSize: '18px', clusterBkg: '#111c19', clusterBorder: '#3c5558', titleColor: '#9aaba5' }} }});
 try {{ await mermaid.run(); document.title = 'OK'; }} catch (e) {{ document.title = 'ERR ' + e.message; }}
 </script></body></html>"""
     with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as f:
