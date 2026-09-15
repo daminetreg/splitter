@@ -224,6 +224,9 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .mermaid-columns figcaption,.mermaid-figure figcaption{font:.68rem var(--mono);color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:.4rem}
 .mermaid-figure svg{width:100%;height:auto;max-height:55vh}
 .mermaid-figure .label,.mermaid-figure .nodeLabel,.mermaid-figure .edgeLabel{font:500 1.05rem/1.3 var(--sans);text-transform:none;letter-spacing:0;color:var(--ink);margin:0}
+.bullets{margin:2.2rem 0 0;padding-left:1.4em;max-width:900px;font-size:clamp(1.3rem,2.4vw,2.1rem);line-height:1.45;color:var(--ink)}
+.bullets li{margin:.55em 0}
+.bullets li::marker{color:var(--teal)}
 .logo-large{display:block;width:min(460px,55vw);height:auto;margin:1.6rem 0 .4rem}
 #notesToggle{position:fixed;z-index:20;top:1rem;left:1rem}
 .flag{font:.82rem/1.65 var(--mono);padding:1rem 1.2rem;border-left:3px solid var(--violet);background:#111c19;max-width:1000px;margin-top:1.5rem}

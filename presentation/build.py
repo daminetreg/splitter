@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 KNOWN = {"flow", "fission", "cards", "tree", "rationale", "metrics", "bars", "legend",
          "callout", "tiny", "popup", "map",
          "section-map", "sizes", "binary-trace", "paths", "single-bars",
-         "code-columns", "semantic", "logic", "flag", "logo", "mermaid", "mermaid-columns"}
+         "code-columns", "semantic", "logic", "flag", "logo", "mermaid", "mermaid-columns", "list"}
 
 class SourceError(Exception):
     def __init__(self, path, line, message):
@@ -205,6 +205,9 @@ def render_block(block, snippets):
         if k == "mermaid":
             return figures[0]
         return '<div class="grid two mermaid-columns">' + "".join(figures) + "</div>"
+    if k == "list":
+        items = "".join(f"<li>{inline(x)}</li>" for x in lines(block))
+        return f'<ul class="bullets">{items}</ul>'
     if k == "logo":
         # The deck's one embedded EngFlow SVG; the runtime fills src from the footer logo.
         return '<img class="logo-large" alt="EngFlow" data-logo="engflow">'
