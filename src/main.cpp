@@ -196,6 +196,13 @@ struct FunctionInfo {
     // whose local `static node_hash_set g_cache` became one cache per piece, and cstrings
     // compared by pointer stopped comparing equal. Such a unit is declined. TODO/47.
     bool has_local_static = false;
+    // A header definition this unit does not emit, of a shape it would otherwise split:
+    // the unit's copy of the header declares it and no piece is written. The copy is then
+    // unchanged by an edit to the body, and so is the PCH built from it and every piece
+    // compiled against that PCH. p4c's cstring::size() is defined in class and emitted by
+    // 14 of 218 units; kept in the other 204 copies, one line in its body rebuilt 194 PCHs
+    // and 9689 pieces (TODO/48).
+    bool declare_only = false;
 
     // Set by prepare_functions() once the whole file has been visited.
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
@@ -1218,6 +1225,7 @@ static std::string keep_reason(const FunctionInfo& fn) {
         if (fn.is_inlined)        return "inline in a module interface: belongs in the BMI";
         if (fn.defined_in_class)  return "member defined in its class in a module interface: left in place";
     }
+    if (fn.declare_only)        return "not emitted by this translation unit; declared only";
     if (fn.shares_extent)       return "shares its source extent with another definition";
     if (fn.macro_invocation)    return "produced by a macro invocation, which moved as a unit";
     if (fn.uses_undefined_macro) return "needs a macro the file undefines";
@@ -2176,6 +2184,143 @@ static bool widen_to_macro_invocation(const std::string& blanked, unsigned& star
     return true;
 }
 
+// Whether a definition's text has a preprocessor directive on a line of its own.
+static bool body_holds_directive(const std::string& body) {
+    // On the text as written: blank_code_noise() blanks directives with the rest.
+    size_t pos = 0;
+    while (pos < body.size()) {
+        size_t eol = body.find('\n', pos);
+        if (eol == std::string::npos) eol = body.size();
+        const size_t at = body.find_first_not_of(" \t", pos);
+        if (at != std::string::npos && at < eol && body[at] == '#') return true;
+        pos = eol + 1;
+    }
+    return false;
+}
+
+// The header definitions of the current translation unit that its copies may declare
+// rather than define (TODO/48): not emitted by the unit, of a shape the split rules accept,
+// and named nowhere else in the unit's own sources -- not in a template, whose references
+// libclang cannot resolve (`this->has_trivial_copy_and_destroy()` in Boost.Function's
+// function_n is a dependent call with no referenced declaration, and 1963 references to it
+// went unresolved when the copies declared it), not in a definition kept for any reason,
+// not in a namespace-scope initialiser. A candidate named only inside other candidates'
+// bodies stays one: those bodies go too. Decided by the identifier tokens of every
+// harvested file with the candidates' extents blanked, to a fixpoint, once per parse.
+static std::set<std::string> g_declare_only;
+
+static std::set<std::string> undefined_macros(const std::string& source);
+static bool contains_decl_token(const std::string& blanked, const std::string& kw);
+static bool is_stdlib_header(const std::string& abs_path);
+
+static void identifiers_of(const std::string& blanked, std::set<std::string>& out) {
+    size_t i = 0;
+    while (i < blanked.size()) {
+        const unsigned char c = static_cast<unsigned char>(blanked[i]);
+        if (std::isalpha(c) || c == '_') {
+            size_t j = i + 1;
+            while (j < blanked.size() && is_ident_char(static_cast<unsigned char>(blanked[j]))) ++j;
+            out.insert(blanked.substr(i, j - i));
+            i = j;
+        } else if (std::isdigit(c)) {
+            size_t j = i + 1;
+            while (j < blanked.size() && is_ident_char(static_cast<unsigned char>(blanked[j]))) ++j;
+            i = j;
+        } else {
+            ++i;
+        }
+    }
+}
+
+static void declare_only_candidates(const HarvestMap& harvest,
+                                    const std::vector<std::string>& included,
+                                    const std::string& main_file,
+                                    const std::set<std::string>& emitted) {
+    g_declare_only.clear();
+    struct Candidate { std::string file, name; unsigned start, end; };
+    std::vector<Candidate> candidates;
+    for (const auto& entry : harvest) {
+        if (entry.first == main_file) continue;
+        const std::set<std::string> undeffed = undefined_macros(read_file(entry.first));
+        for (const auto& fn : entry.second) {
+            if (fn.usr.empty() || emitted.count(fn.usr)) continue;
+            if (!fn.is_inlined || !fn.external_linkage || fn.is_static || fn.in_unnamed_ns ||
+                fn.is_template || fn.in_class_template || fn.in_anonymous_class ||
+                fn.is_virtual || fn.is_ctor_or_dtor || fn.is_conversion || fn.is_constexpr ||
+                fn.is_specialization || fn.is_defaulted_or_deleted || fn.shares_extent ||
+                fn.name == "main")
+                continue;
+            // Called without being named: operators by their syntax -- Boost's
+            // `atomic_count::operator--` went unresolved 513 times -- begin()/end() by a
+            // range for, get() by a structured binding, the coroutine hooks by co_await.
+            static const char* const implicit_names[] = {
+                "begin", "end", "get", "await_ready", "await_suspend", "await_resume",
+                "get_return_object", "initial_suspend", "final_suspend",
+                "unhandled_exception", "return_void", "return_value", "yield_value"};
+            if (fn.name.rfind("operator", 0) == 0) continue;
+            bool implicit = false;
+            for (const char* n : implicit_names) if (fn.name == n) implicit = true;
+            if (implicit) continue;
+            if (body_holds_directive(fn.body)) continue;
+            const std::string blanked = blank_code_noise(fn.body);
+            const size_t open = blanked.find('{');
+            if (open == std::string::npos) continue;   // no body of its own
+            if (contains_decl_token(blanked.substr(0, open), "auto")) continue;
+            bool uses_undeffed = false;
+            for (const auto& m : undeffed)
+                if (contains_decl_token(blanked, m)) { uses_undeffed = true; break; }
+            if (uses_undeffed) continue;
+            g_declare_only.insert(fn.usr);
+            candidates.push_back({entry.first, fn.name, fn.start_offset, fn.end_offset});
+        }
+    }
+    if (candidates.empty()) return;
+
+    // Identifiers of every file the unit read outside the system headers -- a macro in a
+    // header with no definition of its own can name a candidate too -- with the candidates'
+    // own extents blanked out; a rejected candidate's identifiers join them.
+    std::set<std::string> mentioned;
+    std::map<std::string, std::string> texts;
+    for (const auto& entry : harvest) texts[entry.first] = read_file(entry.first);
+    for (const auto& inc : included)
+        if (!texts.count(inc) && !is_stdlib_header(inc)) texts[inc] = read_file(inc);
+    if (!texts.count(main_file)) texts[main_file] = read_file(main_file);
+    for (auto& t : texts) {
+        std::string blanked = blank_code_noise(t.second);
+        for (const auto& c : candidates)
+            if (c.file == t.first && c.end <= blanked.size())
+                std::fill(blanked.begin() + c.start, blanked.begin() + c.end, ' ');
+        identifiers_of(blanked, mentioned);
+    }
+    std::vector<bool> rejected(candidates.size(), false);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (rejected[i] || !mentioned.count(candidates[i].name)) continue;
+            rejected[i] = true;
+            changed = true;
+            const auto& t = texts[candidates[i].file];
+            if (candidates[i].end <= t.size())
+                identifiers_of(blank_code_noise(t.substr(candidates[i].start,
+                                                          candidates[i].end - candidates[i].start)),
+                               mentioned);
+        }
+    }
+    // The rejected ones leave the set; the harvest entries carry the usr by position.
+    size_t k = 0;
+    for (const auto& entry : harvest) {
+        if (entry.first == main_file) continue;
+        for (const auto& fn : entry.second) {
+            if (!g_declare_only.count(fn.usr)) continue;
+            if (k < candidates.size() && candidates[k].start == fn.start_offset &&
+                candidates[k].file == entry.first) {
+                if (rejected[k]) g_declare_only.erase(fn.usr);
+                ++k;
+            }
+        }
+    }
+}
+
 static void prepare_functions(std::vector<FunctionInfo>& functions,
                               const std::string& source,
                               const std::set<std::string>& referenced,
@@ -2314,11 +2459,6 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         // definition strong, which collides as soon as two translation units include the
         // header. So they stay put; construction is bound up with the class's fields
         // anyway, and leaving it beside them costs little.
-        // Only split what this translation unit actually emits; see collect_emitted().
-        if (input_is_header && !fn.usr.empty() && referenced.find(fn.usr) == referenced.end()) {
-            fn.keep_in_header = true;
-            continue;
-        }
 
         // `main` is not an ordinary function. It may not be inline, and a split piece taken
         // out of a header is written `inline` so that several objects may carry it -- so a
@@ -2509,6 +2649,22 @@ static void prepare_functions(std::vector<FunctionInfo>& functions,
         }
         fn.keep_in_header = false;
     }
+
+    // Only split what this translation unit actually emits; see collect_emitted(). What it
+    // does not emit, of a shape the rules above would have split, is declared in the copy
+    // and gets no piece (TODO/48); what they would have kept stays kept, unless it is not
+    // emitted either, in which case the rules above already kept it.
+    //
+    // Not when the body holds a preprocessor directive: Boost's current_function.hpp
+    // defines BOOST_CURRENT_FUNCTION inside the body of an inline function nothing calls,
+    // and the declaration that replaced it took the macro away from every BOOST_TEST.
+    if (input_is_header)
+        for (auto& fn : functions) {
+            if (fn.keep_in_header || fn.usr.empty()) continue;
+            if (referenced.find(fn.usr) != referenced.end()) continue;
+            fn.keep_in_header = true;
+            fn.declare_only = g_declare_only.count(fn.usr) != 0;
+        }
 }
 
 // Narrows the harvested variables to the ones that will actually be moved, and gives each
@@ -3041,12 +3197,48 @@ static std::string generate_preamble(const std::string& source,
             preamble += '\n';
     };
 
+    // The declaration that stands in for a definition taken out of the preamble: inside
+    // the class for a member, otherwise right here, where the definition used to be.
+    auto declare_in_place = [&](const FunctionInfo& fn) {
+        ensure_newline();
+        if (!fn.member_decl.empty()) {
+            preamble += terminate_declaration(apply_static_renames(fn.member_decl, renames));
+            return;
+        }
+        // Only a renamed function needs its declaration here. Its name changed, so a use
+        // in a namespace-scope initialiser retained in the preamble -- the `fn_ptr =
+        // &impl;` idiom -- refers to a name nothing has declared yet, and a declaration
+        // appended at the end of the preamble comes far too late.
+        std::string decl = generate_forward_decl_inplace(fn, stem);
+        if (decl.empty()) return;
+        // The split definition is hoisted out of any unnamed namespace, so the declaration
+        // has to leave it too, or the two get different linkage and the reference goes
+        // unresolved. Closing and reopening the unnamed namespace puts the declaration in
+        // the definition's scope while still keeping it ahead of every use.
+        for (unsigned i = 0; i < fn.unnamed_ns_depth; ++i) preamble += "}\n";
+        preamble += decl + "\n";
+        for (unsigned i = 0; i < fn.unnamed_ns_depth; ++i) preamble += "namespace {\n";
+    };
+
     unsigned pos = 0;
     for (const auto& r : ranges) {
         if (r.start > pos) {
             preamble += apply_static_renames(source.substr(pos, r.start - pos), renames);
         }
-        if (r.keep) {
+        if (r.keep && r.fn && r.fn->declare_only) {
+            // Not emitted by this unit: declared, as it would be if it were split, and no
+            // piece written. The copy stays what it is under an edit to the body (TODO/48).
+            declare_in_place(*r.fn);
+            {
+                const std::string blanked = blank_code_noise(r.fn->body);
+                const size_t decl_end = definition_decl_end(blanked);
+                if (decl_end != std::string::npos && decl_end < r.fn->body.size()) {
+                    const size_t whole = conditionals_closed_by(r.fn->body);
+                    const size_t in_decl = conditionals_closed_by(r.fn->body.substr(0, decl_end));
+                    for (size_t ci = in_decl; ci < whole; ++ci) preamble += "#endif\n";
+                }
+            }
+        } else if (r.keep) {
             ensure_newline();
             unsigned keep_line = offset_to_line(line_offsets, r.start);
             //preamble += "#line " + std::to_string(keep_line) + " \"" + source_path + "\"\n";
@@ -3230,30 +3422,8 @@ static std::string generate_preamble(const std::string& source,
                 }
             }
         } else if (r.fn) {
-            // The definition moved to a split file, so a declaration has to take its
-            // place: inside the class for a member, otherwise right here, where the
-            // definition used to be.
-            ensure_newline();
-            if (!r.fn->member_decl.empty())
-                preamble += terminate_declaration(
-                    apply_static_renames(r.fn->member_decl, renames));
-            else {
-                // Only a renamed function needs its declaration here. Its name changed, so
-                // a use in a namespace-scope initialiser retained in the preamble -- the
-                // `fn_ptr = &impl;` idiom -- refers to a name nothing has declared yet, and
-                // a declaration appended at the end of the preamble comes far too late.
-                std::string decl = generate_forward_decl_inplace(*r.fn, stem);
-                if (!decl.empty()) {
-                    // The split definition is hoisted out of any unnamed namespace, so the
-                    // declaration has to leave it too, or the two get different linkage and
-                    // the reference goes unresolved. Closing and reopening the unnamed
-                    // namespace puts the declaration in the definition's scope while still
-                    // keeping it ahead of every use.
-                    for (unsigned i = 0; i < r.fn->unnamed_ns_depth; ++i) preamble += "}\n";
-                    preamble += decl + "\n";
-                    for (unsigned i = 0; i < r.fn->unnamed_ns_depth; ++i) preamble += "namespace {\n";
-                }
-            }
+            // The definition moved to a split file, so a declaration has to take its place.
+            declare_in_place(*r.fn);
             // The body taken out may close conditionals it did not open: p4c's
             // parseInput.cpp writes `#ifdef SUPPORT_P4_14 T f(a, b) { #else T f(a) { #endif`
             // and the body after -- the `#endif` is past the `{`, so the declaration left
@@ -4447,6 +4617,7 @@ static bool read_harvest(const fs::path& path, HarvestFile& hf) {
         std::getline(ds >> std::ws, d.piece);
         if (d.piece.empty()) return false;      // the field is never absent
         if (d.piece == "-") d.piece.clear();    // kept: no piece was emitted for it
+        // "=" stays: declared only in the copy (TODO/48); nothing carries the body.
         hf.defs.push_back(d);
     }
     if (!std::getline(ifs, line) || line.compare(0, 2, "G ") != 0) return false;
@@ -5969,6 +6140,8 @@ static void emit_split_files(CXTranslationUnit tu,
                 if (!kept) {
                     hd.piece = out_path;
                     hd.piece_body_off = at;
+                } else if (fn.declare_only) {
+                    hd.piece = "=";   // declared in the copy: no piece, no body to patch
                 }
                 hd.body_hash = hash_bytes(body_region);
                 hd.prefix_hash = hash_bytes(fn.body.substr(0, rel_open));
@@ -6373,6 +6546,8 @@ static SplitResult do_split(const std::string& input_path,
 
     std::set<std::string> referenced;
     collect_emitted(tu, abs_path, referenced);
+    declare_only_candidates(harvest, inclusions_of(tu),
+                            fs::path(abs_path).lexically_normal().string(), referenced);
 
     std::vector<VariableInfo> variables;
     {
@@ -6810,7 +6985,14 @@ static bool try_incremental_split(const std::string& split_dir,
     // rewritten copy of the file, and that copy is what has to be patched. The copy sits beside
     // the harvest under the same name as the original; for a definition kept out of the unit's
     // own source, it is the preamble.
-    if (d.piece.empty()) {
+    if (d.piece == "=") {
+        // Declared only in this unit's copy: the copy has no body to patch, no piece
+        // carries one, and the PCH built from the copy is still exact. The edit changes
+        // nothing here (TODO/48).
+        if (verbose)
+            std::cerr << "[cpp-splitter] re-sliced nothing: this unit declares the edited"
+                         " definition and does not emit it\n";
+    } else if (d.piece.empty()) {
         const std::string prefix = now.substr(d.start, d.body_open - d.start);
         const size_t len = d.end - d.body_open;
         const std::string stem = fs::path(file).stem().string();

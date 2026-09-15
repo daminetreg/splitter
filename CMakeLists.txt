@@ -212,6 +212,17 @@ add_test(
           "-DEXPECT=2 5 3"
           -P ${cpp_splitter_test_dir}/cmake/RunTwoUnitsTest.cmake)
 
+# A header definition a unit does not emit is declared in that unit's copy: an edit to the
+# body leaves the copy, the PCH and the pieces alone. TODO/48.
+add_test(
+  NAME launcher.stable_copy
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE_DIR=${cpp_splitter_test_dir}/stable_copy
+          -DWORKDIR=${cpp_splitter_test_output}/stable_copy
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunStableCopyTest.cmake)
+
 # A virtual key function written under a macro the file undefines; the other unit expects
 # the vtable from this one. TODO/47.
 add_test(
