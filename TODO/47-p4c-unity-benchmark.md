@@ -44,3 +44,44 @@ emits the function as a piece and every unit includes the header.
 - `p4fmt` and `p4c-graphs` from each build format and version-print the same.
 - Results in `benchmarks/p4c-unity.md`, with the unity batch count and what an edit costs
   in each configuration.
+
+## Outcome
+
+Numbers in `benchmarks/p4c-unity.md`. Splitting p4c -- C++20, libc++, a bison/flex
+front end, 10k-line generated IR headers -- found twelve defects, each with a fixture that
+fails on the previous splitter:
+
+1. a header's copy was placed under the longest include directory, not where the unit's own
+   `#include` spelling looks (`launcher.spelled_include`);
+2. a header that is not split but includes a split header beside itself was read as the
+   original, and the original beside it came back (same fixture);
+3. an in-place `inline` variable was emitted only where used: p4c's `indent_t::tabsz` was
+   in no object (`launcher.variable_read_elsewhere`);
+4. a definition whose exception specification a system header supplies -- `void free(void
+   *)` -- got a declaration the compiler rejected (`split.system_decl_main`);
+5. `static bool a, b;`, `static char pool[N];`, `static T (*t[])(U)` and variables in
+   unnamed namespaces stayed in the preamble, one object per piece and nothing said so
+   (`split.static_shapes_main`); a static no rule can move now declines the unit;
+6. a kept internal-linkage function holding a local static -- the cstring interner -- was
+   one cache per piece; the unit declines (`split.local_static_intern_declines`);
+7. the system include paths were probed without the unit's `-stdlib`
+   (`launcher.stdlib_libcxx`);
+8. `auto &f()`, `const auto &f() const`, `auto *f()` were split like ordinary functions
+   (`split.deduced_ref_return_main`);
+9. one macro invocation defining out-of-line members of several classes stayed in the
+   preamble (`split.macro_member_group_main`);
+10. a branch-dependent declarator whose `#endif` sits in the body left the `#ifdef` open in
+    the preamble (`split.conditional_body_endif_main`);
+11. a macro group naming a macro the unit undefines, and a virtual key function written
+    under such a macro, are compiled by the definitions piece from a variant of the unit
+    (`split.macro_group_redefined_main`, `launcher.undef_macro_virtual`);
+12. the pieces never loaded the preamble PCH: clang consults `<header>.gch/` only for
+    `-include`. With `-include`, `-fpch-instantiate-templates` and content-validated
+    prerequisites, a piece of `def_use.cpp` went from 3.7s to 0.59s -- and a header body
+    edit now rebuilds the pieces that inlined the old body, which every earlier benchmark
+    left stale.
+
+The result on p4c: the split's full build is 8.3x plain and a body edit in a header every
+unit includes is 6.7x plain, because 204 copies of the header change and 194 PCHs with
+them. The header touch is 0.18x. Unity is 0.57–0.62x on every row but the source edit.
+TODO/48 follows from this.
