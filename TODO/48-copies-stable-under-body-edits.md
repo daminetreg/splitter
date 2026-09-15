@@ -52,3 +52,27 @@ Then measure again: p4c's body row, OpenCV's and Spirit's, all with the PCH in u
   measured with stale objects.
 - Boost.Filesystem and Boost.Spirit: 0 fallbacks, 0 declined; the split programs print
   what the plain ones print.
+
+## Outcome
+
+Implemented: a header definition the unit does not emit, of a shape the split rules accept,
+is declared in the unit's copy and gets no piece; the re-slice records it with `=` and
+does nothing for an edit inside it (`launcher.stable_copy`).
+
+Which definitions qualify turned out to need more than the emit graph. The first version
+declared everything the graph did not reach and broke Boost.Spirit twice: a body holding a
+`#define` (Boost's `current_function.hpp` defines `BOOST_CURRENT_FUNCTION` inside a helper
+nothing calls), then calls from templates -- `this->has_trivial_copy_and_destroy()` in
+Boost.Function is a dependent expression with no referenced declaration, and 1963
+references went unresolved -- then operators and `begin`/`end`, called without being named.
+The rule now is textual: a candidate named anywhere in the unit's sources outside the
+candidates' own bodies keeps its body, decided over every file the unit reads to a
+fixpoint, with operators, `begin`/`end`/`get` and the coroutine hooks never candidates.
+
+On p4c (`benchmarks/p4c-unity.md`): an edit to `cstring::findlast()`, declared only in 205
+of 218 copies, costs 23.0s against 684.1s for `cstring::size()`, which every unit names and
+no copy declares only -- 0.22x of plain's 102.6s. The acceptance criterion "the 204
+non-emitting units recompile nothing" holds for a function the unit does not name; it
+cannot hold for one whose name a template in the unit uses, and `size` is such a name in
+every unit. OpenCV's and Spirit's body rows are still to be measured again with the PCH in
+use.

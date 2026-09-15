@@ -1,6 +1,7 @@
 # p4c: plain, unity build, split
 
-One run of `./benchmark-p4c.sh` on 15 September 2026, TODO/47. Three configurations of the
+One run of `./benchmark-p4c.sh` on 15 September 2026, TODO/47, plus the split alone measured
+again after TODO/48 (`MODES=split`) with a second body probe. Three configurations of the
 same tree, in the five scenarios of the other benchmarks; the build phase is timed,
 configuration is not.
 
@@ -32,7 +33,10 @@ that.
 **full** -- configure, then build. **no-op** -- build again. **one source** -- `touch
 frontends/p4/callGraph.cpp`. **one header** -- `touch lib/cstring.h`, which every unit
 includes. **one body** -- one line added to the body of `cstring::size()` in
-`lib/cstring.h`: an inline member every unit includes and 14 units emit as a piece.
+`lib/cstring.h`: an inline member every unit includes, 14 units emit as a piece, and every
+unit names (`size` is a member of every container), so every copy keeps its body.
+**one body B** -- the same in `cstring::findlast()`: emitted by 2 units, named by 11 more,
+and declared only in the other 205 copies (TODO/48).
 
 ## Results
 
@@ -43,6 +47,14 @@ includes. **one body** -- one line added to the body of `cstring::size()` in
 | one source | 3.7s | 10.0s | 0.7s | 2.67x | 0.19x | 0 | 0 |
 | one header | 106.8s | 63.6s | **19.1s** | 0.60x | **0.18x** | 0 | 2 |
 | one body | 102.6s | 63.9s | 683.1s | 0.62x | 6.66x | 0 | 2 |
+| one body B | — | — | **23.0s** | — | **0.22x** of plain's one body | 0 | 2 |
+
+The split after TODO/48, measured alone: full 965.5s, one header 19.4s, one body (size)
+684.1s -- 194 PCHs rebuilt, 9689 piece compiles, as before, since `size` is named in every
+unit and no copy declares it only -- and one body B (findlast) 23.0s: 203 units declare
+it only and change nothing, 2 re-slice their piece, 2 PCHs are rebuilt, 50 pieces compile.
+The plain and unity columns of row B were not measured; plain's `one body` row, which
+rebuilds every includer whatever the function, is the comparison.
 
 All three `p4fmt` binaries format the same program identically (`9121fd3014c8`), all three
 `p4c-graphs` print the same version. Build trees: plain 326M, unity 250M, split 34G, with
@@ -71,17 +83,26 @@ still 78s of CPU against 7s.
 **The header touch is 0.18x plain** (19.1s): every unit reuses its split, its PCH is
 checked against the contents of its prerequisites and kept, and nothing recompiles.
 
-**The body edit is 6.66x plain** (683s), and this is the finding of the run. The edited
-`size()` is emitted as a piece by 14 units; those re-slice and recompile one piece. The
-other 204 units keep `size()` defined in class in their copy of `cstring.h`, so their copy
-changes, the preamble PCH built from it is stale -- 194 PCHs rebuilt -- and every piece
-compiled against it is recompiled: 9689 piece compiles. This is the correct behaviour: a
-piece that inlined the old body has to be rebuilt. The earlier body rows of
-`opencv-local-split.md` and `boost-spirit-rbe-summary-9-Sep-2026.md` did not pay this cost
-because the pieces never read the PCH (see below) and the up-to-date check looked only at
-the piece's own text and the preamble: objects that had inlined the old body were kept.
-Those rows measured the re-slice and left stale objects behind. TODO/48 is about keeping the
-copies stable under a body edit instead.
+**The body edit is 6.66x plain** (683s). The edited `size()` is emitted as a piece by 14
+units; those re-slice and recompile one piece. The other 204 units keep `size()` defined in
+class in their copy of `cstring.h`, so their copy changes, the preamble PCH built from it
+is stale -- 194 PCHs rebuilt -- and every piece compiled against it is recompiled: 9689
+piece compiles. This is the correct behaviour: a piece that inlined the old body has to be
+rebuilt. The earlier body rows of `opencv-local-split.md` and
+`boost-spirit-rbe-summary-9-Sep-2026.md` did not pay this cost because the pieces never
+read the PCH (see below) and the up-to-date check looked only at the piece's own text and
+the preamble: objects that had inlined the old body were kept. Those rows measured the
+re-slice and left stale objects behind.
+
+**Body B is 0.22x of plain's body edit** (23.0s against 102.6s). After TODO/48 a unit's copy
+of a header *declares* a definition the unit does not emit and names nowhere else -- not
+in a template, whose calls libclang cannot resolve, not in a kept body, not in an
+initialiser -- so an edit to that body leaves 203 copies, their PCHs and their pieces
+untouched: 2 units re-slice one piece, 2 PCHs are rebuilt, 50 pieces compile. `size()` does
+not qualify: every unit names `size` for one container or another, and a name is all a
+template's call leaves to go by. Of the 755k kept definitions across the copies, 19852 are
+declared only; the most frequent are `IR::ParameterList::getParameter` (504 copies),
+`IR::IAnnotated::addOrReplaceAnnotation` (350) and `cstring::own` (207).
 
 ## What the run changed in the splitter
 

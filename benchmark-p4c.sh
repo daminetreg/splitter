@@ -8,7 +8,12 @@
 #   no-op        build again with nothing changed.
 #   one source   touch frontends/p4/callGraph.cpp. Timestamp only.
 #   one header   touch lib/cstring.h, which every unit includes. Timestamp only.
-#   one body     change the body of cstring::size() in lib/cstring.h.
+#   one body     change the body of cstring::size() in lib/cstring.h: an inline member every
+#                unit includes, 14 emit as a piece, and every unit names (`size` is a
+#                member of every container), so every copy keeps its body.
+#   one body B   change the body of cstring::findlast() in lib/cstring.h: emitted by 2
+#                units, named by 11 more, and declared only in the other 205 copies
+#                (TODO/48), which an edit to its body leaves alone.
 #
 # The corpus is p4c's own code without the control plane (which would pull Protobuf and
 # the backends that need it) and without the GTest suite: lib, ir, frontends, midend, the
@@ -28,6 +33,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 P4C="$REPO/example/p4c"
 P4C_REV=8192431
 JOBS="${JOBS:-16}"
+# Which configurations to build and time; the others print `-`. MODES="split" re-measures
+# the split alone.
+MODES="${MODES:-plain unity split}"
 DEPS="$REPO/build/p4c-deps"
 CLANG_ROOT=/usr/local/share/.tipi/clang/4f846ee
 PLAIN=/tmp/p4c-plain
@@ -86,10 +94,22 @@ src = src.replace(signature, signature + "        (void)%s;  // benchmark probe\
 open(path, "w").write(src)
 PROBE
 }
+patch_body_b() {
+    python3 - "$BODY_HEADER" "$1" <<'PROBE'
+import sys
+path, marker = sys.argv[1], sys.argv[2]
+body = "const char *findlast(int c) const { return str ? strrchr(str, c) : str; }"
+src = open(path).read()
+assert src.count(body) == 1, "benchmark probe target moved"
+src = src.replace(body, body.replace("{ return", "{ (void)%s; return" % marker), 1)
+open(path, "w").write(src)
+PROBE
+}
 
 ms() { date +%s%3N; }
-human() { awk -v v="$1" 'BEGIN { printf "%6.1fs", v/1000 }'; }
-ratio_of() { awk -v a="$1" -v b="$2" 'BEGIN { if (a > 0) printf "%.2f", b/a; else printf "-" }'; }
+human() { if [ "$1" = "-" ]; then printf "%9s" "-"; else awk -v v="$1" 'BEGIN { printf "%6.1fs", v/1000 }'; fi; }
+has_mode() { case " $MODES " in *" $1 "*) return 0;; *) return 1;; esac; }
+ratio_of() { if [ "$1" = "-" ] || [ "$2" = "-" ]; then printf "-"; else awk -v a="$1" -v b="$2" 'BEGIN { if (a > 0) printf "%.2f", b/a; else printf "-" }'; fi; }
 fallbacks() { [ -r "$SPLIT_LOG" ] || { echo 0; return; }; grep -c 'falling back' "$SPLIT_LOG" || true; }
 declined() { [ -r "$SPLIT_LOG" ] || { echo 0; return; }; grep -c '\[cpp-splitter\] not splitting ' "$SPLIT_LOG" || true; }
 
@@ -138,44 +158,68 @@ report() {
         "$(ratio_of "$2" "$3")" "$(ratio_of "$2" "$4")" "$(fallbacks)" "$(declined)"
 }
 
-configure "$PLAIN"
-configure "$UNITY" -DCMAKE_UNITY_BUILD=ON
-configure "$SPLIT" -DCMAKE_CXX_COMPILER_LAUNCHER="$REPO/build/cpp-splitter" \
+# build_mode <mode> -> elapsed ms, or `-` when the mode is not measured.
+build_mode() {
+    case "$1" in
+        plain) has_mode plain && build "$PLAIN" || echo "-" ;;
+        unity) has_mode unity && build "$UNITY" || echo "-" ;;
+        split) has_mode split && build "$SPLIT" || echo "-" ;;
+    esac
+}
+has_mode plain && configure "$PLAIN"
+has_mode unity && configure "$UNITY" -DCMAKE_UNITY_BUILD=ON
+has_mode split && configure "$SPLIT" -DCMAKE_CXX_COMPILER_LAUNCHER="$REPO/build/cpp-splitter" \
                    -DCMAKE_PROJECT_absl_INCLUDE="$ABSL_PLAIN"
-p=$(build "$PLAIN"); u=$(build "$UNITY"); s=$(build "$SPLIT")
+p=$(build_mode plain); u=$(build_mode unity); s=$(build_mode split)
 report "full" "$p" "$u" "$s"
-cp "$SPLIT_LOG" "$SPLIT_LOG.full"
-full_units=$(grep -c 'Building CXX' "$SPLIT_LOG.full" || true)
-plain_units=$(grep -c 'Building CXX' "$PLAIN.log" || true)
-unity_compiles=$(grep -c 'Building CXX' "$UNITY.log" || true)
-unity_batches=$(grep 'Building CXX' "$UNITY.log" | grep -c 'unity_' || true)
+[ -r "$SPLIT_LOG" ] && cp "$SPLIT_LOG" "$SPLIT_LOG.full"
+full_units=$(grep -c 'Building CXX' "$SPLIT_LOG.full" 2>/dev/null || true)
+plain_units=$(grep -c 'Building CXX' "$PLAIN.log" 2>/dev/null || true)
+unity_compiles=$(grep -c 'Building CXX' "$UNITY.log" 2>/dev/null || true)
+unity_batches=$(grep 'Building CXX' "$UNITY.log" 2>/dev/null | grep -c 'unity_' || true)
 
-build "$PLAIN" >/dev/null; build "$UNITY" >/dev/null; build "$SPLIT" >/dev/null
-report "no-op" "$(build "$PLAIN")" "$(build "$UNITY")" "$(build "$SPLIT")"
+build_mode plain >/dev/null; build_mode unity >/dev/null; build_mode split >/dev/null
+report "no-op" "$(build_mode plain)" "$(build_mode unity)" "$(build_mode split)"
 
-touch "$SOURCE"; p=$(build "$PLAIN")
-touch "$SOURCE"; u=$(build "$UNITY")
-touch "$SOURCE"; s=$(build "$SPLIT")
+touch "$SOURCE"; p=$(build_mode plain)
+touch "$SOURCE"; u=$(build_mode unity)
+touch "$SOURCE"; s=$(build_mode split)
 report "one source" "$p" "$u" "$s"
 
-touch "$HEADER"; p=$(build "$PLAIN")
-touch "$HEADER"; u=$(build "$UNITY")
-touch "$HEADER"; s=$(build "$SPLIT")
+touch "$HEADER"; p=$(build_mode plain)
+touch "$HEADER"; u=$(build_mode unity)
+touch "$HEADER"; s=$(build_mode split)
 report "one header" "$p" "$u" "$s"
 
-cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 2; p=$(build "$PLAIN")
-cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 3; u=$(build "$UNITY")
-cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 4; s=$(build "$SPLIT")
+cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 2; p=$(build_mode plain)
+cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 3; u=$(build_mode unity)
+cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body 4; s=$(build_mode split)
 report "one body" "$p" "$u" "$s"
-body_resliced=$(grep -c 're-sliced its piece' "$SPLIT_LOG" || true)
-body_parsed=$(grep -c '^\[cpp-splitter\] libclang args:' "$SPLIT_LOG" || true)
-body_refusals=$(grep -oE '\[cpp-splitter\] full split: .*' "$SPLIT_LOG" | sort | uniq -c | sort -rn | head -5 || true)
+body_stats() {  # body_stats <label>
+    local resliced declared compiles pch parsed
+    resliced=$(grep -c 're-sliced its piece' "$SPLIT_LOG" || true)
+    declared=$(grep -c 're-sliced nothing' "$SPLIT_LOG" || true)
+    compiles=$(grep -c 'compile (seq)\|clang++ .* -c -o' "$SPLIT_LOG" || true)
+    pch=$(grep -c 'Building PCH' "$SPLIT_LOG" || true)
+    parsed=$(grep -c '^\[cpp-splitter\] libclang args:' "$SPLIT_LOG" || true)
+    echo "==> $1: $resliced unit(s) re-sliced, $declared declared it only and changed nothing, $parsed re-parsed; $pch PCH(s) rebuilt, $compiles piece compile(s)"
+    grep -oE '\[cpp-splitter\] full split: .*' "$SPLIT_LOG" | sort | uniq -c | sort -rn | head -5 | sed 's/^/    /' || true
+}
+body_stats_a=$(has_mode split && body_stats "one body" || true)
+cp "$BODY_BACKUP" "$BODY_HEADER"
+# Settle every tree on the restored header before the second body probe.
+build_mode plain >/dev/null; build_mode unity >/dev/null; build_mode split >/dev/null
+cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body_b 2; p=$(build_mode plain)
+cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body_b 3; u=$(build_mode unity)
+cp "$BODY_BACKUP" "$BODY_HEADER"; patch_body_b 4; s=$(build_mode split)
+report "one body B" "$p" "$u" "$s"
+body_stats_b=$(has_mode split && body_stats "one body B" || true)
 cp "$BODY_BACKUP" "$BODY_HEADER"
 
 echo
 echo "==> full build: $plain_units C++ compiles plain (Abseil: $(grep 'Building CXX' "$PLAIN.log" | grep -c abseil || true)); unity $unity_compiles, of which $unity_batches unity batches of p4c sources"
-echo "==> one body: $body_resliced unit(s) re-sliced, $body_parsed re-parsed"
-[ -n "$body_refusals" ] && echo "$body_refusals" | sed 's/^/    /'
+[ -n "$body_stats_a" ] && echo "$body_stats_a"
+[ -n "$body_stats_b" ] && echo "$body_stats_b"
 
 echo
 echo "==> fallbacks and declines on the full split build, of $full_units compiles: $(grep -c 'falling back' "$SPLIT_LOG.full" || true) fell back, $(grep -c '\[cpp-splitter\] not splitting ' "$SPLIT_LOG.full" || true) declined"
@@ -205,11 +249,14 @@ PY
 echo
 echo "==> programs"
 sample="$P4C/testdata/p4_16_samples/arith-bmv2.p4"
-for name in plain unity split; do
+for name in $MODES; do
     dir=$([ "$name" = plain ] && echo "$PLAIN" || { [ "$name" = unity ] && echo "$UNITY" || echo "$SPLIT"; })
     printf '    %-6s p4fmt %s  p4c-graphs %s\n' "$name" \
         "$("$dir/p4fmt" "$sample" | md5sum | cut -c1-12)" \
         "$("$dir/p4c-graphs" --version 2>&1 | head -1 | cut -c1-60)"
 done
-echo "    build tree: plain $(du -sh "$PLAIN" | cut -f1), unity $(du -sh "$UNITY" | cut -f1), split $(du -sh "$SPLIT" | cut -f1)"
-echo "    split pieces generated: $(find "$SPLIT" -name '*.cpp' -path '*.split*' | wc -l)"
+for name in $MODES; do
+    dir=$([ "$name" = plain ] && echo "$PLAIN" || { [ "$name" = unity ] && echo "$UNITY" || echo "$SPLIT"; })
+    echo "    build tree ($name): $(du -sh "$dir" | cut -f1)"
+done
+has_mode split && echo "    split pieces generated: $(find "$SPLIT" -name '*.cpp' -path '*.split*' | wc -l)"
