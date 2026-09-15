@@ -3,8 +3,8 @@
 Run `python3 presentation/build.py` to generate the offline `slides.html`.
 `--check` renders and validates every input without changing the deck; `--watch`
 rebuilds after an input changes. It watches exactly the manifest, listed
-Markdown slides, shared snippets, and `template.html`, `theme.css`, and
-`runtime.js`; generated output is excluded even when it is placed nearby.
+Markdown slides, shared snippets, `template.html`, `theme.css`, `runtime.js`, and the
+builder itself (`build.py`, `render-mermaid.py`), restarting when that changes; generated output is excluded even when it is placed nearby.
 `--source DIR` and `--output PATH` make temporary decks or CI destinations
 explicit. Builds are atomic, so an authoring error leaves the last successful
 deck untouched. Errors name the Markdown file and source line.
@@ -40,7 +40,8 @@ The small layout vocabulary is shown by the migrated slides:
 * `::: cards 2`, `::: cards 3`, and `::: metrics 3` use
   `- title-or-value | tone | description`; cards accept an optional fourth
   popup reference. See `06-classification.md` and `21-benchmark-actions.md`.
-* `list` has `- item` rows and renders a plain bullet list (`01d-graph-optimizations.md`).
+* `list` has `- item` rows and renders a bullet list; indent a row to nest it, any depth
+  (`01d-graph-optimizations.md`).
 * `logo` (no body) places the deck's EngFlow logo, large, as in `01a-about.md`.
 * `mermaid` holds a mermaid diagram as its body; the build draws it once to
   `diagrams/<hash>.svg` (`render-mermaid.py`: headless Chrome, dark theme) and inlines the

@@ -115,6 +115,32 @@ def parse_markdown(path: Path, text: str) -> Slide:
         blocks.append(Block("paragraph", "", prose, n))
     return Slide(path, meta, blocks)
 
+def render_list(block):
+    """`- item` rows, nested by indentation: a row indented deeper than the one before opens
+    a sub-list, any depth. The indent unit is whatever the first nested row uses."""
+    rows = []
+    for raw in block.body.splitlines():
+        if not raw.strip(): continue
+        stripped = raw.lstrip()
+        if not stripped.startswith("- "):
+            fail(block.path, block.line, "list rows must start with '- ' (indent for nesting)")
+        rows.append((len(raw) - len(stripped), stripped[2:].strip()))
+    if not rows:
+        fail(block.path, block.line, "list has no rows")
+    html_out, stack = [], []   # stack: the indent of each open list
+    for indent, text in rows:
+        if not stack:
+            stack.append(indent); html_out.append('<ul class="bullets">')
+        elif indent > stack[-1]:
+            stack.append(indent); html_out.append("<ul>")
+        else:
+            while len(stack) > 1 and indent < stack[-1]:
+                stack.pop(); html_out.append("</li></ul>")
+            html_out.append("</li>")
+        html_out.append(f"<li>{inline(text)}")
+    html_out.append("</li>" + "</ul></li>" * (len(stack) - 1) + "</ul>")
+    return "".join(html_out)
+
 def lines(block, minimum=1):
     values = [x[2:] for x in block.body.splitlines() if x.startswith("- ")]
     if len(values) < minimum:
@@ -206,8 +232,7 @@ def render_block(block, snippets):
             return figures[0]
         return '<div class="grid two mermaid-columns">' + "".join(figures) + "</div>"
     if k == "list":
-        items = "".join(f"<li>{inline(x)}</li>" for x in lines(block))
-        return f'<ul class="bullets">{items}</ul>'
+        return render_list(block)
     if k == "logo":
         # The deck's one embedded EngFlow SVG; the runtime fills src from the footer logo.
         return '<img class="logo-large" alt="EngFlow" data-logo="engflow">'
@@ -489,6 +514,7 @@ def watch_inputs(source, output=None):
     if not manifest.exists(): fail(manifest, 1, "missing explicit manifest.txt")
     names = [x.strip() for x in manifest.read_text().splitlines() if x.strip() and not x.startswith("#")]
     paths = [manifest, source.parent / "snippets.md", HERE / "template.html", HERE / "theme.css", HERE / "runtime.js", HERE / "engflow.svg"]
+    paths += [HERE / "build.py", HERE / "render-mermaid.py"]   # the builder itself: see --watch
     for name in names:
         if "/" not in name and name.endswith(".md"):
             paths.append(source / name)
@@ -525,6 +551,12 @@ def main(argv=None):
                     time.sleep(.5)
                     continue
                 if now != stamps:
+                    # The builder changed under the watcher: the code in memory is stale, so
+                    # start over with the new one rather than keep building with the old.
+                    builder = {str(HERE / "build.py"), str(HERE / "render-mermaid.py")}
+                    if any(a != b for a, b in zip(stamps, now) if a[0] in builder):
+                        print("presentation: builder changed, restarting --watch", flush=True)
+                        os.execv(sys.executable, [sys.executable, str(HERE / "build.py")] + (argv or sys.argv[1:]))
                     stamps = now
                     try: once()
                     except (SourceError, OSError) as e: print(f"presentation: {e}", file=sys.stderr)
