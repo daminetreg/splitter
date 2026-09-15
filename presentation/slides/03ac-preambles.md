@@ -3,14 +3,18 @@ chapter: splitter waltkthrough
 chapter-label: 04 / Two preambles
 notes: Section 4 — two preamble layers. Do not claim -fkeep-inline-functions.
 ---
-## Declarations everywhere.  
-{violet}One owner{/violet} for unique definitions.
+## PCH preamble
+{split}Parse common includes and declarations **once**{/split} across split-body pieces
 
 ::: cards 2
-- use_mylib_preamble.h |  | Includes + declarations. Every piece includes it; its matching compiler PCH is reused. | preamble
-- use_mylib.cpp_definitions.h |  | Kept external definitions, including main. Included by exactly one owner piece. | definitions
+- use_mylib_preamble.h | split | **Common Includes + declarations**. Every split-body includes it; its matching compiler PCH is reused. | preamble
+- use_mylib.cpp_definitions.h | violet | Kept external definitions, including main. Included by exactly one owner piece. | definitions
 :::
 
 ::: rationale
-Rationale — Share parsed declarations through a compiler PCH while assigning definitions that may exist once to a single, explicit object owner.
+Share parsed declarations through a compiler PCH while assigning unique definitions that may exist once to a single, explicit object owner.
+:::
+
+::: tiny
+PCH = Pre Compiled Header
 :::

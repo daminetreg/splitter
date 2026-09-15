@@ -1,4 +1,3 @@
-# This is the only ordering authority. One entry is one visible slide.
 01-opening.md
 01a-about.md
 01b-build-graph.md
@@ -16,18 +15,16 @@
 03aa-mirror.md
 03ab-classification.md
 03ac-preambles.md
-03b-split-graph.md
-04-contract.md
-05-parse.md
-09-header-piece.md
-10-context.md
-11-paths.md
-12-records.md
-13-recompose.md
-13a-modules.md
-13b-modules-tree.md
-13c-modules-mirror.md
-13d-modules-piece.md
+03ad-header-piece.md
+03ae-link.md
+03ba-modules.md
+03bb-modules-tree.md
+03bc-modules-mirror.md
+03bd-modules-piece.md
+03c-split-graph.md
+04-architecture.md
+04a-parse.md
+04b-records.md
 14-remote.md
 15-controlled-comparison.md
 16-semantic-diff.md

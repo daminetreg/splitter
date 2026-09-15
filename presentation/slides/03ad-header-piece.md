@@ -1,10 +1,9 @@
 ---
-chapter: Architecture
+chapter: splitter waltkthrough
 chapter-label: 05 / Header piece
 notes: Each header piece includes the unit preamble before the rewritten header. It carries #line and used attribute; no claim about -fkeep-inline-functions.
 ---
-## Context first.  
-Body second.
+## split-body pieces
 
 ```cpp
 // include/mylib.h_1_add.cpp
@@ -17,5 +16,5 @@ inline int add(int a, int b) { return a + b; }
 ```
 
 ::: rationale
-Rationale — Mirror included paths and compile each moved body under its consumer’s declaration context so resolution remains equivalent.
+Mirror included paths and compile each moved body under its consumer’s declaration context so resolution remains equivalent.
 :::

@@ -10,9 +10,9 @@ context, {accent}emission{/accent}.
 - include prefix | 
 - libclang PCH\nhash + deps | teal
 - one AST parse | 
-- definitions + spans\nconditionals + reach | split
+- definitions USR + bytes extent/location\n + whether inline body are called and hence should/should not be emitted | split
 :::
 
 ::: rationale
-Rationale — Cache the expensive include prefix by content and parse once to collect exact source extents and inclusion reachability.
+USR = Unified Symbold Resolution, Clang AST unique entity identifier (_e.g._  `c:@N@demo@S@Widget@F@value#1` for `demo::Widget::value() const`)
 :::
