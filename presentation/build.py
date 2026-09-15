@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 KNOWN = {"flow", "fission", "cards", "tree", "rationale", "metrics", "bars", "legend",
          "callout", "tiny", "popup", "map",
          "section-map", "sizes", "binary-trace", "paths", "single-bars",
-         "code-columns", "semantic", "logic", "flag", "logo"}
+         "code-columns", "semantic", "logic", "flag", "logo", "mermaid"}
 
 class SourceError(Exception):
     def __init__(self, path, line, message):
@@ -186,6 +186,16 @@ def render_block(block, snippets):
             language = f' data-language="{html.escape(match.group(1), quote=True)}"' if match.group(1) else ""
             code.append(f'<pre class="code"{language}>{html.escape(match.group(2))}</pre>')
         return '<div class="grid two">' + "".join(code) + "</div>"
+    if k == "mermaid":
+        # Pre-rendered by render-mermaid.py, keyed on the block's text, so the deck stays
+        # one offline file. The source stays here, in the slide, as the thing to edit.
+        import hashlib
+        digest = hashlib.sha1(b.strip().encode()).hexdigest()[:12]
+        svg = HERE / "diagrams" / (digest + ".svg")
+        if not svg.exists():
+            fail(block.path, block.line,
+                 f"mermaid diagram not rendered yet ({digest}); run presentation/render-mermaid.py")
+        return f'<figure class="mermaid-figure">{svg.read_text()}</figure>'
     if k == "logo":
         # The deck's one embedded EngFlow SVG; the runtime fills src from the footer logo.
         return '<img class="logo-large" alt="EngFlow" data-logo="engflow">'

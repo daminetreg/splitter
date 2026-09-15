@@ -10,7 +10,7 @@ explicit. Builds are atomic, so an authoring error leaves the last successful
 deck untouched. Errors name the Markdown file and source line.
 
 `slides/manifest.txt` is the sole ordering mechanism. Each listed file is one
-visible slide, and all 33 source files are deliberately separate. A slide has
+visible slide, and all 34 source files are deliberately separate. A slide has
 front matter:
 
 ```markdown
@@ -41,6 +41,9 @@ The small layout vocabulary is shown by the migrated slides:
   `- title-or-value | tone | description`; cards accept an optional fourth
   popup reference. See `06-classification.md` and `21-benchmark-actions.md`.
 * `logo` (no body) places the deck's EngFlow logo, large, as in `01a-about.md`.
+* `mermaid` holds a mermaid diagram as its body; `render-mermaid.py` draws it once to
+  `diagrams/<hash>.svg` (headless Chrome, dark theme) and the build inlines the SVG, so the
+  deck stays offline. Rerun the script after editing a diagram. See `01b-build-graph.md`.
 * `tree`, `rationale`, `tiny`, `callout`, and `flag` contain normal prose;
   see `03-input.md` and `15-controlled-comparison.md`.
 * `legend` has `- label | class`, and `bars` has
