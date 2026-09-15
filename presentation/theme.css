@@ -152,7 +152,8 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .slide[data-layout="section-map"] .tiny{margin-top:.5rem;font-size:.65rem}
 }
 
-@media(max-width:700px){.two,.three,.semantic,.trace-layout{grid-template-columns:1fr}
+@media(max-width:700px){.two,.three,.semantic,.trace-layout,.mermaid-columns{grid-template-columns:1fr}
+.mermaid-arrow{transform:rotate(90deg)}
 .logic{grid-template-columns:1fr;justify-items:start}
 .decision{clip-path:none;width:auto;height:auto;padding:1rem}
 .arrow{transform:rotate(90deg)}
@@ -218,7 +219,8 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .slide[data-layout="quote"] .lead{max-width:1000px;font-size:clamp(1.5rem,3vw,2.7rem);line-height:1.3;color:var(--ink,#eef3f1);font-weight:500}
 .slide[data-layout="quote"] .tiny{margin-top:1.6rem}
 .mermaid-figure{margin:1.4rem 0 0;max-width:1400px}
-.mermaid-columns{margin-top:1.2rem;max-width:1400px;align-items:start}
+.mermaid-columns{display:grid;grid-template-columns:1fr auto 1fr;gap:clamp(.6rem,1.5vw,1.4rem);margin-top:1.2rem;max-width:1400px;align-items:center}
+.mermaid-arrow{font-size:clamp(3rem,7vw,6.5rem);line-height:1;color:var(--teal);text-align:center;padding:0 .1em}
 .mermaid-columns .mermaid-figure{margin:0}
 .mermaid-columns .mermaid-figure svg{max-height:48vh}
 .mermaid-columns figcaption,.mermaid-figure figcaption{font:.68rem var(--mono);color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:.4rem}

@@ -47,7 +47,9 @@ The small layout vocabulary is shown by the migrated slides:
   `diagrams/<hash>.svg` (`render-mermaid.py`: headless Chrome, dark theme) and inlines the
   SVG, so the deck stays offline. `--watch` re-renders an edited diagram by itself; commit
   the SVG, since a machine without Chrome can only build from it. See `01b-build-graph.md`. `mermaid-columns`
-  holds two diagrams separated by `---`, side by side (`01c-unity-build.md`).
+  holds two diagrams separated by `---`, side by side with a large → between them: the
+  graph before and after a transformation (`01c-unity-build.md`); an optional `l:r` argument
+  sets the two widths (`01ca-split-build.md` uses `2:3`).
 * `tree`, `rationale`, `tiny`, `callout`, and `flag` contain normal prose;
   see `03-input.md` and `15-controlled-comparison.md`.
 * `legend` has `- label | class`, and `bars` has

@@ -230,7 +230,15 @@ def render_block(block, snippets):
             figures.append(f'<figure class="mermaid-figure">{svg.read_text()}</figure>')
         if k == "mermaid":
             return figures[0]
-        return '<div class="grid two mermaid-columns">' + "".join(figures) + "</div>"
+        # Before and after, with the transformation arrow between them. An optional `l:r`
+        # argument sets the width ratio of the two, e.g. `::: mermaid-columns 2:3`.
+        style = ""
+        if a.strip():
+            match = re.fullmatch(r"(\d+):(\d+)", a.strip())
+            if not match: fail(block.path, block.line, "mermaid-columns takes a width ratio like 2:3")
+            style = f' style="grid-template-columns:minmax(0,{match.group(1)}fr) auto minmax(0,{match.group(2)}fr)"'
+        return (f'<div class="mermaid-columns"{style}>' + figures[0] +
+                '<div class="mermaid-arrow" aria-hidden="true">→</div>' + figures[1] + "</div>")
     if k == "list":
         return render_list(block)
     if k == "logo":
