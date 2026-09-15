@@ -24,7 +24,9 @@ deliberate break and {accent}semantic colour{/accent}.
 ```
 
 Ordinary paragraphs are Markdown prose. Use `**strong**`, `*italic*` (or `_italic_`
-between non-word characters), `` `code` `` for an inline code span, two trailing spaces
+between non-word characters), `` `code` `` for an inline code span, `:fa-github:` for a Font Awesome
+icon (its SVG inlined from `presentation/icons/<name>.svg`; add icons from Font Awesome's
+`svgs/` tree), two trailing spaces
 for a deliberate line break, and `{accent}`, `{violet}`, `{split}`, or `{red}`
 with the matching closing tag for the existing semantic colours. Fenced code
 is literal, safely escaped, and receives the deck code treatment. Raw HTML is

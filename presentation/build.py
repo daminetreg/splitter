@@ -166,7 +166,20 @@ def inline(text):
     text = re.sub(r"(?<![\w])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w])", r"<em>\1</em>", text)
     text = re.sub(r"\{(accent|violet|split|red)\}(.+?)\{/\1\}",
                   r'<span class="\1">\2</span>', text)
+    text = re.sub(r":fa-([a-z0-9-]+):", fa_icon, text)
     return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], text)
+
+def fa_icon(match):
+    """`:fa-github:` -> Font Awesome's SVG for it, inlined from presentation/icons/<name>.svg
+    (the deck is offline, so no webfont). Add an icon by dropping its SVG from Font Awesome's
+    `svgs/` tree there; the glyph takes the text's colour and size."""
+    name = match.group(1)
+    path = HERE / "icons" / f"{name}.svg"
+    if not path.exists():
+        raise SourceError(f"unknown icon :fa-{name}: (no presentation/icons/{name}.svg)")
+    svg = re.sub(r"<!--.*?-->", "", path.read_text(), flags=re.S).strip()
+    svg = svg.replace("<svg ", '<svg class="fa-icon" aria-hidden="true" fill="currentColor" ', 1)
+    return svg
 
 def pipe_rows(block, count, labels):
     result = []
