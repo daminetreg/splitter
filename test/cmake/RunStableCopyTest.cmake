@@ -17,7 +17,7 @@ endforeach()
 
 function(compile unit label)
   execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E env CPP_SPLITTER_VERBOSE=1
+    COMMAND "${CMAKE_COMMAND}" -E env CPP_SPLITTER_VERBOSE=1 "CPP_SPLITTER_STORE=${WORKDIR}/store"
             "${SPLITTER}" "${CXX}" -std=c++17 -MD -MF "${WORKDIR}/${unit}.d" -MT "${WORKDIR}/${unit}.o"
             -c -o "${WORKDIR}/${unit}.o" "${WORKDIR}/src/${unit}.cpp"
     OUTPUT_VARIABLE o ERROR_VARIABLE e RESULT_VARIABLE rc)
@@ -73,10 +73,25 @@ file(GLOB b_delta_piece "${WORKDIR}/b.o.split/include/ops.h_*_delta.o")
 if(b_delta_piece)
   message(FATAL_ERROR "b.cpp has a piece for delta(), whose body needs a definition the unit lacks: '${b_delta_piece}'")
 endif()
-file(GLOB b_gamma_piece "${WORKDIR}/b.o.split/include/ops.h_*_gamma.o")
-list(LENGTH b_gamma_piece n_gamma)
+# gamma()'s piece is shared by every includer (TODO/51): the per-unit twin names the store
+# key, and the object linked is the store's.
+file(GLOB b_gamma_twin "${WORKDIR}/b.o.split/include/ops.h_*_gamma.cpp")
+list(LENGTH b_gamma_twin n_gamma)
 if(NOT n_gamma EQUAL 1)
-  message(FATAL_ERROR "b.cpp has no piece for gamma() under b.o.split/include: '${b_gamma_piece}'")
+  message(FATAL_ERROR "b.cpp has no piece for gamma() under b.o.split/include: '${b_gamma_twin}'")
+endif()
+file(STRINGS "${b_gamma_twin}" store_line REGEX "^// Store: ")
+if(NOT store_line)
+  message(FATAL_ERROR "b.cpp's piece for gamma() is not shared:\n${b_gamma_twin}")
+endif()
+string(REGEX REPLACE "^// Store: " "" gamma_key "${store_line}")
+file(GLOB b_gamma_piece "${WORKDIR}/store/${gamma_key}-*.o")
+list(LENGTH b_gamma_piece n_gamma_obj)
+if(NOT n_gamma_obj EQUAL 1)
+  message(FATAL_ERROR "the store holds ${n_gamma_obj} object(s) for gamma(): '${b_gamma_piece}'")
+endif()
+if(NOT b_log MATCHES "shared piece \\.o: [^\n]*${gamma_key}")
+  message(FATAL_ERROR "b.cpp did not link the shared piece for gamma():\n${b_log}")
 endif()
 # The pieces' objects, not b.o itself: the launcher touches an object it leaves as it is,
 # so that the build system does not rebuild it every time.
@@ -131,7 +146,7 @@ compile(b gamma)
 compile(main gamma)
 link_and_check("600 3 -8" gamma)
 
-if(b_log MATCHES "Building PCH")
+if(b_log MATCHES "Building PCH: [^\n]*b\\.o\\.split")
   message(FATAL_ERROR "b.cpp rebuilt its PCH for an edit to gamma()'s body:\n${b_log}")
 endif()
 if(NOT b_log MATCHES "re-sliced its piece")
@@ -139,7 +154,12 @@ if(NOT b_log MATCHES "re-sliced its piece")
 endif()
 file(TIMESTAMP "${b_gamma_piece}" gamma_after "%s")
 if(gamma_after STREQUAL gamma_before)
-  message(FATAL_ERROR "b.cpp's piece for gamma() was not recompiled after the edit:\n${b_log}")
+  message(FATAL_ERROR "the shared piece for gamma() was not recompiled after the edit:\n${b_log}")
+endif()
+# a.cpp compiled first and rebuilt gamma()'s shared object; b.cpp found it current. (beta()'s
+# shared piece reads the edited header too, and b.cpp, its only includer, rebuilds that one.)
+if(b_log MATCHES "\\$ [^\n]*${gamma_key}\\.cpp" OR b_log MATCHES "compiling [0-9]+ header dep")
+  message(FATAL_ERROR "b.cpp compiled a piece for gamma() that a.cpp had already rebuilt:\n${b_log}")
 endif()
 set(b_others_after "")
 foreach(o ${b_pieces})

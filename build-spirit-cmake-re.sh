@@ -233,6 +233,15 @@ if [ "$USE_SPLITTER" = 1 ]; then
     launcher_args+=("-DCMAKE_CXX_COMPILER_LAUNCHER=$REPO/build/cpp-splitter")
 fi
 
+# How many piece compiles one launcher hands to the cluster at once. Every piece at once,
+# times -j launchers, is tens of thousands of rewrapper connections to one reproxy after
+# TODO/49, and the proxy did not survive -j500 of it; about 4000 in flight did. TODO/50.
+if [ "$USE_SPLITTER" = 1 ] && [ "$DISTRIBUTED" = 1 ]; then
+    cap=$(( 4000 / JOBS )); [ "$cap" -ge 1 ] || cap=1
+    export CPP_SPLITTER_REMOTE_JOBS="${CPP_SPLITTER_REMOTE_JOBS:-$cap}"
+    echo "==> remote piece compiles per launcher: $CPP_SPLITTER_REMOTE_JOBS"
+fi
+
 if [ "$REMOTE_SPLIT" = 1 ]; then
     if [ "$USE_SPLITTER" != 1 ] || [ "$DISTRIBUTED" != 1 ]; then
         echo "--remote-split needs --split and --distributed" >&2
@@ -261,12 +270,24 @@ echo "==> split on:  $([ "$REMOTE_SPLIT" = 1 ] && echo cluster || echo "this mac
 # the configuration, so an identical configure lands back on the same one and ninja reports
 # "no work to do" over outputs an earlier run produced -- which, after a run that fell back,
 # means a green build measuring nothing. --clean removes the directory -B resolves to.
+# And not only the one -B names: the host and the distributed build of one configuration
+# resolve to the same directory, so a distributed --clean whose own -B did not exist yet
+# removed nothing and its "full" row built over the host run's outputs -- 268 units, 267
+# compiles. Every build directory of this flavour, splitter or not, goes.
 if [ "$CLEAN" = 1 ]; then
-    resolved="$(readlink -f "$BUILD" 2>/dev/null || true)"
-    if [ -n "$resolved" ] && [ -d "$resolved" ]; then
-        echo "==> clean: removing $resolved"
-        rm -rf "$resolved"
-    fi
+    for link in "$REPO"/build/cmake-re-spirit-*; do
+        [ -L "$link" ] || continue
+        case "$link" in
+            *-split) [ "$USE_SPLITTER" = 1 ] || continue ;;
+            *)       [ "$USE_SPLITTER" = 1 ] && continue ;;
+        esac
+        resolved="$(readlink -f "$link" 2>/dev/null || true)"
+        if [ -n "$resolved" ] && [ -d "$resolved" ]; then
+            echo "==> clean: removing $resolved"
+            rm -rf "$resolved"
+        fi
+        rm -f "$link"
+    done
     rm -rf "$BUILD"
 fi
 

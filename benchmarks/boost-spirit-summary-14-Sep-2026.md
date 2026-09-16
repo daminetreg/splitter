@@ -1,4 +1,4 @@
-# Boost.Spirit's test suite, split and built on one machine, 14 and 15 September 2026
+# Boost.Spirit's test suite, split and built on one machine, 14 to 16 September 2026
 
 One run of `BUILD_TYPE=Release CMAKE_RE_JOBS=16 MODES="plain split" ./benchmark-spirit-cmake-re.sh --host`
 at cpp-splitter `a3e256df` (after TODO/44, TODO/47, TODO/48 and the preamble PCH being loaded
@@ -113,3 +113,45 @@ function the unit declares and does not define, `boost::math::concepts::acosh()`
 `boost::math::acosh` with only `math_fwd.hpp` read. A piece for one of those carries a
 reference the plain build never made and the link fails; the first run of TODO/49 lost
 `qi/real1..5`, `karma/real1..3` and `x3/real4` to exactly that.
+
+## After TODO/51, 16 September
+
+Same command, cpp-splitter at the TODO/51 commit. A header function's piece is one object
+in a store in the build directory, compiled from the original header with an anchor that
+takes the function's address, and linked by every unit that includes the header. The
+per-unit piece is compiled only where the shared one cannot be: 33301 of the suite's
+36943 header pieces are shared, from 413 store objects (74 header PCHs, 127 keys that
+failed: headers that need their includer's context, and types the anchor cannot spell).
+
+| scenario | splitter | build | fallbacks | declined | what the splitter did |
+|---|---|---:|---:|---:|---|
+| full | no | 57.7s | 0 | 0 | — |
+| full | yes | 460.7s | 0 | 0 | 279 parsed and split, 631 PCH, 540 shared + 3866 per-unit + 371 unit compiles |
+| no-op | no | 5.7s | 0 | 0 | — |
+| no-op | yes | 22.2s | 0 | 0 | none: every unit reused its split and found its shared objects current |
+| one source | no | 5.6s | 0 | 0 | — |
+| one source | yes | 5.9s | 0 | 0 | none, not re-mirrored |
+| one header | no | 5.7s | 0 | 0 | — |
+| one header | yes | 5.9s | 0 | 0 | none, not re-mirrored |
+| **one body** | **no** | **56.9s** | 0 | 0 | — |
+| **one body** | **yes** | **28.7s** | 0 | 0 | 268 re-sliced, 0 PCH rebuilt, **51 shared compiles**, 0 per unit |
+
+Speed-ups, plain over split: full 0.13x, no-op 0.26x, one source 0.95x, one header 0.95x,
+one body **1.98x**.
+
+**The body edit compiles `toucs4` once**, not 267 times: the 51 shared compiles are the
+15 sharable functions of `standard_wide.hpp` -- the edited header, whose every shared piece
+reads it -- and 36 of `qi/auto/meta_create.hpp`, `karma/auto/meta_create.hpp` and
+`qi/binary/binary.hpp`, whose include closure reaches it. A shared piece depends on its
+header's closure, so an edit costs one compile per sharable function of every header that
+includes the edited one. The 268 units re-slice their twin and link the store's object;
+the row is 268 launcher runs (the no-op's 22.2s) plus 51 compiles of a second each.
+
+**The full build is back where it was before TODO/49**, 460.7s against 438.1s and 882.4s:
+540 shared compiles stand in for 30000 per-unit ones. The 3866 per-unit compiles that
+remain are the pieces of headers that do not compile on their own, and the 631 PCHs are
+the 557 unit ones plus 74 for the headers in the store.
+
+**The no-op costs 22.2s against 11.8s before TODO/49.** A launcher run now checks every
+shared object it links -- 135 records of some 1500 prerequisites, stat'ed once each, hashed
+when the stat moved -- 0.3 to 0.5s per unit. The touch rows are unchanged.

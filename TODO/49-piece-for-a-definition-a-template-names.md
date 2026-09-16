@@ -78,3 +78,7 @@ Boost.Spirit, `benchmarks/boost-spirit-summary-14-Sep-2026.md`: the body row goe
 128.0s to 34.1s, 267 piece compiles and no PCH, 1.66x faster than plain; the full split
 build from 438.1s to 882.4s and the no-op from 11.8s to 29.2s, on 37538 pieces against
 4408. The acceptance criteria hold; the cost stated in the proposal is measured.
+
+On the cluster (`benchmarks/boost-spirit-rbe-summary-14-Sep-2026.md`): the body row is 267
+actions of 2.1s each, 83.0s at `-j500` against the plain build's 136.2s, and the full
+rows cost 2080s to 2352s on 114249 cache records -- the same 8.5x, paid in transfer.
