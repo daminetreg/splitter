@@ -4236,14 +4236,31 @@ static bool store_deps_current(const std::string& deps_file,
 // definition -- an implementation include's members, a namespace-scope variable -- which
 // the compiler then emits strong; every unit linking the object would carry it. The
 // compiler's own verdict, read off the symbol table, rather than a prediction from the
-// AST: `nm -g --defined-only`, T D B R C strong, W V weak. No nm, no sharing.
+// AST. On ELF, `nm -g --defined-only`: T D B R C strong, W V weak. On Mach-O a weak
+// definition is an ordinary T with the weak_definition attribute, which only `nm -m`
+// shows -- "weak external" against "external" -- so read with `-m` there, or every shared
+// piece is refused and nothing is ever shared (TODO/54). No nm, no sharing.
 static bool store_object_has_strong_symbols(const std::string& obj) {
+#ifdef __APPLE__
+    FILE* pipe = ::popen(("nm -m -g --defined-only " + shell_quote(obj) + " 2>/dev/null").c_str(), "r");
+    if (!pipe) return true;
+    char line[4096];
+    bool strong = false;
+    while (std::fgets(line, sizeof(line), pipe)) {
+        // "<address> (<segment>,<section>) [weak] [private] external <name> [...]"
+        const std::string text(line);
+        const bool external = text.find(" external ") != std::string::npos;
+        const bool weak = text.find(" weak ") != std::string::npos;
+        if (external && !weak) { strong = true; break; }
+    }
+    const int rc = ::pclose(pipe);
+    return strong || rc != 0;
+#else
     FILE* pipe = ::popen(("nm -g --defined-only " + shell_quote(obj) + " 2>/dev/null").c_str(), "r");
     if (!pipe) return true;
     char line[4096];
-    bool strong = false, any = false;
+    bool strong = false;
     while (std::fgets(line, sizeof(line), pipe)) {
-        any = true;
         // "<address> <type> <name>", or "<type> <name>" for an undefined symbol.
         std::istringstream ls(line);
         std::string a, b;
@@ -4252,8 +4269,8 @@ static bool store_object_has_strong_symbols(const std::string& obj) {
         if (type.size() == 1 && std::strchr("TDBRC", type[0])) { strong = true; break; }
     }
     const int rc = ::pclose(pipe);
-    (void)any;
     return strong || rc != 0;
+#endif
 }
 
 static void store_write_deps(const std::string& deps_file, const std::string& dep_file,
