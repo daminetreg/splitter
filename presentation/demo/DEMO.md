@@ -1,4 +1,4 @@
-```
+```sh
 export TIPI_DISABLE_AR_RANLIB_DRIVER=ON TIPI_CACHE_CONSUME_ONLY=ON TIPI_CACHE_FORCE_ENABLE=OFF
 cmake-re --build build/cmake-re-macos-apple-clang --host -j8
 cmake-re --host -S . -B build/cmake-re-macos-brew-llvm -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/macos-brew-llvm.cmake
@@ -6,7 +6,7 @@ cmake-re --build build/cmake-re-macos-brew-llvm --host -j8
 ```
 
 
-```
+```sh
 cd /Users/daminetreg/workspace/splitter-talk/splitter-local/presentation/demo/mylib
 
 rm -rf .cpp-splitter-store

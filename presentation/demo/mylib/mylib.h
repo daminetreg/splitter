@@ -14,7 +14,7 @@ inline int multiply(int a, int b) {
 }
 
 inline std::string greet(const std::string& name) {
-    return "Hello, " + name + ", Cpp Peer !";
+    return "Hello, " + name + "!";
 }
 
 inline double average(const std::vector<double>& values) {

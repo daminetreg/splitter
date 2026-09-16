@@ -2,11 +2,11 @@
 
 [![cmake-re](https://github.com/daminetreg/splitter/actions/workflows/cmake-re.yml/badge.svg?branch=main)](https://github.com/daminetreg/splitter/actions/workflows/cmake-re.yml)
 
-`cpp-splitter` reads a C++ translation unit through libclang and rewrites it as one piece per
+`cpp-splitter` reads a C++ translation unit and headers through libclang and rewrites it as one piece per
 function definition behind a shared preamble, so the pieces compile in parallel (locally or
 on a remote build execution cluster) and are linked back (`{mold,ld,lld} -r`) into the single object the
-build system asked for. It runs transparently as a `CMAKE_CXX_COMPILER_LAUNCHER` in front of the real compiler; see [DOCS.md](DOCS.md) and
-[blog.md](blog.md) for how and why.
+build system expected. It runs transparently as a `CMAKE_CXX_COMPILER_LAUNCHER` in front of the real compiler; see [DOCS.md](DOCS.md) and
+[Boost.Spirit Test Suite Benchmark](blog_boost_spirit_test_suite.md) for how and why.
 
 ## Building
 
@@ -15,6 +15,9 @@ Both hosts build through [CMake RE](https://tipi.build/documentation/0000-gettin
 
 ```sh
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tipi-build/cli/master/install/install_for_macos_linux.sh)"
+```
+
+```sh
 export TIPI_DISABLE_AR_RANLIB_DRIVER=ON TIPI_CACHE_CONSUME_ONLY=ON TIPI_CACHE_FORCE_ENABLE=OFF
 ```
 
@@ -123,6 +126,6 @@ As a compiler launcher in any CMake project:
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=/abs/path/to/cpp-splitter
 ```
 
-Behind `cmake-re --distributed`, the split itself runs on the RBE cluster; TODO/35 and
-`build-spirit-cmake-re.sh` show the setup. Results of the Boost measurements are in
+Behind `cmake-re --distributed`, the split itself runs on the RBE cluster;
+`tools/build-spirit-cmake-re.sh` show the setup. Results of the Boost measurements are in
 `benchmarks/`.

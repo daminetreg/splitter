@@ -3,7 +3,7 @@ chapter: Build Atomiticity
 chapter-label: Translation Unit (TU) Fission
 notes: The move everyone already knows goes the other way — fusion. CMAKE_UNITY_BUILD=ON makes CMake write unity_N.cxx files that #include a batch of your sources — CMAKE_UNITY_BUILD_BATCH_SIZE of them, 8 by default — and compiles those instead. Eight compile edges become one. Every header is parsed once per batch instead of once per source, so the cold build is faster and the graph is smaller. The price is the atom got bigger — touch any one of the eight sources in the batch and the whole batch recompiles, the cache misses for all eight, and two sources that both had a static helper called `f` now collide in one translation unit. Fission is the same lever pulled the other way.
 ---
-## {split}TU fission{/split} : Splitting TUs, Headers & Modules
+## {split}TUs fission{/split} : Splitting TUs, Headers & Modules
 
 ::: mermaid-columns 2:3
 flowchart LR
