@@ -12,4 +12,5 @@ notes: The body edit as actions. Plain executes 158 remote compiles, one per uni
 - 510 | violet | split cached actions
 :::
 
-The body-edit comparison is 139.1s versus 14.5s within this single set — {split}9.6x faster{/split}
+The body-edit comparison is 139.1s versus 14.5s
+## Split is {split}9.6x faster{/split}

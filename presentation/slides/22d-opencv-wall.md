@@ -21,5 +21,5 @@ notes: Set 3: OpenCV on the cluster, -j500, build phase only, the split produced
 :::
 
 ::: tiny
-Each bar is value ÷ this set’s 139.1s maximum. Full: served from cache on both sides (516 plain / 26,436 split cache hits), not cold compilation. Build-only timing, one run, 13 September.
+516 TUs plain / 26,436 split
 :::

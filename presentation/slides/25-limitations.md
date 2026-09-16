@@ -3,10 +3,13 @@ chapter: Conclusions
 chapter-label: Read narrowly
 notes: Limitations: single runs, noise; chosen function reach-to-use 194:1; no general distribution; host has no per-action records; no runtime performance claim.
 ---
-## Evidence of a layout  
-trade, not a {red}universal win{/red}.
+## Current Limitations
 
-::: cards 2
-- What is supported |  | For this selected body edit, action counts change from 271 remote compiles to one; emitted-piece work tracks the changed body.
-- What is not claimed |  | No runtime equivalence performance result. No general edit distribution. No cross-set wall-time speedup. Single-run timing is noisy.
+::: list
+- There are no relocating linker on Windows 
+  - Achievable but requires implementing a special object file merger
+- Adding lines in a function above others requires renumbering (and recompiling all functions below)
+- Too much split pieces produced that are never used in complex builds
+  - Uses a lot more disk space than necessary
+- This is a very early prototype
 :::

@@ -7,14 +7,14 @@ cmake-re --build build/cmake-re-macos-brew-llvm --host -j8
 
 
 ```
-cd /Users/daminetreg/workspace/splitter-talk/splitter-local/example/mylib
+cd /Users/daminetreg/workspace/splitter-talk/splitter-local/presentation/demo/mylib
 
 rm -rf .cpp-splitter-store
 rm -rf *.o*
 
 export CPP_SPLITTER_VERBOSE=1
-time ../../build/cmake-re-macos-brew-llvm/cpp-splitter clang++ -I. -MD -MF use_mylib.o.d -c -o use_mylib.o use_mylib.cpp && clang++ use_mylib.o
+time ../../../build/cmake-re-macos-brew-llvm/cpp-splitter clang++ -I. -MD -MF use_mylib.o.d -c -o use_mylib.o use_mylib.cpp && clang++ use_mylib.o
 
 # Do an edit
-time ../../build/cmake-re-macos-brew-llvm/cpp-splitter clang++ -I. -MD -MF use_mylib.o.d -c -o use_mylib.o use_mylib.cpp && clang++ use_mylib.o
+time ../../../build/cmake-re-macos-brew-llvm/cpp-splitter clang++ -I. -MD -MF use_mylib.o.d -c -o use_mylib.o use_mylib.cpp && clang++ use_mylib.o
 ```

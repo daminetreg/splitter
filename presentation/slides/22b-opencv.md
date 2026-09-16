@@ -48,5 +48,5 @@ cv::Mat edges_of(const cv::Mat& image)
 :::
 
 ::: tiny
-OpenCV 4.11.0, `core` and `imgproc`, static, `-DBUILD_LIST=core,imgproc`, nothing optional · 158 C++ units · clang 13, C++17, Release · every unit splits: 0 fallbacks, 0 declined after TODO/44
+OpenCV 4.11.0, `core` and `imgproc`, static, `-DBUILD_LIST=core,imgproc`, nothing optional · 158 C++ units · clang 13, C++17, Release · every unit splits: 0 fallbacks, 0 declined
 :::

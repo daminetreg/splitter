@@ -11,5 +11,5 @@ notes: The same run, as the splitter's own counts. Full -- 158 units split on th
 :::
 
 ::: callout
-Every unit splits: TODO/44 took the last three declines -- a static of an unnamed type, a static of a class in an unnamed namespace, a header included twice under two macro states -- and the edit re-slices all 158.
+Every unit splits: static of an unnamed type, a static of a class in an unnamed namespace, a header included twice under two macro states -- and the edit re-slices all 158.
 :::

@@ -16,12 +16,11 @@ size_t SparseMat::nzcount() const
 }
 ```
 
-::: cards 3
+::: cards 2
 - plain | | 158 units recompile on the cluster, 139.1s: every one includes the header.
-- split, produced here | violet | 158 units re-slice their piece without a parse; 23 pieces recompile, 13.9s.
 - split, produced on the cluster | split | the same 158 re-slices and 23 pieces, 14.5s; the parse never runs here.
 :::
 
 ::: tiny
-`nzcount` is called by `matrix_sparse.cpp` alone; the other 157 copies keep or declare it. The rows that follow measure this edit; full bounds the overhead.
+`nzcount` is called by `matrix_sparse.cpp` alone; the other 157 copies keep or declare it.
 :::
