@@ -7,11 +7,24 @@ notes: Section 9 — emit-only splitter is invoked using CMake RE's rewrapper wh
 
 Leverage CMake RE's rewrapper to distribute and cache splitting.
 
-::: flow
-- CPP_SPLITTER_REMOTE_SPLIT=1 cpp-splitter  | 
-- rewrapper cpp-splitter\n(local preprocessor input scan) | violet
-- remote worker\nlibclang parse | split
-- download split tree | teal
+::: mermaid
+flowchart LR
+    subgraph local["Developer machine"]
+        direction TB
+        launcher["cpp-splitter"] --> rw["rewrapper<br/>action = the compile command"]
+        rw --> reproxy["reproxy scans inputs"]
+        tree[".split tree"] --> pieces["piece compiles and ld -r,<br/>each a remote action"]
+    end
+    subgraph cluster["RBE cluster"]
+        worker["cpp-splitter --emit-only<br/>libclang parse"]
+        cache["action cache"]
+    end
+    reproxy --> worker
+    worker -- "-output_directories" --> tree
+    pieces --> cache
+    class launcher,worker,pieces split
+    class rw,reproxy,cache violet
+    class tree warn
 :::
 
 ::: rationale

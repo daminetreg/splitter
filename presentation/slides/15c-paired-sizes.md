@@ -3,8 +3,8 @@ chapter: Binary evidence
 chapter-label: Binary / paired sizes
 notes: Bars share an explicit zero baseline and the canonical shared 0–8,880-byte scale. File delta is 184 bytes, approximately 2.12 percent. Stripping symbol tables yields same size but 385 bytes still differ due to dynamic-symbol ordering.
 ---
-## Code stays level.  
-File grows {violet}184 B{/violet}.
+## Same binary  
+different {split}metadata{/split}.
 
 ::: sizes
 {
@@ -24,5 +24,5 @@ File grows {violet}184 B{/violet}.
 :::
 
 ::: tiny
-Baseline is always {violet}plain-gc{/violet}. 22 symbols vs 22; normalized instructions 178 vs 178. Stripped: 6,752 B vs 6,752 B, yet 385 bytes differ in dynamic-symbol ordering.
+22 symbols vs 22; normalized instructions 178 vs 178. Stripped: 6,752 B vs 6,752 B, yet 385 bytes differ in dynamic-symbol ordering.
 :::

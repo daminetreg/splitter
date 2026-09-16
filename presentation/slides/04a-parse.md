@@ -3,8 +3,7 @@ chapter: Architecture
 chapter-label: 02 / Parse once
 notes: Section 2 — parse. Prefix includes become a content-keyed libclang PCH and parse occurs once.
 ---
-## Harvest extents,  
-context, {accent}emission{/accent}.
+## Harvest function body locations and {accent}emission{/accent}.
 
 ::: flow
 - include prefix | 

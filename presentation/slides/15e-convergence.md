@@ -3,8 +3,8 @@ chapter: Binary evidence
 chapter-label: Binary / why the result converges
 notes: A semantic trace, not assembly or raw nm. LTO at ld.lld -r sees all pieces of the unit, restores inlining, then final --gc-sections drops uncalled weak copies.
 ---
-## Inline. Relink.  
-{split}Collect.{/split}
+## Inlined after   
+{split}split.{/split}
 
 ::: binary-trace
 {
