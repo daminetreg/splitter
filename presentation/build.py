@@ -545,7 +545,7 @@ def render_diagrams(source):
     try:
         return module.render_missing(source)
     except RuntimeError as e:
-        raise SourceError(str(e))
+        fail("presentation/diagrams", 0, str(e))
 
 def build(source, output):
     render_diagrams(source)

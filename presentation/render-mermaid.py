@@ -36,7 +36,7 @@ DECK_CLASSES = """
 
 def with_deck_classes(source):
     head = source.lstrip().split("\n", 1)[0]
-    if head.startswith(("flowchart", "graph")):
+    if head.startswith(("flowchart", "graph", "classDiagram")):
         return source.rstrip() + "\n" + DECK_CLASSES
     return source
 
