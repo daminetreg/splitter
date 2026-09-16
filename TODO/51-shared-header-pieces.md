@@ -98,5 +98,7 @@ build 460.7s against 882.4s; the no-op 22.2s against 29.2s, and 11.8s before TOD
 the launcher checking 135 shared records per unit. Boost.Filesystem 0/0; Spirit 0/0, 268
 programs pass; 33301 of 36943 header pieces shared from 413 objects.
 
-Still to measure: the cluster rows, where a shared piece is one action key for all its
-includers.
+On the cluster, `benchmarks/boost-spirit-rbe-summary-16-Sep-2026.md`, remote split at
+`-j500`: the body row 38.8s with 51 actions against 129.8s with 267 the day before and
+136.2s plain; the full row 1096.6s (4878 actions, every piece compiled without a PCH on
+a worker) against 2080.2s; the no-op 24.3s against 31.7s.
