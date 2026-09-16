@@ -12,6 +12,10 @@ cd /Users/daminetreg/workspace/splitter-talk/splitter-local/presentation/demo/my
 rm -rf .cpp-splitter-store
 rm -rf *.o*
 
+# Plain
+time clang++ -I. use_mylib.cpp
+
+# Cold Split
 export CPP_SPLITTER_VERBOSE=1
 time ../../../build/cmake-re-macos-brew-llvm/cpp-splitter clang++ -I. -MD -MF use_mylib.o.d -c -o use_mylib.o use_mylib.cpp && clang++ use_mylib.o
 
