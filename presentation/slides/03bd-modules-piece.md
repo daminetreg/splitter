@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 08 ½ / Modules · piece
+chapter-label: Modules · piece
 notes: Each piece is an implementation unit of the module. It imports its interface implicitly through the BMI, so there is no preamble of declarations to include — but the global module fragment is not visible through an import, so the piece replays it, ahead of the module declaration, from foo_preamble.h. #line points diagnostics back at foo.cxx. export cannot appear in an implementation unit, so the body carries no export and the declaration in the interface keeps it.
 ---
 ## Interface only {violet}BMI{/violet}  

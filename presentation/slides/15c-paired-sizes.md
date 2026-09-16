@@ -1,6 +1,6 @@
 ---
 chapter: Binary evidence
-chapter-label: Binary / paired sizes
+chapter-label: Binary equality
 notes: Bars share an explicit zero baseline and the canonical shared 0–8,880-byte scale. File delta is 184 bytes, approximately 2.12 percent. Stripping symbol tables yields same size but 385 bytes still differ due to dynamic-symbol ordering.
 ---
 ## Same binary  

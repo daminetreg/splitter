@@ -1,6 +1,6 @@
 ---
 chapter: Architecture
-chapter-label: 09 / Remote Execution & Caching
+chapter-label: Remote Execution & Caching
 notes: Section 9 — emit-only splitter is invoked using CMake RE's rewrapper when remote configuration exists; tree returns through output directories and compiles/link follow.
 ---
 ## {accent}Remote{/accent} C++ splitting 

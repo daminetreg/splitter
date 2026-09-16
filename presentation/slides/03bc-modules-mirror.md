@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 08 ½ / Modules · interface
+chapter-label: Modules · interface
 notes: The interface unit is a source of pieces the way a header is. The rewrite keeps the module declaration, the global module fragment, every declaration, inline bodies and templates, and replaces each non-inline body by its declaration. That rewritten file is what the compiler precompiles, so the BMI holds no ODR hash of a body that lives elsewhere — byte-identical across body edits, measured in TODO/43.
 ---
 ## Modules {violet}shadowing{/violet} + {split}splitting{/split}

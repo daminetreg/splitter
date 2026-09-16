@@ -1,6 +1,6 @@
 ---
 chapter: Conclusions
-chapter-label: Read narrowly
+chapter-label: Improvements
 notes: Limitations: single runs, noise; chosen function reach-to-use 194:1; no general distribution; host has no per-action records; no runtime performance claim.
 ---
 ## Current Limitations

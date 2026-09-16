@@ -1,6 +1,6 @@
 ---
 chapter: Architecture
-chapter-label: 02 / Parse once
+chapter-label: Parse and re-slicing
 notes: Section 2 — parse. Prefix includes become a content-keyed libclang PCH and parse occurs once.
 ---
 ## Harvest function body locations and {accent}emission{/accent}.

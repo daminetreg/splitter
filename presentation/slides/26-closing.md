@@ -1,7 +1,7 @@
 ---
 chapter: Conclusions
 notes: Closing: functional equivalence is a transformation requirement, supported by same output contract and the re-slice/full-split tree equality test; runtime performance is not benchmarked.
-eyebrow: Closing
+eyebrow: Thank You!
 ---
 ## Why it matters ?
 

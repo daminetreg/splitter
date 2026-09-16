@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 08 / Recompose
+chapter-label: Recompose
 notes: Section 8 — ld -r combines object pieces to ordinary object. The linker may be ld, mold, or ld.lld; all use -r.
 ---
 ## {split}5 objects{/split} builds in parallel  

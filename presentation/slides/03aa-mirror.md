@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 05 / Header shadowing + mirroring
+chapter-label: Header shadowing + mirroring
 notes: Section 5 — rewrite project headers that the unit reads, mirror by include path, and put that root first.
 ---
 ## Header {violet}shadowing{/violet} + {split}splitting{/split}

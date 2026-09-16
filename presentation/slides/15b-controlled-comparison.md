@@ -1,6 +1,6 @@
 ---
 chapter: Binary evidence
-chapter-label: Binary / the controlled comparison
+chapter-label: Binary equality
 notes: Measurements only from example/binary-impact/README.md: 14 Sep 2026, clang 13.0.0, -O2, lld final linker. We compare the plain-gc baseline with the combined split-lto-relink-gc case—not an eight-way tour.
 ---
 ## Comparing {split}split{/split} to {violet}plain{/violet}  

@@ -1,6 +1,6 @@
 ---
 chapter: Benchmarks
-chapter-label: The corpus: Boost.Spirit
+chapter-label: Boost.Spirit on EngFlow RBE
 notes: Before the numbers, what is being built. Boost.Spirit is a parser and generator library written entirely as templates in headers -- a grammar is a C++ expression, char_('0', '9') is a parser object, operators compose them. Its test suite is 277 small programs, each including a large part of Boost and instantiating it. Almost nothing the suite compiles is the suite's own code. On the left, a typical test: BOOST_TEST over the parsers; on the right, the shape everyone knows Spirit for. Header-only, template-heavy: the hardest case for a per-function split, and the one the benchmarks use.
 ---
 ## Boost.Spirit: {violet}277 test programs{/violet},  

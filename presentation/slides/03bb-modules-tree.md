@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 08 ½ / Modules · expected result
+chapter-label: Modules
 notes: What the launcher is expected to write for the interface unit — the same shape as for a .cpp, with the module's own outputs. CMake hands the module flags through the modmap response file. The interface the compiler precompiles is the rewritten one, declarations only, so foo.pcm does not change when a body does. Each moved body becomes an implementation unit of module foo, compiled against that BMI, and ld -r gives the build the foo.cxx.o it asked for. The BMI is written to a temporary path and only replaces the planned one when it differs, so nothing downstream sees a new digest.
 ---
 ## Integrates transparently with CMake modules support

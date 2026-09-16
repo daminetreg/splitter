@@ -1,6 +1,6 @@
 ---
 chapter: Binary evidence
-chapter-label: Binary / why the result converges
+chapter-label: Reasons for binary equality
 notes: A semantic trace, not assembly or raw nm. LTO at ld.lld -r sees all pieces of the unit, restores inlining, then final --gc-sections drops uncalled weak copies.
 ---
 ## Inlined after   

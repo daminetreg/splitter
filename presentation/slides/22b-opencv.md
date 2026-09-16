@@ -1,6 +1,6 @@
 ---
 chapter: Benchmarks
-chapter-label: The corpus: OpenCV core and imgproc
+chapter-label: OpenCV core and imgproc
 notes: What is being built. OpenCV's core module is the Mat class and everything around it -- matrices, sparse matrices, arithmetic, allocation -- and imgproc the image operations on top. Ordinary library code: the classes are declared in mat.hpp, their small members are defined inline in mat.inl.hpp, which every unit includes, the large ones out of line in the .cpp files. 158 units, static libraries, nothing optional. On the right, the kind of code a user of the library writes; on the left, the shape of the library itself.
 ---
 ## OpenCV: {violet}158 units{/violet} of ordinary C++,  

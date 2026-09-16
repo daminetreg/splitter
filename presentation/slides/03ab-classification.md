@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 03 / Classification
+chapter-label: Classification
 notes: Section 3 — classification. main is deliberately kept in the definitions owner. Templates and other unsafe forms are kept.
 ---
 ## Not every body is splittable

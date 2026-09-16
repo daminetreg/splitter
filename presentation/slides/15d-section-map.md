@@ -1,6 +1,6 @@
 ---
 chapter: Binary evidence
-chapter-label: Binary / section equality map
+chapter-label: Binary equality
 layout: section-map
 notes: Click a section. 18 sections are byte-identical and 10 differ. Dynamic metadata can be loaded, so do not say every loaded section is identical.
 ---

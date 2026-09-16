@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 01 / Input · split
+chapter-label: split graph
 notes: The same graph as the Build Atomiticity one, with the launcher in the compile edge. The build system still sees one edge — the same inputs, the same use_mylib.o out. Inside it the splitter parses once, writes the preamble and its PCH, a rewritten mylib.h with declarations only, one source per body — add, multiply, greet, average, and the definitions piece that owns main — compiles each into its own object, and ld -r joins them into the object the build asked for. Every one of those inner compiles is an edge the build system does not know about, and the launcher runs only the ones whose input changed. The link edge is untouched.
 ---
 ## Same build, {split}parallel graph{/split}.

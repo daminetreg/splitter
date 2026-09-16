@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 08 ½ / Modules
+chapter-label: Modules
 notes: Modules do a great job at not reparsing headers all the time — an importer reads the BMI instead of the header text. But the BMI is what every importer depends on, and even with -fmodules-reduced-bmi, which drops the non-inline bodies from it, clang stores the ODR hash of every definition in the BMI, so any body edit — a non-inline body too — changes the BMI and every importer rebuilds or misses the cache. Measured in TODO/43 with clang 21. Therefore let's autosplit them before we or LLMs adopt them: we, or the agent, will write everything in the same file, all lazy.
 ---
 ## {violet}modules{/violet} are the same

@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 05 / Header piece
+chapter-label: Header piece
 notes: Each header piece includes the unit preamble before the rewritten header. It carries #line and used attribute; no claim about -fkeep-inline-functions.
 ---
 ## split-body pieces

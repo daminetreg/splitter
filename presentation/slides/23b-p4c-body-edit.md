@@ -1,6 +1,6 @@
 ---
 chapter: Benchmarks
-chapter-label: The edit, on p4c
+chapter-label: p4c
 notes: The same kind of edit as on Spirit: one line in the body of an inline member of a header every unit includes. Two members are measured. findlast is emitted by 2 units and named by 11 more; the other 205 copies declare it only, so an edit to its body leaves their copies, their PCHs and their pieces alone. size is named by every unit -- size is a member of every container, and the rule that declares a function only is textual -- so every copy keeps its body and the edit reaches every PCH. For plain and unity the member makes no difference: every includer recompiles, or every batch.
 ---
 ## The edit: {accent}one line in `cstring::findlast()`{/accent}

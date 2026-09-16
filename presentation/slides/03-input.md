@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 01 / Input
+chapter-label: CMAKE_CXX_COMPILER_LAUNCHER
 notes: Section 1 — input. The splitter is a CMAKE_CXX_COMPILER_LAUNCHER, invoked in place of the compiler.
 ---
 ## Integrates transparently

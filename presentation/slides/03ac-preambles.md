@@ -1,6 +1,6 @@
 ---
 chapter: splitter waltkthrough
-chapter-label: 04 / Two preambles
+chapter-label: Two preambles
 notes: Section 4 — two preamble layers. Do not claim -fkeep-inline-functions.
 ---
 ## PCH preamble

@@ -1,6 +1,6 @@
 ---
 chapter: Benchmarks
-chapter-label: The edit, on OpenCV
+chapter-label: OpenCV core and imgproc
 notes: The same edit as on Spirit: one line in the body of an inline member defined in a header every unit includes. SparseMat::nzcount is defined inline in mat.inl.hpp, included by all 158 units, and emitted by one -- matrix_sparse.cpp, which calls it. The other 157 carry it in their copy, or declare it only. A plain build recompiles all 158 units; the split build re-slices 158 twins and recompiles 23 pieces. What each did with the same edit is the next two slides.
 ---
 ## The edit: {accent}one line in `SparseMat::nzcount()`{/accent},  
