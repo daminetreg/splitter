@@ -3594,8 +3594,17 @@ static std::vector<CompileResult> compile_parallel(const std::vector<CompileJob>
       num_threads = std::atoi(CMAKE_BUILD_PARALLEL_LEVEL);
     } 
 
-    // remote execution just pass it all
-    if (tipi_compiler_driver_in_use) { num_threads = jobs.size(); }
+    // Remote execution: all at once, the cluster is the width. Unless capped: a Spirit unit
+    // has about 135 pieces after TODO/49, and 500 launchers handing every piece to
+    // rewrapper at the same time is tens of thousands of connections to one reproxy, which
+    // it did not survive (TODO/50).
+    if (tipi_compiler_driver_in_use) {
+        num_threads = jobs.size();
+        if (const char* cap = std::getenv("CPP_SPLITTER_REMOTE_JOBS")) {
+            const int n = std::atoi(cap);
+            if (n > 0 && static_cast<size_t>(n) < jobs.size()) num_threads = n;
+        }
+    }
 
     if (verbose) {
         std::lock_guard<std::mutex> lock(output_mtx);

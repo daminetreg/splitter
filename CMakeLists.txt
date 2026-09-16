@@ -390,6 +390,18 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunChainedDriverTest.cmake)
 
+# CPP_SPLITTER_REMOTE_JOBS caps the piece compiles one launcher runs at once behind the tipi
+# compiler driver: -j500 launchers handing every piece to rewrapper at once lost the proxy.
+# TODO/50.
+add_test(
+  NAME launcher.remote_jobs_cap
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE=${cpp_splitter_test_dir}/sample.cpp
+          -DWORKDIR=${cpp_splitter_test_output}/remote_jobs_cap
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunRemoteJobsCapTest.cmake)
+
 # TODO/31: a rewritten header's quoted include must still resolve from inside the mirror.
 add_test(
   NAME launcher.quoted_include_in_mirror
