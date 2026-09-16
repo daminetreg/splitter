@@ -225,6 +225,17 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunStableCopyTest.cmake)
 
+# One shared piece per header function, in a store every includer links from; a header
+# that only compiles in its includer's context keeps its per-unit piece. TODO/51.
+add_test(
+  NAME launcher.shared_header_piece
+  COMMAND ${CMAKE_COMMAND}
+          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+          -DSOURCE_DIR=${cpp_splitter_test_dir}/shared_header_piece
+          -DWORKDIR=${cpp_splitter_test_output}/shared_header_piece
+          -DCXX=${CMAKE_CXX_COMPILER}
+          -P ${cpp_splitter_test_dir}/cmake/RunSharedHeaderPieceTest.cmake)
+
 # A virtual key function written under a macro the file undefines; the other unit expects
 # the vtable from this one. TODO/47.
 add_test(

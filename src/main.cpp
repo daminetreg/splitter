@@ -10,6 +10,7 @@
 #include <cassert>
 #include <map>
 #include <mutex>
+#include <chrono>
 #include <set>
 #include <sstream>
 #include <string>
@@ -213,6 +214,8 @@ struct FunctionInfo {
     bool is_constexpr = false;        // constexpr/consteval, however it was spelled
     bool is_specialization = false;   // explicit specialization: `template< > void f<T>()`
     bool is_virtual = false;          // virtual member function
+    bool is_static_member = false;    // `static` member function
+    bool is_const_member = false;     // member function declared const
     bool is_ctor_or_dtor = false;     // constructor or destructor
     bool is_conversion = false;       // `operator T()`: no return type to rebuild it from
     // Whether a definition may legally appear in many translation units. Everything the
@@ -1039,6 +1042,8 @@ static CXChildVisitResult visitor(CXCursor cursor, CXCursor /*parent*/, CXClient
     // declarator, leave virtual members in the header: they are a small set, and they are
     // the ones where moving a definition is most delicate.
     info.is_virtual = clang_CXXMethod_isVirtual(cursor) != 0;
+    info.is_static_member = clang_CXXMethod_isStatic(cursor) != 0;
+    info.is_const_member = clang_CXXMethod_isConst(cursor) != 0;
 
     // Deliberately not evaluated here. Walking canonical types and their template arguments
     // is expensive -- on Boost.Geometry, doing it for every harvested function took a
@@ -4017,6 +4022,359 @@ static bool build_pch(const std::string& preamble_file,
     return true;
 }
 
+// ---------------------------------------------------------------------------------------
+// Shared header pieces. TODO/51.
+//
+// A piece taken out of a header used to belong to the unit that includes it: compiled
+// behind the unit's preamble, against the unit's PCH, in the unit's directory (TODO/09).
+// One header function then had as many pieces as the header has includers, and an edit
+// to its body compiled every one of them -- 267 for Boost.Spirit's standard_wide::toucs4.
+//
+// A shared piece includes the original header and forces the function out of it by taking
+// its address: `__attribute__((used)) static const auto anchor = &ns::f;` odr-uses the
+// inline definition, clang emits it weak, and the anchor keeps the reference. It needs no
+// copy and no preamble, so its inputs are the header's own include closure and the flags,
+// and every unit that includes the header links the same object from a store in the build
+// directory. Freshness is content, as for the PCH: the prerequisites' hashes recorded at
+// the compile. A header that does not compile on its own -- TODO/09's case -- fails once
+// per key, is marked, and the unit compiles its own piece as before.
+
+static std::string hash_bytes(const std::string& s);
+static std::string g_store_dir;
+
+static const std::string& store_dir() {
+    if (g_store_dir.empty()) {
+        if (const char* env = std::getenv("CPP_SPLITTER_STORE"); env && *env)
+            g_store_dir = env;
+        else
+            g_store_dir = (fs::current_path() / ".cpp-splitter-store").string();
+        std::error_code ec;
+        fs::create_directories(g_store_dir, ec);
+    }
+    return g_store_dir;
+}
+
+// One hash per file per launcher run: a unit's pieces share their prerequisites.
+static std::string cached_content_hash(const std::string& path) {
+    static std::map<std::string, std::string> memo;
+    static std::mutex mtx;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = memo.find(path);
+        if (it != memo.end()) return it->second;
+    }
+    const std::string h = file_content_hash(path);
+    std::lock_guard<std::mutex> lock(mtx);
+    memo[path] = h;
+    return h;
+}
+
+// Whether every prerequisite recorded beside an output still hashes as it did.
+static bool store_deps_current(const std::string& deps_file) {
+    std::ifstream ifs(deps_file);
+    if (!ifs.is_open()) return false;
+    std::string line;
+    bool any = false;
+    while (std::getline(ifs, line)) {
+        const size_t space = line.find(' ');
+        if (space == std::string::npos) continue;
+        any = true;
+        if (cached_content_hash(line.substr(space + 1)) != line.substr(0, space)) return false;
+    }
+    return any;
+}
+
+// Whether an object defines a symbol that may exist once only: a global that is not weak.
+// The shared piece reads the original headers, and a header may hold a non-inline
+// definition -- an implementation include's members, a namespace-scope variable -- which
+// the compiler then emits strong; every unit linking the object would carry it. The
+// compiler's own verdict, read off the symbol table, rather than a prediction from the
+// AST: `nm -g --defined-only`, T D B R C strong, W V weak. No nm, no sharing.
+static bool store_object_has_strong_symbols(const std::string& obj) {
+    FILE* pipe = ::popen(("nm -g --defined-only " + shell_quote(obj) + " 2>/dev/null").c_str(), "r");
+    if (!pipe) return true;
+    char line[4096];
+    bool strong = false, any = false;
+    while (std::fgets(line, sizeof(line), pipe)) {
+        any = true;
+        // "<address> <type> <name>", or "<type> <name>" for an undefined symbol.
+        std::istringstream ls(line);
+        std::string a, b;
+        ls >> a >> b;
+        const std::string type = b.size() == 1 ? b : a;
+        if (type.size() == 1 && std::strchr("TDBRC", type[0])) { strong = true; break; }
+    }
+    const int rc = ::pclose(pipe);
+    (void)any;
+    return strong || rc != 0;
+}
+
+static void store_write_deps(const std::string& deps_file, const std::string& dep_file) {
+    std::ofstream deps(deps_file);
+    for (const auto& dep : depfile_prerequisites(dep_file))
+        deps << cached_content_hash(dep) << " " << dep << "\n";
+}
+
+// A mkdir lock. Taken for a compile; never waited on while another is held.
+static bool store_try_lock(const std::string& lock_dir) {
+    std::error_code ec;
+    if (fs::create_directory(lock_dir, ec)) return true;
+    // A lock older than ten minutes belongs to a launcher that is gone.
+    const auto age = fs::file_time_type::clock::now() - fs::last_write_time(lock_dir, ec);
+    if (!ec && age > std::chrono::minutes(10)) {
+        fs::remove(lock_dir, ec);
+        return fs::create_directory(lock_dir, ec);
+    }
+    return false;
+}
+
+static void store_unlock(const std::string& lock_dir) {
+    std::error_code ec;
+    fs::remove(lock_dir, ec);
+}
+
+static void store_wait_unlocked(const std::string& lock_dir) {
+    std::error_code ec;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+    while (fs::exists(lock_dir, ec) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+// The anchor piece a header definition shares, if it can be shared: inline, external,
+// nameable, not overloaded in its scope within the file (an `auto` anchor could not
+// choose), not under `extern "C"`, not from a macro invocation, not always-inline. Empty
+// otherwise.
+static std::string store_anchor_text(const FunctionInfo& fn,
+                                     const std::vector<FunctionInfo>& siblings,
+                                     const std::string& abs_header,
+                                     std::string& why_not) {
+    why_not.clear();
+    if (!fn.is_inlined) why_not = "not inline";
+    else if (!fn.external_linkage || fn.is_static || fn.in_unnamed_ns) why_not = "internal linkage";
+    else if (fn.c_linkage) why_not = "C linkage";
+    else if (fn.macro_invocation || fn.shares_extent) why_not = "from a macro invocation";
+    else if (fn.is_template || fn.in_class_template) why_not = "template";
+    else if (fn.in_anonymous_class || fn.in_specialization_without_name) why_not = "unnameable scope";
+    else if (fn.is_ctor_or_dtor || fn.is_conversion || fn.is_virtual) why_not = "special member";
+    else if (fn.kept_with_variable) why_not = "kept with a variable";
+    else if (!fn.always_inline_ranges.empty()) why_not = "always_inline";
+    else if (fn.name.empty() || fn.name.rfind("operator", 0) == 0) why_not = "operator";
+    if (!why_not.empty()) return "";
+    std::string qualified;
+    for (const auto& part : fn.scope_chain) qualified += part.name + "::";
+    qualified += fn.name;
+    unsigned same = 0;
+    for (const auto& other : siblings) {
+        if (other.name != fn.name || other.scope_chain.size() != fn.scope_chain.size()) continue;
+        bool eq = true;
+        for (size_t i = 0; i < fn.scope_chain.size(); ++i)
+            if (other.scope_chain[i].name != fn.scope_chain[i].name) { eq = false; break; }
+        if (eq) ++same;
+    }
+    // Overloaded in its scope: the address alone is ambiguous, so the anchor names the
+    // type -- the return type and the parameter list the display name carries -- and lets
+    // static_cast choose. Spelled at namespace scope, so a class-scope typedef in the
+    // parameter list fails the compile, which marks the key and leaves the unit its own
+    // piece. A member's pointer type carries the class and the const.
+    std::string anchor;
+    if (same == 1) {
+        anchor = "&" + qualified;
+    } else {
+        const size_t paren = fn.qualified_name.find('(');
+        if (paren == std::string::npos || fn.return_type.empty()) {
+            why_not = "overloaded in its scope";
+            return "";
+        }
+        const std::string params = fn.qualified_name.substr(paren);
+        const bool member = !fn.scope_chain.empty() &&
+                            fn.scope_chain.back().kind == ScopeKind::Class && !fn.is_static_member;
+        std::string type;
+        if (member) {
+            std::string cls;
+            for (size_t i = 0; i < fn.scope_chain.size(); ++i)
+                cls += (i ? "::" : "") + fn.scope_chain[i].name;
+            type = fn.return_type + " (" + cls + "::*)" + params + (fn.is_const_member ? " const" : "");
+        } else {
+            type = fn.return_type + " (*)" + params;
+        }
+        anchor = "static_cast<" + type + ">(&" + qualified + ")";
+    }
+    std::ostringstream text;
+    // No line numbers: the key must survive an edit to the body.
+    text << "// Shared piece: " << fn.signature << "\n"
+         << "// Source: " << abs_header << "\n"
+         << "#include \"" << abs_header << "\"\n"
+         << "__attribute__((used)) static const auto cpp_splitter_anchor = " << anchor << ";\n";
+    return text.str();
+}
+
+// Writes the anchor piece to the store and returns its key.
+static std::string store_write_piece(const std::string& anchor_text) {
+    const std::string key = hash_bytes(anchor_text);
+    const std::string path = store_dir() + "/" + key + ".cpp";
+    if (!fs::exists(path) || read_file(path) != anchor_text) {
+        const std::string tmp = path + ".tmp." + std::to_string(::getpid());
+        {
+            std::ofstream ofs(tmp);
+            if (!ofs.is_open()) return "";
+            ofs << anchor_text;
+        }
+        std::error_code ec;
+        fs::rename(tmp, path, ec);
+        if (ec) { fs::remove(tmp, ec); return ""; }
+    }
+    return key;
+}
+
+struct StorePiece {
+    std::string key;        // from the twin's `// Store:` line
+    std::string header;     // the original header, from `// Header:`
+    std::string twin_obj;   // the per-unit object this stands in for
+    std::string obj;        // the shared object, once resolved; empty when it failed
+};
+
+// What a per-unit piece says about its shared twin, or false when it has none.
+static bool store_piece_of(const std::string& twin_cpp, StorePiece& sp) {
+    std::ifstream ifs(twin_cpp);
+    std::string line;
+    sp.key.clear(); sp.header.clear();
+    for (int i = 0; i < 8 && std::getline(ifs, line); ++i) {
+        if (line.rfind("// Store: ", 0) == 0) sp.key = line.substr(10);
+        else if (line.rfind("// Header: ", 0) == 0) sp.header = line.substr(11);
+    }
+    return !sp.key.empty() && !sp.header.empty();
+}
+
+// Resolves each piece to a shared object: current in the store, compiled now, or -- when
+// the standalone compile failed -- left empty for the caller to compile the twin. The
+// compiles go through compile_parallel() like any piece, so under the tipi driver they are
+// cluster actions keyed by the header and the anchor alone.
+static void ensure_store_objects(std::vector<StorePiece>& pieces,
+                                 const std::string& compile_prefix,
+                                 const std::string& pch_compiler,
+                                 const std::vector<std::string>& compile_flags,
+                                 bool tipi_compiler_driver_in_use,
+                                 bool verbose,
+                                 std::ostream& out) {
+    if (pieces.empty()) return;
+    std::string joined;
+    for (const auto& f : compile_flags) joined += f + "\n";
+    const std::string flags_hash = hash_bytes(joined);
+    const std::string& store = store_dir();
+
+    auto obj_of = [&](const StorePiece& sp) { return store + "/" + sp.key + "-" + flags_hash + ".o"; };
+    auto failed = [&](const StorePiece& sp) {
+        const std::string marker = obj_of(sp) + ".fail";
+        return fs::exists(marker) && read_file(marker) == cached_content_hash(sp.header);
+    };
+    auto current = [&](const StorePiece& sp) {
+        const std::string obj = obj_of(sp);
+        return fs::exists(obj) && store_deps_current(obj + ".deps");
+    };
+    // The header's own PCH: one per (header, flags), built under its lock. Waiting on it
+    // is safe, its holder waits on nothing.
+    std::set<std::string> pch_ready;
+    auto header_pch = [&](const std::string& header) -> std::string {
+        const std::string hfile = store + "/" + hash_bytes(header + "\n" + flags_hash) + ".h";
+        if (!pch_ready.count(hfile)) {
+            const std::string text = "#include \"" + header + "\"\n";
+            if (!fs::exists(hfile) || read_file(hfile) != text) {
+                std::ofstream ofs(hfile);
+                if (ofs.is_open()) ofs << text;
+            }
+            store_wait_unlocked(hfile + ".lock");
+            if (store_try_lock(hfile + ".lock")) {
+                build_pch(hfile, pch_compiler, "", compile_flags, "", verbose, out);
+                store_unlock(hfile + ".lock");
+            } else {
+                store_wait_unlocked(hfile + ".lock");
+            }
+            pch_ready.insert(hfile);
+        }
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(hfile + ".gch", ec))
+            if (entry.path().extension() == ".gch") return hfile;
+        return "";
+    };
+
+    struct Owned { size_t index; std::string obj, lock; };
+    std::vector<Owned> owned;
+    std::vector<size_t> pending;
+    std::vector<CompileJob> jobs;
+
+    auto start_compile = [&](size_t i) {
+        StorePiece& sp = pieces[i];
+        const std::string obj = obj_of(sp);
+        const std::string pch = header_pch(sp.header);
+        std::string cmd = compile_prefix;
+        for (const auto& f : compile_flags) cmd += " " + shell_quote(f);
+        if (!pch.empty()) cmd += " -include " + shell_quote(pch);
+        cmd += " -MD -MF " + shell_quote(obj + ".d") + " -MT " + shell_quote(obj);
+        cmd += " -c -o " + shell_quote(obj + ".tmp") + " " + shell_quote(store + "/" + sp.key + ".cpp");
+        jobs.push_back({cmd, store + "/" + sp.key + ".cpp", obj + ".tmp"});
+        owned.push_back({i, obj, obj + ".lock"});
+    };
+    auto finish = [&](bool ok, const Owned& o) {
+        StorePiece& sp = pieces[o.index];
+        std::error_code ec;
+        if (ok && store_object_has_strong_symbols(o.obj + ".tmp")) {
+            if (verbose)
+                out << "[cpp-splitter] shared piece defines a symbol that may exist once only,"
+                       " the unit compiles its own: " << sp.header << "\n";
+            ok = false;
+        }
+        if (ok) {
+            store_write_deps(o.obj + ".deps", o.obj + ".d");
+            fs::rename(o.obj + ".tmp", o.obj, ec);
+            fs::remove(o.obj + ".fail", ec);
+            sp.obj = ec ? "" : o.obj;
+        } else {
+            fs::remove(o.obj + ".tmp", ec);
+            std::ofstream marker(o.obj + ".fail");
+            if (marker.is_open()) marker << cached_content_hash(sp.header);
+            sp.obj.clear();
+        }
+        store_unlock(o.lock);
+    };
+
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        StorePiece& sp = pieces[i];
+        if (current(sp)) { sp.obj = obj_of(sp); continue; }
+        if (failed(sp)) { sp.obj.clear(); continue; }
+        if (!store_try_lock(obj_of(sp) + ".lock")) { pending.push_back(i); continue; }
+        if (current(sp)) { store_unlock(obj_of(sp) + ".lock"); sp.obj = obj_of(sp); continue; }
+        start_compile(i);
+    }
+    if (!jobs.empty()) {
+        if (verbose) out << "[cpp-splitter] compiling " << jobs.size() << " shared piece(s)\n";
+        auto results = compile_parallel(jobs, tipi_compiler_driver_in_use, verbose, out);
+        for (size_t j = 0; j < results.size(); ++j) {
+            if (results[j].exit_code != 0 && verbose)
+                out << "[cpp-splitter] shared piece failed, the unit compiles its own: "
+                    << results[j].source_file << "\n" << results[j].stderr_output;
+            finish(results[j].exit_code == 0, owned[j]);
+        }
+    }
+    // What another launcher was compiling: wait for it, take over if it went away.
+    for (size_t i : pending) {
+        StorePiece& sp = pieces[i];
+        store_wait_unlocked(obj_of(sp) + ".lock");
+        if (current(sp)) { sp.obj = obj_of(sp); continue; }
+        if (failed(sp)) { sp.obj.clear(); continue; }
+        if (!store_try_lock(obj_of(sp) + ".lock")) { sp.obj.clear(); continue; }
+        jobs.clear(); owned.clear();
+        start_compile(i);
+        auto results = compile_parallel(jobs, tipi_compiler_driver_in_use, verbose, out);
+        finish(!results.empty() && results[0].exit_code == 0, owned[0]);
+    }
+    if (verbose) {
+        size_t shared = 0;
+        for (const auto& sp : pieces) if (!sp.obj.empty()) ++shared;
+        out << "[cpp-splitter] shared pieces: " << shared << " of " << pieces.size()
+            << " from " << store << "\n";
+    }
+}
+
 // The source's include prefix: everything up to the first construct that is not a
 // preprocessor directive, comment or blank line.
 //
@@ -6072,6 +6430,17 @@ static void emit_split_files(CXTranslationUnit tu,
         if (should_keep_in_header(fn))
             content << "// Note: kept in the preamble, not compiled -- "
                     << keep_reason(fn) << "\n";
+        // A header definition every includer can share: the anchor piece goes to the store,
+        // and this per-unit piece is compiled only if that one cannot be. TODO/51.
+        std::string store_key, not_shared;
+        if (input_is_header && !should_keep_in_header(fn) && inclusion <= 1 &&
+            !g_module_unit.interface && g_unit_imports.empty()) {
+            const std::string anchor_text = store_anchor_text(fn, functions, abs_path, not_shared);
+            if (!anchor_text.empty()) store_key = store_write_piece(anchor_text);
+        }
+        if (!store_key.empty())
+            content << "// Store: " << store_key << "\n"
+                    << "// Header: " << abs_path << "\n";
         content << "// ---\n\n";
         // A header is not necessarily self-contained: it is written to be included at a
         // particular point, after earlier includes have completed the types it uses.
@@ -6275,6 +6644,8 @@ static void emit_split_files(CXTranslationUnit tu,
             out << "  [" << file_counter << "] " << fn.signature;
             if (kept) out << "  (header-only)";
             if (!needs_write) out << "  (unchanged)";
+            if (!store_key.empty()) out << "  (shared: " << store_key << ")";
+            else if (!not_shared.empty() && !kept) out << "  (not shared: " << not_shared << ")";
             out << "\n";
             out << "      Lines " << fn.start_line << "-" << fn.end_line
                 << " -> " << out_path << "\n";
@@ -7739,7 +8110,10 @@ static int run_as_launcher(int argc, char* argv[]) {
     const bool chained_behind_driver = (compiler == "tipi-compiler-driver") && !other_flags.empty();
     std::string compile_prefix = shell_quote(compiler);
     std::vector<std::string> compile_flags = other_flags;
+    // The compiler itself, for a PCH: built here, not behind the driver.
+    std::string pch_compiler = compiler;
     if (chained_behind_driver) {
+        pch_compiler = compile_flags.front();
         compile_prefix += " " + shell_quote(compile_flags.front());
         compile_flags.erase(compile_flags.begin());
     }
@@ -8041,10 +8415,36 @@ static int run_as_launcher(int argc, char* argv[]) {
         output_file = fs::path(input_file).stem().string() + ".o";
 
     if (!split_build_failed) {
+        // The header pieces every includer shares, resolved first: current in the store,
+        // compiled now, or failed -- in which case the unit's own twin is compiled below.
+        // TODO/51.
+        std::vector<StorePiece> store_pieces;
+        for (const auto& hobj : sr.header_obj_files) {
+            const std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
+            StorePiece sp;
+            if (fs::exists(hcpp) && store_piece_of(hcpp, sp)) {
+                sp.twin_obj = hobj;
+                store_pieces.push_back(sp);
+            }
+        }
+        ensure_store_objects(store_pieces, compile_prefix, pch_compiler, compile_flags,
+                             tipi_compiler_driver_in_use, verbose, std::cerr);
+        std::map<std::string, std::string> shared_obj;
+        for (const auto& sp : store_pieces)
+            if (!sp.obj.empty()) shared_obj[sp.twin_obj] = sp.obj;
+
         std::vector<CompileJob> hdr_compile_jobs;
         for (const auto& hobj : sr.header_obj_files) {
             std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
             if (!fs::exists(hcpp)) continue;
+            {
+                auto shared = shared_obj.find(hobj);
+                if (shared != shared_obj.end()) {
+                    obj_files.push_back(shared->second);
+                    if (verbose) std::cerr << "[cpp-splitter] shared piece .o: " << shared->second << "\n";
+                    continue;
+                }
+            }
             // Against the context preamble the piece includes first, whose PCH is rebuilt
             // when a header copy changes; without it a header piece kept its object
             // across such a change.
@@ -8094,6 +8494,28 @@ static int run_as_launcher(int argc, char* argv[]) {
                 }
             }
         }
+    }
+
+    // Every piece of the unit was shared, so no compile of its own carried the dependency
+    // flags: the preamble is preprocessed for them. TODO/51.
+    if (!split_build_failed && !dep_flags_placed && (has_md || has_mmd) && !module_interface) {
+        std::string cmd = compile_prefix;
+        cmd += " -I" + shell_quote(split_dir);
+        cmd += " -I" + shell_quote(split_include_root(split_dir));
+        for (const auto& hdr_dir : sr.header_obj_dirs) cmd += " -I" + shell_quote(hdr_dir);
+        cmd += " -I" + shell_quote(fs::absolute(input_file).parent_path().string());
+        for (const auto& f : compile_flags) cmd += " " + shell_quote(f);
+        cmd += has_mmd ? " -x c++ -MM" : " -x c++ -M";
+        if (!mf_path.empty()) cmd += " -MF " + shell_quote(mf_path);
+        const std::string mt = mt_target.empty() ? output_file : mt_target;
+        if (!mt.empty()) cmd += " -MT " + shell_quote(mt);
+        cmd += " " + shell_quote(sr.preamble_filename);
+        if (verbose) std::cerr << "[cpp-splitter] depfile from the preamble: " << cmd << "\n";
+        if (run_command_quiet(cmd) != 0) {
+            std::cerr << "cpp-splitter: could not write the dependency file from the preamble\n";
+            split_build_failed = true;
+        }
+        dep_flags_placed = true;
     }
 
     if (!split_build_failed) {
@@ -8401,14 +8823,37 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        std::map<std::string, std::string> shared_obj;   // twin .o -> shared .o, TODO/51
         if (compile_ok && !sr.header_obj_files.empty()) {
             std::cout << "\n--- Compiling header dependencies ---\n\n";
+
+            {
+                std::vector<StorePiece> store_pieces;
+                for (const auto& hobj : sr.header_obj_files) {
+                    const std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
+                    StorePiece sp;
+                    if (fs::exists(hcpp) && store_piece_of(hcpp, sp)) {
+                        sp.twin_obj = hobj;
+                        store_pieces.push_back(sp);
+                    }
+                }
+                std::vector<std::string> store_flags = {"-std=c++17"};
+                for (const auto& f : extra_flags) store_flags.push_back(f);
+                ensure_store_objects(store_pieces, cxx_compiler, cxx_compiler, store_flags,
+                                     false, true, std::cout);
+                for (const auto& sp : store_pieces)
+                    if (!sp.obj.empty()) shared_obj[sp.twin_obj] = sp.obj;
+            }
 
             std::vector<CompileJob> hdr_jobs;
             for (size_t hi = 0; hi < sr.header_obj_files.size(); ++hi) {
                 const auto& hobj = sr.header_obj_files[hi];
                 std::string hcpp = hobj.substr(0, hobj.size() - 2) + ".cpp";
                 if (!fs::exists(hcpp)) continue;
+                if (shared_obj.count(hobj)) {
+                    std::cout << "  (shared) " << shared_obj[hobj] << "\n";
+                    continue;
+                }
 
                 std::string hdr_preamble;
                 for (const auto& hdir : sr.header_obj_dirs) {
@@ -8455,7 +8900,11 @@ int main(int argc, char* argv[]) {
             std::cout << "\n--- Linking ---\n\n";
 
             for (const auto& hobj : sr.header_obj_files) {
-                if (fs::exists(hobj)) {
+                auto shared = shared_obj.find(hobj);
+                if (shared != shared_obj.end()) {
+                    obj_files.push_back(shared->second);
+                    std::cout << "  (shared) " << shared->second << "\n";
+                } else if (fs::exists(hobj)) {
                     obj_files.push_back(hobj);
                     std::cout << "  (header dep) " << hobj << "\n";
                 }
