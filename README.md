@@ -22,7 +22,7 @@ The first configure fetches and builds Boost 1.85 through HermeticFetchContent a
 minutes; later ones reuse it.
 
 <details>
-<summary><b>macOS</b> — host build with tipi's clang or Apple's, and the Linux image through Docker</summary>
+<summary><b>macOS</b> — host build with tipi's clang, Apple's or Homebrew's, and the Linux image through Docker</summary>
 
 
 Host build with the clang 13 tipi installs at `/usr/local/share/.tipi/clang/a7e6968`
@@ -44,6 +44,21 @@ cmake-re --host -S . -B build/cmake-re-macos-apple-clang -DCMAKE_BUILD_TYPE=Debu
 cmake-re --build build/cmake-re-macos-apple-clang --host -j8
 ctest-re --test-dir build/cmake-re-macos-apple-clang --output-on-failure -j8
 ```
+
+Or entirely with Homebrew's LLVM — its clang driving the compiles and its libclang parsing.
+This is the build for C++20 named modules (TODO/43): Apple's clang has no `clang-scan-deps`
+for CMake's module scan, and `-fmodules-reduced-bmi` needs clang >= 20. The toolchain file
+points the compiler at the macOS SDK itself, since a non-Apple clang does not find it:
+
+```sh
+brew install llvm
+cmake-re --host -S . -B build/cmake-re-macos-brew-llvm -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=environments/macos-brew-llvm.cmake
+cmake-re --build build/cmake-re-macos-brew-llvm --host -j8
+ctest-re --test-dir build/cmake-re-macos-brew-llvm --output-on-failure -j8
+```
+
+`launcher.module_interface_split` and `example.cpp_20_modules` run here and skip on the two
+builds above. `./benchmark-cpp20-modules.sh` uses this splitter by default.
 
 The same Mac can also run the Linux build below: `cmake-re` starts the image through Docker
 Desktop (>= 27.2.0) and mounts the tree into it.
