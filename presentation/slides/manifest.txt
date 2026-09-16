@@ -39,6 +39,12 @@
 20-benchmark-wall.md
 21-benchmark-actions.md
 22-benchmark-remote.md
+22a-opencv-quote.md
+22b-opencv.md
+22c-opencv-body-edit.md
+22d-opencv-wall.md
+22e-opencv-actions.md
+22f-opencv-remote.md
 23-p4c.md
 23a-p4c.md
 23b-p4c-body-edit.md
