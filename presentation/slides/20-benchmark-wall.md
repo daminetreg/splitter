@@ -21,5 +21,5 @@ Two scenarios.
 :::
 
 ::: tiny
-Each bar is value ÷ this set’s 1096.6s maximum, from a zero baseline. Full: plain is 1,641 cached actions; split is 4,878 remote actions — 279 parses and every piece compiled on workers — plus 1,791 cached. Transfer and parsing, not cold compilation.
+Each bar is value ÷ this set’s 1096.6s maximum. Full: plain is 1,641 remote build actions; split is 6,669 remote actions — 279 parses and every piece compiled on workers.
 :::

@@ -11,5 +11,5 @@ notes: The same cluster run, read as the splitter's own counts rather than wall 
 :::
 
 ::: callout
-The full row is transfer and parsing on the cluster, not compilation: every piece compiled without the local PCH, every remote split downloaded, through 8 slots per launcher. One shared piece per header function took the same row from 2080.2s (one piece per includer, 15 Sep) to 1096.6s.
+The full row is transfer and parsing on the cluster, not compilation: every piece compiled without the local PCH, every remote split downloaded, through 8 slots per launcher.
 :::

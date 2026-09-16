@@ -32,12 +32,11 @@
 15d-section-map.md
 15e-convergence.md
 19a-fission-quote.md
+19aa-fission-quote.md
 19b-boost-spirit.md
 19c-spirit-body-edit.md
 20-benchmark-wall.md
 21-benchmark-actions.md
 22-benchmark-remote.md
-23-benchmark-host.md
-24-costs.md
 25-limitations.md
 26-closing.md

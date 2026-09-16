@@ -30,5 +30,5 @@ namespace boost { namespace spirit { namespace char_encoding {
 :::
 
 ::: tiny
-`toucs4` is named by templates in `char_class.hpp` and `qi/char/char.hpp`, so no unit can declare it only; it is emitted by one unit. The rows that follow measure this edit; full, no-op and the touches bound the overhead.
+`toucs4` is named by templates in `char_class.hpp` and `qi/char/char.hpp`, so no unit can declare it only; it is emitted by one unit.
 :::
