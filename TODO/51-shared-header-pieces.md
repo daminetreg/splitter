@@ -102,3 +102,107 @@ On the cluster, `benchmarks/boost-spirit-rbe-summary-16-Sep-2026.md`, remote spl
 `-j500`: the body row 38.8s with 51 actions against 129.8s with 267 the day before and
 136.2s plain; the full row 1096.6s (4878 actions, every piece compiled without a PCH on
 a worker) against 2080.2s; the no-op 24.3s against 31.7s.
+
+## Reconsidered (16 September 2026): the anchor piece gives up what a header piece is for
+
+The store's piece includes the **original header, whole**, and anchors one function:
+
+```cpp
+#include "/abs/path/to/mylib.h"
+__attribute__((used)) static const auto cpp_splitter_anchor = &multiply;
+```
+
+That is not the header piece TODO/09 and TODO/48 built. A per-unit piece includes the
+unit's preamble and the *rewritten* header -- declarations only -- and then one body;
+every other body of the header is a declaration to it. The anchor piece parses every
+body of the header to emit one, and its key is the header's content, so:
+
+- **An edit to one body invalidates every shared object of the header.** The header's
+  content changed, every `<key>-<flags>.o` records it as a prerequisite, every one is
+  rebuilt. The Spirit body row says so: one edit to `toucs4()` is 51 shared compiles --
+  the header's 15 sharable functions and 36 from three headers whose closure reaches it.
+  Per unit, the same edit was one piece per includer, each compiling *only that body*
+  behind a copy TODO/48 keeps byte-identical. The store traded "one body × N includers"
+  for "N bodies × 1 header", and the tool's promise -- an edit compiles the body that
+  changed -- holds for neither the count nor the work.
+- **Every piece pays for every body, on every compile.** A header with one body that is
+  long to compile -- a heavy instantiation, a large `constexpr` evaluation -- charges it
+  to each of its N pieces, and to each of them again when any other body is edited. The
+  rewritten header spared the pieces exactly that.
+- **macOS.** `nm` prints Mach-O weak definitions as `T`, so the store refused every
+  shared piece there and the per-unit pieces ran (TODO/54). The fix that read `nm -m`
+  (`0474cf1`) was reverted (`a557d6f`) rather than bring the anchor piece to macOS: the
+  per-unit pieces, for all their duplication, keep the edit to one body. TODO/54 stays
+  open until the design below lands, and then applies to it.
+
+## Revised design: share the per-unit piece, not the header
+
+The piece that is shared should be the per-unit piece with the unit taken out of it:
+the rewritten header and one body, nothing of the includer.
+
+- **What the store holds per header** (keyed on the *rewritten* header's content and the
+  flags): `R`, the declarations-only copy -- the same text every includer already
+  generates from the same original, and byte-identical across body edits (TODO/48) --
+  and its PCH, built once per (header, flags) as `<hkey>.h.gch` is today.
+- **What the store holds per function** (keyed on `R`'s hash, the body text's hash and
+  the flags): the piece as the twin writes it minus the preamble include:
+
+  ```cpp
+  #include "<store>/<hkey>.h"          // R: the rewritten header, declarations only
+  __attribute__((used))
+  #line 12 "/abs/path/to/mylib.h"
+  inline int multiply(int a, int b) { return a * b; }
+  ```
+
+  and its object. A body edit changes one body's hash: one key changes, one compile;
+  the other functions' keys are unchanged and their objects current. Two bodies edited,
+  two compiles. `R` does not change, so its PCH does not either.
+- **Context.** The unit's preamble is what a per-unit piece includes first, because a
+  header may need its includer's context (TODO/09: Boost.System's
+  `std_category_impl.hpp`). A shared piece has no unit, so it has to be self-contained:
+  the store tries the piece as above and, when it does not compile, marks the key
+  `.fail` and the units compile their own -- the fallback that exists today, reached
+  by the same headers as the anchor's `.fail` (those with no include guard, those that
+  read a macro the includer sets). A header with an include guard and its own includes,
+  which is nearly every library header, compiles.
+- **Freshness** as today, by content: the object's record names `R`, the piece text and
+  the include closure `R` reached. The header's own includes changing rebuilds every
+  piece of the header, correctly; a body changing rebuilds its piece.
+- **Strong symbols.** The piece emits exactly the one body and what `R` declares;
+  `R` carries no non-inline definition (they moved to their own pieces or to the unit's
+  definitions header), so the `nm` gate becomes a check that something unexpected did
+  not slip in rather than the thing that decides sharing. On Mach-O it must read
+  `nm -m` (TODO/54).
+- **Overloads and members**: the piece is the body as written, so the typed anchor
+  goes; a member is emitted in its out-of-line form as the twin already does.
+- **Remote execution**: the action's inputs are `R`, the piece and `R`'s closure -- one
+  key per function per flag set, as now; the parse on a worker writes `R` and the piece
+  the same way the launcher does here.
+- **Cost model**, Spirit, `toucs4()` edited: 1 shared compile instead of 51 (and
+  instead of 267 per unit); no-op unchanged, one record per function checked; full
+  unchanged in count, cheaper per piece since each parses declarations, not N bodies.
+
+### Tests
+
+- `launcher.shared_piece_body_isolation`: a header with `f()` and `g()`, two units
+  including it. After the first build the store has one object each. Edit `f()`'s body:
+  exactly one new object, `g()`'s object untouched (same content hash and mtime), no
+  per-unit compile, the program prints the new value. Edit both: two.
+- `launcher.shared_piece_heavy_neighbour`: a header with a body that is long to compile
+  (a deep recursive `constexpr` or a large instantiation) beside a trivial one; an edit
+  to the trivial body must not recompile the heavy one -- asserted on the store's
+  objects, and on the wall time of the edit build being a fraction of the cold one.
+- `launcher.shared_header_piece` as today, on the new shape; the context-needing
+  header still goes per unit.
+- Then, in CLAUDE.md's order: Boost.Filesystem 0/0, the Spirit suite through
+  `SpiritTestsFromJamfiles.cmake` 0/0 with 268 programs passing, and the body row of
+  `benchmark-spirit-split.sh` counted: one shared compile.
+
+### Acceptance Criteria
+
+- The three fixtures pass on Linux and on `macos-brew-llvm`; the macOS run needs the
+  `nm -m` read from TODO/54 on top.
+- Spirit's body row: 1 shared compile for `toucs4()`, the wall time at or below the
+  28.7s / 38.8s of the anchor design here and on the cluster; the full row's per-piece
+  cost below the anchor design's, since no piece parses more than one body.
+- `benchmarks/` gets the rows, and TODO/54 is closed against this design.
