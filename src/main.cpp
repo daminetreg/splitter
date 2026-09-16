@@ -4352,10 +4352,16 @@ static std::string store_anchor_text(const FunctionInfo& fn,
         }
         anchor = "static_cast<" + type + ">(&" + qualified + ")";
     }
+    return anchor;
+}
+
+// The shared piece's text, from the header and the anchor alone: the per-unit twin
+// carries both, so a launcher that has the twin and not the store -- the split was
+// produced on the cluster, whose store stayed there -- writes the piece again, with the
+// same key. No line numbers, no signature: the key must survive an edit to the body.
+static std::string store_piece_text(const std::string& abs_header, const std::string& anchor) {
     std::ostringstream text;
-    // No line numbers: the key must survive an edit to the body.
-    text << "// Shared piece: " << fn.signature << "\n"
-         << "// Source: " << abs_header << "\n"
+    text << "// Shared piece of " << abs_header << "\n"
          << "#include \"" << abs_header << "\"\n"
          << "__attribute__((used)) static const auto cpp_splitter_anchor = " << anchor << ";\n";
     return text.str();
@@ -4382,20 +4388,26 @@ static std::string store_write_piece(const std::string& anchor_text) {
 struct StorePiece {
     std::string key;        // from the twin's `// Store:` line
     std::string header;     // the original header, from `// Header:`
+    std::string anchor;     // the anchor expression, from `// Anchor:`
     std::string twin_obj;   // the per-unit object this stands in for
     std::string obj;        // the shared object, once resolved; empty when it failed
 };
 
-// What a per-unit piece says about its shared twin, or false when it has none.
+// What a per-unit piece says about its shared twin, or false when it has none. The
+// piece is written to the store if it is not there.
 static bool store_piece_of(const std::string& twin_cpp, StorePiece& sp) {
     std::ifstream ifs(twin_cpp);
     std::string line;
-    sp.key.clear(); sp.header.clear();
+    sp.key.clear(); sp.header.clear(); sp.anchor.clear();
     for (int i = 0; i < 8 && std::getline(ifs, line); ++i) {
         if (line.rfind("// Store: ", 0) == 0) sp.key = line.substr(10);
         else if (line.rfind("// Header: ", 0) == 0) sp.header = line.substr(11);
+        else if (line.rfind("// Anchor: ", 0) == 0) sp.anchor = line.substr(11);
     }
-    return !sp.key.empty() && !sp.header.empty();
+    if (sp.key.empty() || sp.header.empty() || sp.anchor.empty()) return false;
+    if (!fs::exists(store_dir() + "/" + sp.key + ".cpp"))
+        store_write_piece(store_piece_text(sp.header, sp.anchor));
+    return true;
 }
 
 // Resolves each piece to a shared object: current in the store, compiled now, or -- when
@@ -6596,15 +6608,17 @@ static void emit_split_files(CXTranslationUnit tu,
                     << keep_reason(fn) << "\n";
         // A header definition every includer can share: the anchor piece goes to the store,
         // and this per-unit piece is compiled only if that one cannot be. TODO/51.
-        std::string store_key, not_shared;
+        std::string store_key, store_anchor, not_shared;
         if (input_is_header && !should_keep_in_header(fn) && inclusion <= 1 &&
             !g_module_unit.interface && g_unit_imports.empty()) {
-            const std::string anchor_text = store_anchor_text(fn, functions, abs_path, not_shared);
-            if (!anchor_text.empty()) store_key = store_write_piece(anchor_text);
+            store_anchor = store_anchor_text(fn, functions, abs_path, not_shared);
+            if (!store_anchor.empty())
+                store_key = store_write_piece(store_piece_text(abs_path, store_anchor));
         }
         if (!store_key.empty())
             content << "// Store: " << store_key << "\n"
-                    << "// Header: " << abs_path << "\n";
+                    << "// Header: " << abs_path << "\n"
+                    << "// Anchor: " << store_anchor << "\n";
         content << "// ---\n\n";
         // A header is not necessarily self-contained: it is written to be included at a
         // particular point, after earlier includes have completed the types it uses.
