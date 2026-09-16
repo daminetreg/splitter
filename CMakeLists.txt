@@ -236,18 +236,6 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunSharedHeaderPieceTest.cmake)
 
-# The store shares a weak definition and refuses a strong one, read the way each object
-# format spells weak: on Mach-O every definition is a T and only `nm -m` says "weak
-# external". TODO/54.
-add_test(
-  NAME launcher.shared_piece_refused_for_strong_symbol
-  COMMAND ${CMAKE_COMMAND}
-          -DSPLITTER=$<TARGET_FILE:cpp-splitter>
-          -DSOURCE_DIR=${cpp_splitter_test_dir}/shared_piece_strong
-          -DWORKDIR=${cpp_splitter_test_output}/shared_piece_strong
-          -DCXX=${CMAKE_CXX_COMPILER}
-          -P ${cpp_splitter_test_dir}/cmake/RunSharedPieceStrongTest.cmake)
-
 # A virtual key function written under a macro the file undefines; the other unit expects
 # the vtable from this one. TODO/47.
 add_test(

@@ -65,24 +65,6 @@ Read the weak flag where Mach-O keeps it, keep the ELF parse where it works.
   `example/spirit-tests/SpiritTestsFromJamfiles.cmake`; the piece counts in
   `benchmarks/` for the shared store should then hold on macOS as they do on Linux.
 
-## Outcome (16 September 2026)
-
-`store_object_has_strong_symbols()` reads `nm -m -g --defined-only` under `__APPLE__`: a
-defined external symbol is weak when its line says `weak`, strong otherwise (`external` in
-`__TEXT`, `__DATA`, `__common`); the ELF parse is unchanged. Unit tests only, no Boost build
-this time, and no Linux run (Docker was down); the ELF branch is byte-for-byte the old one.
-
-- `launcher.shared_header_piece` passes on `macos-brew-llvm`, where it failed before with
-  "the store holds 0 object(s) for shared_fn()".
-- `launcher.shared_piece_refused_for_strong_symbol` (`test/shared_piece_strong/`): `once.h`
-  holds a non-inline `strong_once()` beside an inline `once_fn()`; the shared piece for
-  `once_fn()` carries `strong_once` strong and is refused with a `.fail` marker while
-  `shared_fn()` from `shared.h` is shared once. A non-inline header function on its own is
-  never a store candidate, which is why the fixture pairs the two. Passes on macOS;
-  63/63 on the `macos-brew-llvm` build.
-- Not done: the CI matrix change and the `example/mylib` store check on the other two macOS
-  builds.
-
 ## Acceptance Criteria
 
 - `launcher.shared_header_piece` passes on `macos-brew-llvm`, `macos-apple-clang` and
