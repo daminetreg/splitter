@@ -74,3 +74,29 @@ original headers the piece reads, so nothing dangles.
   programs pass.
 - Boost.Spirit body row (`-j16`, here): one compile for `toucs4`, and the full and no-op
   rows back near their pre-TODO/49 figures (438s, 11.8s) or below.
+
+## Outcome
+
+Implemented. Three things the rungs and the benchmark decided on the way:
+
+- Whether a header can be shared is not predictable from the AST -- `.ipp` members, a
+  static data member of a class template, a namespace-scope variable under a macro -- so
+  the compiler decides: `nm -g --defined-only` on the shared object, and a global that is
+  not weak (`T D B R C`) fails the key. `macro_definition_main`'s `.ipp` found it.
+- An overloaded name gets a typed anchor, `static_cast<R (*)(P)>(&f)` or
+  `static_cast<R (C::*)(P) const>(&C::f)`, from the return type and the display name; 40
+  of `qi/actions.cpp`'s 115 header pieces are overloads (`test_output_impl`, `isalnum`...).
+- The object's key leaves the include directories out and the record beside it names
+  the list the compile searched; a unit with another list checks that every prerequisite
+  resolves to the same file through its own. Spirit's test directories differ only by
+  their own `-I`, and the 8 groups share one object. The header PCH keeps the full list:
+  clang does not check a PCH's include paths against the compile's.
+
+Boost.Spirit, `benchmarks/boost-spirit-summary-14-Sep-2026.md`: the body row 28.7s (51
+shared compiles, 0 per unit) against 34.1s after TODO/49 and 56.9s plain; the full split
+build 460.7s against 882.4s; the no-op 22.2s against 29.2s, and 11.8s before TODO/49 --
+the launcher checking 135 shared records per unit. Boost.Filesystem 0/0; Spirit 0/0, 268
+programs pass; 33301 of 36943 header pieces shared from 413 objects.
+
+Still to measure: the cluster rows, where a shared piece is one action key for all its
+includers.

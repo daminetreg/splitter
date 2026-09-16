@@ -3899,16 +3899,166 @@ static std::string shell_quote(const std::string& s) {
 // `<gch>.deps` holds one `<content hash> <path>` per prerequisite. By content, not by
 // time: a header touched and not changed keeps the PCH, as it keeps the split (TODO/28).
 static std::string file_content_hash(const std::string& path);
-static bool gch_is_current(const std::string& gch_file) {
-    std::ifstream ifs(gch_file + ".deps");
+static std::string cached_content_hash(const std::string& path);
+static std::string hash_bytes(const std::string& s);
+
+// One line per prerequisite: `<hash> <mtime> <size> <path>`, or the older `<hash> <path>`.
+// A file whose mtime and size are as recorded is current without being read; one that
+// moved is hashed, once per launcher run. TODO/51.
+static std::string deps_line_for(const std::string& path) {
+    std::error_code ec;
+    const long long mtime = static_cast<long long>(fs::last_write_time(path, ec).time_since_epoch().count());
+    const unsigned long long size = static_cast<unsigned long long>(fs::file_size(path, ec));
+    return cached_content_hash(path) + " " + std::to_string(mtime) + " " +
+           std::to_string(ec ? 0 : size) + " " + path;
+}
+
+// Memoised on the line: a unit's pieces record the same prerequisites, so each is
+// stat'ed or hashed once per launcher run however many records name it.
+static bool deps_line_current(const std::string& line) {
+    static std::map<std::string, bool> memo;
+    auto seen = memo.find(line);
+    if (seen != memo.end()) return seen->second;
+    // `<hash> <mtime> <size> <path>`, or `<hash> <path>`.
+    const size_t s1 = line.find(' ');
+    const std::string hash = line.substr(0, s1);
+    std::string path = line.substr(s1 + 1);
+    const size_t s2 = line.find(' ', s1 + 1), s3 = s2 == std::string::npos ? s2 : line.find(' ', s2 + 1);
+    bool has_stat = false;
+    std::string a, b;
+    if (s3 != std::string::npos) {
+        a = line.substr(s1 + 1, s2 - s1 - 1);
+        b = line.substr(s2 + 1, s3 - s2 - 1);
+        has_stat = !a.empty() && !b.empty() &&
+                   a.find_first_not_of("-0123456789") == std::string::npos &&
+                   b.find_first_not_of("0123456789") == std::string::npos;
+        if (has_stat) path = line.substr(s3 + 1);
+    }
+    bool current = false;
+    if (has_stat) {
+        std::error_code ec;
+        const long long mtime = static_cast<long long>(fs::last_write_time(path, ec).time_since_epoch().count());
+        const unsigned long long size = static_cast<unsigned long long>(fs::file_size(path, ec));
+        current = !ec && std::to_string(mtime) == a && std::to_string(size) == b;
+    }
+    if (!current) current = cached_content_hash(path) == hash;
+    memo[line] = current;
+    return current;
+}
+
+// The include directories a compile searched, in order: -iquote, -I, -isystem, as the
+// compiler orders them. Absolute and normalised.
+static std::vector<std::string> include_dirs_of_flags(const std::vector<std::string>& flags) {
+    std::vector<std::string> quote, plain, system;
+    auto take = [&](const std::string& f, size_t i, const std::string& prefix,
+                    std::vector<std::string>& into) -> bool {
+        if (f.rfind(prefix, 0) != 0) return false;
+        std::string dir = f.substr(prefix.size());
+        if (dir.empty() && i + 1 < flags.size()) dir = flags[i + 1];
+        if (!dir.empty()) {
+            std::error_code ec;
+            into.push_back(fs::absolute(dir, ec).lexically_normal().string());
+        }
+        return true;
+    };
+    for (size_t i = 0; i < flags.size(); ++i) {
+        const std::string& f = flags[i];
+        if (take(f, i, "-iquote", quote) || take(f, i, "-isystem", system) ||
+            (f != "-I" + std::string() && take(f, i, "-I", plain)))
+            continue;
+    }
+    std::vector<std::string> all = quote;
+    all.insert(all.end(), plain.begin(), plain.end());
+    all.insert(all.end(), system.begin(), system.end());
+    return all;
+}
+
+// The flags with the include directories taken out: the shared object's key. Which
+// directories the compile searched is recorded beside the object instead, and checked.
+static std::vector<std::string> flags_without_include_dirs(const std::vector<std::string>& flags) {
+    std::vector<std::string> kept;
+    for (size_t i = 0; i < flags.size(); ++i) {
+        const std::string& f = flags[i];
+        if (f == "-I" || f == "-isystem" || f == "-iquote") { ++i; continue; }
+        if (f.rfind("-I", 0) == 0 || f.rfind("-isystem", 0) == 0 || f.rfind("-iquote", 0) == 0) continue;
+        kept.push_back(f);
+    }
+    return kept;
+}
+
+// Whether a prerequisite found through the recorded directories would be found at the same
+// place through the current ones: every spelling that could have reached it -- its path
+// under each recorded directory that prefixes it -- resolves, in the current order, to
+// the same file or to nothing.
+//
+// Memoised per launcher run: the current list is one per run, a relative path resolves
+// once, and a prerequisite is judged once per recorded list -- a unit's pieces share
+// their prerequisites and were built under a handful of lists.
+static bool prerequisite_resolves_alike(const std::string& path,
+                                        const std::vector<std::string>& recorded,
+                                        const std::string& recorded_hash,
+                                        const std::vector<std::string>& current) {
+    static std::map<std::string, std::string> resolved;   // rel -> first hit in `current`
+    static std::map<std::string, bool> verdict;           // recorded-list hash + path
+    const std::string rkey = recorded_hash + " " + path;
+    auto seen = verdict.find(rkey);
+    if (seen != verdict.end()) return seen->second;
+    bool alike = true;
+    for (const auto& dir : recorded) {
+        if (path.size() <= dir.size() + 1 || path.compare(0, dir.size(), dir) != 0 ||
+            path[dir.size()] != '/')
+            continue;
+        const std::string rel = path.substr(dir.size() + 1);
+        auto hit = resolved.find(rel);
+        if (hit == resolved.end()) {
+            std::string found;
+            std::error_code ec;
+            for (const auto& cur : current) {
+                const std::string candidate = cur + "/" + rel;
+                if (fs::exists(candidate, ec)) { found = candidate; break; }
+            }
+            hit = resolved.emplace(rel, found).first;
+        }
+        if (!hit->second.empty() && hit->second != path) { alike = false; break; }
+    }
+    verdict[rkey] = alike;
+    return alike;
+}
+
+static bool deps_file_current(const std::string& deps_file,
+                              const std::vector<std::string>* current_dirs = nullptr) {
+    std::ifstream ifs(deps_file);
     if (!ifs.is_open()) return false;
     std::string line;
+    bool any = false;
+    std::vector<std::string> recorded;
+    std::string recorded_hash;
+    bool same_dirs = true;
     while (std::getline(ifs, line)) {
-        const size_t space = line.find(' ');
-        if (space == std::string::npos) continue;
-        if (file_content_hash(line.substr(space + 1)) != line.substr(0, space)) return false;
+        if (line.rfind("#I", 0) == 0) {
+            std::istringstream ls(line.substr(2));
+            std::string dir;
+            while (std::getline(ls, dir, '\t'))
+                if (!dir.empty()) recorded.push_back(dir);
+            recorded_hash = hash_bytes(line);
+            same_dirs = !current_dirs || *current_dirs == recorded;
+            continue;
+        }
+        if (line.find(' ') == std::string::npos) continue;
+        any = true;
+        if (!deps_line_current(line)) return false;
+        if (!same_dirs) {
+            const size_t s1 = line.find(' ');
+            const size_t s3 = line.find(' ', line.find(' ', s1 + 1) + 1);
+            const std::string path = line.substr((s3 == std::string::npos ? s1 : s3) + 1);
+            if (!prerequisite_resolves_alike(path, recorded, recorded_hash, *current_dirs)) return false;
+        }
     }
-    return true;
+    return any;
+}
+
+static bool gch_is_current(const std::string& gch_file) {
+    return deps_file_current(gch_file + ".deps");
 }
 
 // The prerequisites a compiler wrote with -MD: everything after the colon, backslashes
@@ -4015,7 +4165,7 @@ static bool build_pch(const std::string& preamble_file,
         // `<content hash> <path>` per prerequisite, as gch_is_current() reads.
         std::ofstream deps(gch_file + ".deps");
         for (const auto& dep : depfile_prerequisites(dep_file))
-            deps << file_content_hash(dep) << " " << dep << "\n";
+            deps << deps_line_for(dep) << "\n";
     }
 
     if (verbose) out << "  PCH built: " << gch_file << "\n";
@@ -4041,6 +4191,13 @@ static bool build_pch(const std::string& preamble_file,
 
 static std::string hash_bytes(const std::string& s);
 static std::string g_store_dir;
+
+// Milliseconds since the launcher started, for the verbose phase lines.
+static long launcher_ms() {
+    static const auto start = std::chrono::steady_clock::now();
+    return static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - start).count());
+}
 
 static const std::string& store_dir() {
     if (g_store_dir.empty()) {
@@ -4069,19 +4226,9 @@ static std::string cached_content_hash(const std::string& path) {
     return h;
 }
 
-// Whether every prerequisite recorded beside an output still hashes as it did.
-static bool store_deps_current(const std::string& deps_file) {
-    std::ifstream ifs(deps_file);
-    if (!ifs.is_open()) return false;
-    std::string line;
-    bool any = false;
-    while (std::getline(ifs, line)) {
-        const size_t space = line.find(' ');
-        if (space == std::string::npos) continue;
-        any = true;
-        if (cached_content_hash(line.substr(space + 1)) != line.substr(0, space)) return false;
-    }
-    return any;
+static bool store_deps_current(const std::string& deps_file,
+                               const std::vector<std::string>& include_dirs) {
+    return deps_file_current(deps_file, &include_dirs);
 }
 
 // Whether an object defines a symbol that may exist once only: a global that is not weak.
@@ -4109,10 +4256,16 @@ static bool store_object_has_strong_symbols(const std::string& obj) {
     return strong || rc != 0;
 }
 
-static void store_write_deps(const std::string& deps_file, const std::string& dep_file) {
+static void store_write_deps(const std::string& deps_file, const std::string& dep_file,
+                             const std::vector<std::string>& include_dirs) {
     std::ofstream deps(deps_file);
-    for (const auto& dep : depfile_prerequisites(dep_file))
-        deps << cached_content_hash(dep) << " " << dep << "\n";
+    deps << "#I";
+    for (const auto& d : include_dirs) deps << "\t" << d;
+    deps << "\n";
+    for (const auto& dep : depfile_prerequisites(dep_file)) {
+        std::error_code ec;
+        deps << deps_line_for(fs::absolute(dep, ec).lexically_normal().string()) << "\n";
+    }
 }
 
 // A mkdir lock. Taken for a compile; never waited on while another is held.
@@ -4257,9 +4410,20 @@ static void ensure_store_objects(std::vector<StorePiece>& pieces,
                                  bool verbose,
                                  std::ostream& out) {
     if (pieces.empty()) return;
+    // The key leaves the include directories out: Boost.Spirit's test directories differ
+    // only by their own -I, and one object serves them all as long as every prerequisite
+    // resolves to the same file through each directory list, which the check beside the
+    // object verifies.
     std::string joined;
-    for (const auto& f : compile_flags) joined += f + "\n";
+    for (const auto& f : flags_without_include_dirs(compile_flags)) joined += f + "\n";
     const std::string flags_hash = hash_bytes(joined);
+    const std::vector<std::string> include_dirs = include_dirs_of_flags(compile_flags);
+    // The header's PCH is keyed with them: clang does not check a PCH's include paths
+    // against the compile's, so one built under another list could resolve a header
+    // elsewhere and pass.
+    std::string all_joined;
+    for (const auto& f : compile_flags) all_joined += f + "\n";
+    const std::string all_flags_hash = hash_bytes(all_joined);
     const std::string& store = store_dir();
 
     auto obj_of = [&](const StorePiece& sp) { return store + "/" + sp.key + "-" + flags_hash + ".o"; };
@@ -4269,13 +4433,13 @@ static void ensure_store_objects(std::vector<StorePiece>& pieces,
     };
     auto current = [&](const StorePiece& sp) {
         const std::string obj = obj_of(sp);
-        return fs::exists(obj) && store_deps_current(obj + ".deps");
+        return fs::exists(obj) && store_deps_current(obj + ".deps", include_dirs);
     };
     // The header's own PCH: one per (header, flags), built under its lock. Waiting on it
     // is safe, its holder waits on nothing.
     std::set<std::string> pch_ready;
     auto header_pch = [&](const std::string& header) -> std::string {
-        const std::string hfile = store + "/" + hash_bytes(header + "\n" + flags_hash) + ".h";
+        const std::string hfile = store + "/" + hash_bytes(header + "\n" + all_flags_hash) + ".h";
         if (!pch_ready.count(hfile)) {
             const std::string text = "#include \"" + header + "\"\n";
             if (!fs::exists(hfile) || read_file(hfile) != text) {
@@ -4324,7 +4488,7 @@ static void ensure_store_objects(std::vector<StorePiece>& pieces,
             ok = false;
         }
         if (ok) {
-            store_write_deps(o.obj + ".deps", o.obj + ".d");
+            store_write_deps(o.obj + ".deps", o.obj + ".d", include_dirs);
             fs::rename(o.obj + ".tmp", o.obj, ec);
             fs::remove(o.obj + ".fail", ec);
             sp.obj = ec ? "" : o.obj;
@@ -8129,6 +8293,7 @@ static int run_as_launcher(int argc, char* argv[]) {
     if (inputs_unchanged) {
         if (verbose)
             std::cerr << "[cpp-splitter] inputs unchanged, reusing the existing split\n";
+        if (verbose) std::cerr << "[cpp-splitter] t: " << launcher_ms() << " ms: split reused\n";
         for (const auto& hdr : sr.header_obj_dirs) (void)hdr;
     } else if (read_split_cache_any(split_dir, sr) &&
                try_incremental_split(split_dir, input_file, split_flags, sr, verbose)) {
@@ -8427,8 +8592,10 @@ static int run_as_launcher(int argc, char* argv[]) {
                 store_pieces.push_back(sp);
             }
         }
+        if (verbose) std::cerr << "[cpp-splitter] t: " << launcher_ms() << " ms: before the store\n";
         ensure_store_objects(store_pieces, compile_prefix, pch_compiler, compile_flags,
                              tipi_compiler_driver_in_use, verbose, std::cerr);
+        if (verbose) std::cerr << "[cpp-splitter] t: " << launcher_ms() << " ms: after the store\n";
         std::map<std::string, std::string> shared_obj;
         for (const auto& sp : store_pieces)
             if (!sp.obj.empty()) shared_obj[sp.twin_obj] = sp.obj;
@@ -8496,9 +8663,12 @@ static int run_as_launcher(int argc, char* argv[]) {
         }
     }
 
-    // Every piece of the unit was shared, so no compile of its own carried the dependency
-    // flags: the preamble is preprocessed for them. TODO/51.
-    if (!split_build_failed && !dep_flags_placed && (has_md || has_mmd) && !module_interface) {
+    // A unit with no piece of its own -- everything it has is a shared header piece -- has
+    // no compile to carry the dependency flags: the preamble is preprocessed for them,
+    // after a parse. A unit with pieces of its own that were all up to date has the same
+    // prerequisites as before, and rewrite_depfile() restores its cached depfile. TODO/51.
+    if (!split_build_failed && !dep_flags_placed && (has_md || has_mmd) && !module_interface &&
+        !inputs_unchanged && !re_sliced && sr.compilable_files.empty()) {
         std::string cmd = compile_prefix;
         cmd += " -I" + shell_quote(split_dir);
         cmd += " -I" + shell_quote(split_include_root(split_dir));
@@ -8535,6 +8705,7 @@ static int run_as_launcher(int argc, char* argv[]) {
     }
 
     if (!split_build_failed) {
+        if (verbose) std::cerr << "[cpp-splitter] t: " << launcher_ms() << " ms: before the link\n";
         bool need_link = (launcher_skipped < (int)sr.compilable_files.size()) || !sr.header_obj_files.empty() || !fs::exists(output_file) || interface_recompiled;
 
         if (!need_link) {
@@ -8630,6 +8801,7 @@ static int run_as_launcher(int argc, char* argv[]) {
         return rc;
     }
 
+    if (verbose) std::cerr << "[cpp-splitter] t: " << launcher_ms() << " ms: done\n";
     if (verbose) std::cerr << "[cpp-splitter] done: " << output_file << "\n";
     return 0;
 }
@@ -8670,6 +8842,7 @@ static void print_usage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+    launcher_ms();
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
