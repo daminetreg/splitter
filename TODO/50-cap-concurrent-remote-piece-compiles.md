@@ -28,3 +28,10 @@ the same build went through: 30860 remote executions, 21669 cache hits, 0 fallba
   printed without the cap.
 - `benchmark-spirit-cmake-re.sh --distributed` at `-j500`, split and remote-split, runs
   with 0 fallbacks.
+
+## Outcome
+
+Implemented at `b89cfffb`. `benchmarks/boost-spirit-rbe-summary-14-Sep-2026.md`: with 8
+piece compiles per launcher, the `-j500` split and remote-split runs went through with 0
+fallbacks (body row 83.0s and 129.8s, full 2352.3s and 2080.2s). `launcher.remote_jobs_cap`
+sees 8 compiles at once without the cap on `sample.cpp` and 2 with it.
