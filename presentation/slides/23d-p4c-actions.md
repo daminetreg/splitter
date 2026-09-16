@@ -12,4 +12,6 @@ notes: The body edit as counts. Plain compiles 218 units. Unity compiles 29 batc
 - 50 | accent | split pieces compiled, 2 PCHs
 :::
 
-The body edit is 102.6s plain, 63.9s unity, 23.0s split — {split}4.5x over plain, 2.8x over unity{/split}.
+The body edit is 102.6s plain, 63.9s unity, 23.0s split — 
+
+## Split faster {split}4.5x{/split} over plain, {split}2.8x{/split} over unity.

@@ -9,7 +9,3 @@ notes: The same cluster run, read as the splitter's own counts rather than wall 
 - full | 1096.6 | 279 parses · 540 shared, 3866 per-unit, 371 unit pieces
 - one body | 38.8 | 268 re-slices, 51 shared compiles, 0 PCH
 :::
-
-::: callout
-The full row is transfer and parsing on the cluster, not compilation: every piece compiled without the local PCH, every remote split downloaded, through 8 slots per launcher.
-:::

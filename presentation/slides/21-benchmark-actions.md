@@ -12,4 +12,5 @@ notes: Set 1 actions, the body edit. standard_wide::toucs4() is edited; 268 unit
 - 1575 | violet | split cached actions
 :::
 
-The body-edit comparison is 136.2s versus 38.8s within this single end-to-end set — {split}3.5x faster{/split}
+The body-edit comparison is 136.2s versus 38.8s
+## Split {split}3.5x faster{/split}
