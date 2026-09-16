@@ -18,19 +18,17 @@ template <int Base, int... Is> long sum_block(std::integer_sequence<int, Is...>)
     return total;
 }
 
+// Blocks of 200: clang 13's expression nesting limit is 256 and a fold counts its operands,
+// so a block of 1000 does not parse there (Apple's clang takes it). Forty blocks recurse.
+template <int Base, int Blocks> long sum_many() {
+    if constexpr (Blocks == 0) return 0;
+    else return sum_block<Base>(std::make_integer_sequence<int, 200>{}) + sum_many<Base + 200, Blocks - 1>();
+}
+
 inline long heavy(int v) {
-    // Thousands of class and function instantiations, each emitted: a dozen blocks of a
-    // thousand, under the expression nesting limit a single fold would hit.
-    long total = 0;
-    total += sum_block<0>(std::make_integer_sequence<int, 1000>{});
-    total += sum_block<1000>(std::make_integer_sequence<int, 1000>{});
-    total += sum_block<2000>(std::make_integer_sequence<int, 1000>{});
-    total += sum_block<3000>(std::make_integer_sequence<int, 1000>{});
-    total += sum_block<4000>(std::make_integer_sequence<int, 1000>{});
-    total += sum_block<5000>(std::make_integer_sequence<int, 1000>{});
-    total += sum_block<6000>(std::make_integer_sequence<int, 1000>{});
-    total += sum_block<7000>(std::make_integer_sequence<int, 1000>{});
-    return total % 1000 + v;
+    // Thousands of class and function instantiations, each emitted: forty blocks of two
+    // hundred, under the expression nesting limit a single fold would hit.
+    return sum_many<0, 40>() % 1000 + v;
 }
 
 inline int light(int v) { return v + 1; }
