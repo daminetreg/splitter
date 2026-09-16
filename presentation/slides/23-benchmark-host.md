@@ -13,7 +13,6 @@ pieces are {split}more work{/split}.
 
 ::: bars
 - full | 57.7 | 460.7
-- no-op | 5.7 | 22.2
 - one body | 56.9 | 28.7
 :::
 
