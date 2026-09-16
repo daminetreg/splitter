@@ -33,7 +33,6 @@
   const slides = [...root.querySelectorAll(".slide")];
   const progress = document.querySelector("#progress");
   const notes = document.querySelector("#notes");
-  const notesToggle = document.querySelector("#notesToggle");
   const chapters = document.querySelector("#chapters");
   const modal = document.querySelector("#modal");
   const closeButton = document.querySelector("#close");
@@ -63,10 +62,8 @@
     }
     window.scrollTo(0, 0);
   }
-  notesToggle.onclick = () => {
-    notes.classList.toggle("show");
-    notesToggle.setAttribute("aria-expanded", String(notes.classList.contains("show")));
-  };
+  // Speaker notes: the N key only; no button on the slide.
+  const toggleNotes = () => { notes.classList.toggle("show"); };
   function closeModal() {
     modal.classList.remove("show");
     opener?.focus();
@@ -261,7 +258,7 @@
     if (["ArrowLeft", "ArrowUp", "PageUp"].includes(e.key)) { e.preventDefault(); show(current - 1); }
     if (e.key === "Home") { e.preventDefault(); show(0); }
     if (e.key === "End") { e.preventDefault(); show(slides.length - 1); }
-    if (e.key.toLowerCase() === "n") notesToggle.click();
+    if (e.key.toLowerCase() === "n") toggleNotes();
     if (e.key.toLowerCase() === "p") window.print();
   });
   let touchStart = null;

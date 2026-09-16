@@ -69,8 +69,8 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .tiny{font:.72rem/1.45 var(--mono);color:var(--muted);margin-top:1rem;max-width:850px}
 .controls{position:fixed;z-index:20;bottom:1rem;right:1rem;display:flex;gap:.4rem}
 .engflow-logo{display:block;width:122px;height:28px;object-fit:contain;align-self:center;margin:0 .45rem}
-.controls button,#notesToggle{border:1px solid var(--line);background:#172421;color:var(--ink);padding:.6rem .75rem;font:700 .75rem var(--mono);cursor:pointer}
-.controls button:hover,#notesToggle:hover{border-color:var(--teal);color:var(--teal)}
+.controls button{border:1px solid var(--line);background:#172421;color:var(--ink);padding:.6rem .75rem;font:700 .75rem var(--mono);cursor:pointer}
+.controls button:hover{border-color:var(--teal);color:var(--teal)}
 .progress{position:fixed;top:0;left:0;height:4px;background:var(--teal);z-index:30;transition:width .25s}
 .chapters{position:fixed;top:1rem;right:1rem;z-index:20;display:flex;gap:.3rem}
 .chapters button{background:none;border:0;color:var(--muted);font:.65rem var(--mono);padding:.4rem;cursor:pointer}
@@ -175,7 +175,7 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .size-value{grid-column:2 / span 2}
 }
 @media print{.slide{display:flex!important;page-break-after:always;min-height:100vh}
-.controls,.chapters,.progress,#notesToggle{display:none!important}
+.controls,.chapters,.progress{display:none!important}
 .modal{display:none!important}
 }
 
@@ -246,13 +246,12 @@ em{font-style:italic;color:inherit}
 .bullets ul li{margin:.3em 0}
 .bullets ul li::marker{color:var(--violet)}
 .logo-large{display:block;width:min(460px,55vw);height:auto;margin:1.6rem 0 .4rem}
-#notesToggle{position:fixed;z-index:20;top:1rem;left:1rem}
 .flag{font:.82rem/1.65 var(--mono);padding:1rem 1.2rem;border-left:3px solid var(--violet);background:#111c19;max-width:1000px;margin-top:1.5rem}
 .semantic .code{white-space:pre-wrap}
 @media print{
   .slide{display:flex!important;flex-direction:column;justify-content:center;break-after:page;animation:none!important}
   .slide:last-child{break-after:auto}
-  .controls,.chapters,.progress,#notesToggle,#notes{display:none!important}
+  .controls,.chapters,.progress,#notes{display:none!important}
   body:after{display:none}
 }
 

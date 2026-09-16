@@ -16,7 +16,7 @@ front matter:
 ```markdown
 ---
 chapter: Architecture
-notes: Speaker notes appear through NOTES.
+notes: Speaker notes, shown with the N key.
 eyebrow: Optional small label
 ---
 ## A heading with a  
