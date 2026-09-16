@@ -94,11 +94,14 @@
 
   for (const box of root.querySelectorAll("[data-bars]")) {
     const rows = attrData(box, "bars");
-    const max = Math.max(...rows.flatMap(row => [row.plain, row.split]));
+    const three = rows.some(row => row.unity !== undefined);
+    const max = Math.max(...rows.flatMap(row => [row.plain, row.unity ?? 0, row.split]));
     for (const item of rows) {
-      const row = make("div", "barrow");
+      const row = make("div", three ? "barrow three" : "barrow");
       row.append(make("b", "", item.label));
-      for (const [value, cls] of [[item.plain, "bar"], [item.split, "bar s"]]) {
+      const series = three ? [[item.plain, "bar"], [item.unity, "bar u"], [item.split, "bar s"]]
+                           : [[item.plain, "bar"], [item.split, "bar s"]];
+      for (const [value, cls] of series) {
         const track = make("div", "barwrap");
         const bar = make("div", cls);
         bar.style.width = `${max ? value / max * 100 : 0}%`;
@@ -106,7 +109,9 @@
         track.append(bar);
         row.append(track);
       }
-      row.append(make("span", "barlabel", item.caption ?? `${item.plain.toFixed(1)}s / ${item.split.toFixed(1)}s`));
+      row.append(make("span", "barlabel", item.caption ?? (three
+        ? `${item.plain.toFixed(1)}s / ${item.unity.toFixed(1)}s / ${item.split.toFixed(1)}s`
+        : `${item.plain.toFixed(1)}s / ${item.split.toFixed(1)}s`)));
       box.append(row);
     }
   }

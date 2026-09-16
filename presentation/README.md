@@ -58,9 +58,10 @@ The small layout vocabulary is shown by the migrated slides:
   sets the two widths (`01ca-split-build.md` uses `2:3`).
 * `tree`, `rationale`, `tiny`, `callout`, and `flag` contain normal prose;
   see `03-input.md` and `15-controlled-comparison.md`.
-* `legend` has `- label | class`, and `bars` has
-  `- label | plain-seconds | splitter-seconds`; bars derive their scale from
-  their own declared set (`20-benchmark-wall.md`).
+* `legend` has `- label | class` (`s` splitter, `u` unity, blank plain), and `bars` has
+  `- label | plain-seconds | splitter-seconds`, or with a third series
+  `- label | plain-seconds | unity-seconds | splitter-seconds`; bars derive their scale
+  from their own declared set (`20-benchmark-wall.md`, `23c-p4c-wall.md`).
   `single-bars` is the one-series remote chart with
   `- label | seconds | detail` rows (`22-benchmark-remote.md`).
 * `code-columns` holds exactly two normal fenced code blocks separated by

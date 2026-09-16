@@ -355,12 +355,23 @@ def render_block(block, snippets):
             f'<span><i class="{html.escape(t.strip())}"></i>{inline(label.strip())}</span>'
             for label,t in pipe_rows(block, 2, ["label", "tone"])) + "</div>"
     if k == "bars":
-        rows = pipe_rows(block, 3, ["label", "plain value", "split value"])
-        data = [{"label": required_text(block, x, "bars label"),
-                 "plain": finite_nonnegative(block, y, "plain value"),
-                 "split": finite_nonnegative(block, z, "split value")}
-                for x,y,z in rows]
-        if not any(row["plain"] or row["split"] for row in data):
+        # Two series, `label | plain | split`, or three, `label | plain | unity | split`.
+        raw = [x[2:] for x in block.body.splitlines() if x.startswith("- ")]
+        width = 4 if raw and all(r.count("|") == 3 for r in raw) else 3
+        if width == 4:
+            rows = pipe_rows(block, 4, ["label", "plain value", "unity value", "split value"])
+            data = [{"label": required_text(block, x, "bars label"),
+                     "plain": finite_nonnegative(block, y, "plain value"),
+                     "unity": finite_nonnegative(block, u, "unity value"),
+                     "split": finite_nonnegative(block, z, "split value")}
+                    for x,y,u,z in rows]
+        else:
+            rows = pipe_rows(block, 3, ["label", "plain value", "split value"])
+            data = [{"label": required_text(block, x, "bars label"),
+                     "plain": finite_nonnegative(block, y, "plain value"),
+                     "split": finite_nonnegative(block, z, "split value")}
+                    for x,y,z in rows]
+        if not any(row["plain"] or row.get("unity") or row["split"] for row in data):
             fail(block.path, block.line, "bars needs at least one positive value")
         return f'<div class="bars" data-bars="{html.escape(json.dumps(data, separators=(",",":")), quote=True)}"></div>'
     if k == "single-bars":

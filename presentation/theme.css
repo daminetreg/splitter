@@ -54,6 +54,8 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .barwrap{height:17px;background:#263530;position:relative}
 .bar{height:100%;background:var(--violet);min-width:2px}
 .bar.s{background:var(--teal)}
+.bar.u{background:var(--warn)}
+.barrow.three{grid-template-columns:115px 1fr 1fr 1fr}
 .barlabel{font-size:.7rem;color:var(--muted);margin-left:.4rem;white-space:nowrap}
 .bars{margin-top:2rem;max-width:900px}
 .bars:has(.singlebar){max-width:1200px}
@@ -62,6 +64,7 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .legend{font:.68rem var(--mono);color:var(--muted);display:flex;gap:1.2rem;margin-top:1.3rem}
 .legend i{display:inline-block;width:11px;height:11px;background:var(--violet);margin-right:.3rem}
 .legend i.s{background:var(--teal)}
+.legend i.u{background:var(--warn)}
 .callout{border:1px solid var(--split);color:#ffe0b9;padding:1rem 1.2rem;margin-top:1.5rem;max-width:800px;font-size:1rem;line-height:1.4}
 .tiny{font:.72rem/1.45 var(--mono);color:var(--muted);margin-top:1rem;max-width:850px}
 .controls{position:fixed;z-index:20;bottom:1rem;right:1rem;display:flex;gap:.4rem}
@@ -93,6 +96,7 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .pathview{margin-top:1rem;min-height:3.2rem;font:.82rem/1.45 var(--mono);color:#c9d5d0}
 .pathview b{color:var(--teal)}
 .barrow{grid-template-columns:115px minmax(0,1fr) minmax(0,1fr) 128px}
+.barrow.three{grid-template-columns:115px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 160px}
 
 .evidence-grid{display:grid;grid-template-columns:repeat(7,minmax(82px,1fr));gap:.45rem;margin-top:2rem;max-width:1080px}
 .section-chip{appearance:none;text-align:left;min-height:58px;border:1px solid var(--line);background:#14201e;color:var(--ink);padding:.55rem;font:.67rem/1.25 var(--mono);cursor:pointer}
@@ -161,6 +165,7 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .decision{clip-path:none;width:auto;height:auto;padding:1rem}
 .arrow{transform:rotate(90deg)}
 .barrow{grid-template-columns:76px minmax(0,1fr) minmax(0,1fr) 88px;gap:.35rem}
+.barrow.three{grid-template-columns:76px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 110px}
 .barlabel{white-space:normal}
 .chapters{display:none}
 .toggle{position:static;margin-top:1rem}
