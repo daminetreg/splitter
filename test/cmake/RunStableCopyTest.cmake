@@ -152,14 +152,27 @@ endif()
 if(NOT b_log MATCHES "re-sliced its piece")
   message(FATAL_ERROR "b.cpp did not re-slice gamma()'s piece:\n${b_log}")
 endif()
+# The shared piece is the copy plus gamma()'s body, keyed on that text (TODO/51 revised):
+# the edit is a new key and a new object, the old one left as it was.
 file(TIMESTAMP "${b_gamma_piece}" gamma_after "%s")
-if(gamma_after STREQUAL gamma_before)
-  message(FATAL_ERROR "the shared piece for gamma() was not recompiled after the edit:\n${b_log}")
+if(NOT gamma_after STREQUAL gamma_before)
+  message(FATAL_ERROR "the old shared object for gamma() was rewritten instead of a new key added:\n${b_log}")
 endif()
-# a.cpp compiled first and rebuilt gamma()'s shared object; b.cpp found it current. (beta()'s
-# shared piece reads the edited header too, and b.cpp, its only includer, rebuilds that one.)
-if(b_log MATCHES "\\$ [^\n]*${gamma_key}\\.cpp" OR b_log MATCHES "compiling [0-9]+ header dep")
-  message(FATAL_ERROR "b.cpp compiled a piece for gamma() that a.cpp had already rebuilt:\n${b_log}")
+file(STRINGS "${b_gamma_twin}" store_line2 REGEX "^// Store: ")
+string(REGEX REPLACE "^// Store: " "" gamma_key2 "${store_line2}")
+if(gamma_key2 STREQUAL gamma_key)
+  message(FATAL_ERROR "gamma()'s store key did not change with its body:\n${b_log}")
+endif()
+file(GLOB gamma_obj2 "${WORKDIR}/store/${gamma_key2}-*.o")
+list(LENGTH gamma_obj2 n_gamma_obj2)
+if(NOT n_gamma_obj2 EQUAL 1)
+  message(FATAL_ERROR "the store holds ${n_gamma_obj2} object(s) for the edited gamma()")
+endif()
+# a.cpp compiled first and built gamma()'s new shared object; b.cpp found it current. beta()'s
+# shared piece does not read the edited body -- the copy declares gamma() -- so b.cpp, its
+# only includer, compiles nothing.
+if(b_log MATCHES "\\$ [^\n]*${gamma_key2}\\.cpp" OR b_log MATCHES "compiling [0-9]+ header dep" OR b_log MATCHES "compiling [0-9]+ shared piece")
+  message(FATAL_ERROR "b.cpp compiled a piece for the gamma() edit that a.cpp had already built, or one it need not:\n${b_log}")
 endif()
 set(b_others_after "")
 foreach(o ${b_pieces})

@@ -236,6 +236,28 @@ add_test(
           -DCXX=${CMAKE_CXX_COMPILER}
           -P ${cpp_splitter_test_dir}/cmake/RunSharedHeaderPieceTest.cmake)
 
+# The store's piece is the header's copy plus one body, keyed on that text: an edit to one
+# body is one new object, the others untouched. TODO/51 (revised).
+foreach(fixture shared_piece_isolation shared_piece_heavy shared_piece_strong)
+  set(driver RunSharedPieceIsolationTest)
+  set(test_name launcher.shared_piece_body_isolation)
+  if(fixture STREQUAL shared_piece_heavy)
+    set(driver RunSharedPieceHeavyTest)
+    set(test_name launcher.shared_piece_heavy_neighbour)
+  elseif(fixture STREQUAL shared_piece_strong)
+    set(driver RunSharedPieceStrongTest)
+    set(test_name launcher.shared_piece_refused_for_strong_symbol)
+  endif()
+  add_test(
+    NAME ${test_name}
+    COMMAND ${CMAKE_COMMAND}
+            -DSPLITTER=$<TARGET_FILE:cpp-splitter>
+            -DSOURCE_DIR=${cpp_splitter_test_dir}/${fixture}
+            -DWORKDIR=${cpp_splitter_test_output}/${fixture}
+            -DCXX=${CMAKE_CXX_COMPILER}
+            -P ${cpp_splitter_test_dir}/cmake/${driver}.cmake)
+endforeach()
+
 # A virtual key function written under a macro the file undefines; the other unit expects
 # the vtable from this one. TODO/47.
 add_test(

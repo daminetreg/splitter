@@ -65,6 +65,14 @@ Read the weak flag where Mach-O keeps it, keep the ELF parse where it works.
   `example/spirit-tests/SpiritTestsFromJamfiles.cmake`; the piece counts in
   `benchmarks/` for the shared store should then hold on macOS as they do on Linux.
 
+## Outcome (16 September 2026)
+
+Done with TODO/51's revised design, to which it now applies: `store_object_has_strong_symbols()`
+reads `nm -m -g --defined-only` under `__APPLE__`, weak when the line says `weak`, strong
+otherwise; the ELF parse is unchanged. `launcher.shared_header_piece` passes on
+`macos-brew-llvm`; `launcher.shared_piece_refused_for_strong_symbol` guards the other
+direction. The CI matrix and the other two macOS builds are still to do.
+
 ## Acceptance Criteria
 
 - `launcher.shared_header_piece` passes on `macos-brew-llvm`, `macos-apple-clang` and

@@ -206,3 +206,45 @@ the rewritten header and one body, nothing of the includer.
   28.7s / 38.8s of the anchor design here and on the cluster; the full row's per-piece
   cost below the anchor design's, since no piece parses more than one body.
 - `benchmarks/` gets the rows, and TODO/54 is closed against this design.
+
+### Outcome (16 September 2026)
+
+Implemented; unit tests only, no Boost build this time.
+
+- `split_unit()` writes the store's copy of a header (`store/<hkey>.h`): the harvest
+  classified once more as if every definition were emitted, every sharable body a
+  declaration, generated with no unit tag and no definitions sink so its text is the
+  includer's independent. `emit_split_files()` writes the shared piece as
+  `// Shared piece … #include "<store>/<hkey>.h"` plus the twin's piece proper, keyed on
+  that text; the twin records `// Store:`, `// Header:`, `// StoreHeader:` and marks its
+  piece proper with `// ===`. `ensure_store_objects()` precompiles the copy per (copy,
+  flags) and compiles the piece with the original header's directory on the include path,
+  last, for its quoted includes. The `nm` gate stays as the check it was meant to be, and
+  reads `nm -m` on Mach-O (TODO/54, reapplied to this design).
+- **The re-slice had to learn about the store.** A body edit is re-sliced into the twin
+  without a parse (TODO/28), so the twin kept its old key and the store served the old
+  body -- the first run of `launcher.shared_header_piece` printed the old result. The
+  anchor design never met this: its key did not depend on the body.
+  `store_refresh_twin()` rebuilds the shared piece from the patched twin (and from every
+  twin whose `#line` the edit renumbered) and rewrites the `// Store:` line, exactly as a
+  full split would have, so `launcher.incremental_body_edit`'s byte-identity holds.
+  The same helper regenerates a piece the store lost, from the twin and the copy.
+- An inserted line renumbers the pieces after it and so changes their keys: those
+  functions' shared objects recompile, as their per-unit twins did before (TODO/28's
+  trade). An edit that keeps its line count reaches one key.
+- Tests, all on `macos-brew-llvm`, 65/65 three times at -j8 (one flake of
+  `split.static_name_shared_main` on the first run, not reproduced alone or since):
+  `launcher.shared_piece_body_isolation` (edit `f`: one new object, `g`'s untouched, no
+  per-unit compile; edit both: two), `launcher.shared_piece_heavy_neighbour` (8000
+  instantiations in `heavy()`, 0.58s against 0.26s for `light()`; the copy declares
+  `heavy()`, an edit to `light()` leaves `heavy()`'s object untouched),
+  `launcher.shared_piece_refused_for_strong_symbol` (an inline beside a non-inline in an
+  implementation include: shared piece refused, per-unit piece compiled, the inline
+  next door still shared), `launcher.shared_header_piece` and `launcher.stable_copy`
+  rewritten to the new keys -- and the latter now shows `b.cpp` compiling nothing for the
+  `gamma()` edit, where `beta()`'s anchor piece used to be rebuilt for reading the edited
+  header.
+- Not done: the Spirit and Filesystem builds and the cluster rows; the remote-split path
+  writes no copy on the launcher's side, so a split produced on a worker compiles its
+  twins per unit until the copy travels with it.
+

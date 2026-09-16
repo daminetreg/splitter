@@ -4180,14 +4180,19 @@ static bool build_pch(const std::string& preamble_file,
 // One header function then had as many pieces as the header has includers, and an edit
 // to its body compiled every one of them -- 267 for Boost.Spirit's standard_wide::toucs4.
 //
-// A shared piece includes the original header and forces the function out of it by taking
-// its address: `__attribute__((used)) static const auto anchor = &ns::f;` odr-uses the
-// inline definition, clang emits it weak, and the anchor keeps the reference. It needs no
-// copy and no preamble, so its inputs are the header's own include closure and the flags,
-// and every unit that includes the header links the same object from a store in the build
-// directory. Freshness is content, as for the PCH: the prerequisites' hashes recorded at
-// the compile. A header that does not compile on its own -- TODO/09's case -- fails once
-// per key, is marked, and the unit compiles its own piece as before.
+// A shared piece is the per-unit piece with the unit taken out of it: the header's
+// rewritten copy -- declarations only, with every sharable body moved out whatever the
+// includer emits, so the same text for every includer (`store/<hkey>.h`) -- and one body,
+// `used`, `#line`d, `inline`, as the twin writes it. Its key is the hash of that text, so an
+// edit to one body changes one key and costs one compile, while the copy, its PCH and every
+// other body's object stay current. (The first version anchored the *original* header
+// instead, `&ns::f` behind `#include "header"`: one key per header content, so one body
+// edit rebuilt every shared object of the header and every piece parsed every body -- 51
+// compiles for one edit on Boost.Spirit, see TODO/51's reconsideration.) Every unit that
+// includes the header links the same object from a store in the build directory. Freshness
+// is content, as for the PCH: the prerequisites' hashes recorded at the compile. A header
+// that does not compile on its own -- TODO/09's case -- fails once per key, is marked, and
+// the unit compiles its own piece as before.
 
 static std::string hash_bytes(const std::string& s);
 static std::string g_store_dir;
@@ -4236,14 +4241,31 @@ static bool store_deps_current(const std::string& deps_file,
 // definition -- an implementation include's members, a namespace-scope variable -- which
 // the compiler then emits strong; every unit linking the object would carry it. The
 // compiler's own verdict, read off the symbol table, rather than a prediction from the
-// AST: `nm -g --defined-only`, T D B R C strong, W V weak. No nm, no sharing.
+// AST. On ELF, `nm -g --defined-only`: T D B R C strong, W V weak. On Mach-O a weak
+// definition is an ordinary T with the weak_definition attribute, which only `nm -m`
+// shows -- "weak external" against "external" -- so read with `-m` there, or every shared
+// piece is refused and nothing is ever shared (TODO/54). No nm, no sharing.
 static bool store_object_has_strong_symbols(const std::string& obj) {
+#ifdef __APPLE__
+    FILE* pipe = ::popen(("nm -m -g --defined-only " + shell_quote(obj) + " 2>/dev/null").c_str(), "r");
+    if (!pipe) return true;
+    char line[4096];
+    bool strong = false;
+    while (std::fgets(line, sizeof(line), pipe)) {
+        // "<address> (<segment>,<section>) [weak] [private] external <name> [...]"
+        const std::string text(line);
+        const bool external = text.find(" external ") != std::string::npos;
+        const bool weak = text.find(" weak ") != std::string::npos;
+        if (external && !weak) { strong = true; break; }
+    }
+    const int rc = ::pclose(pipe);
+    return strong || rc != 0;
+#else
     FILE* pipe = ::popen(("nm -g --defined-only " + shell_quote(obj) + " 2>/dev/null").c_str(), "r");
     if (!pipe) return true;
     char line[4096];
-    bool strong = false, any = false;
+    bool strong = false;
     while (std::fgets(line, sizeof(line), pipe)) {
-        any = true;
         // "<address> <type> <name>", or "<type> <name>" for an undefined symbol.
         std::istringstream ls(line);
         std::string a, b;
@@ -4252,8 +4274,8 @@ static bool store_object_has_strong_symbols(const std::string& obj) {
         if (type.size() == 1 && std::strchr("TDBRC", type[0])) { strong = true; break; }
     }
     const int rc = ::pclose(pipe);
-    (void)any;
     return strong || rc != 0;
+#endif
 }
 
 static void store_write_deps(const std::string& deps_file, const std::string& dep_file,
@@ -4293,14 +4315,11 @@ static void store_wait_unlocked(const std::string& lock_dir) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }
 
-// The anchor piece a header definition shares, if it can be shared: inline, external,
-// nameable, not overloaded in its scope within the file (an `auto` anchor could not
-// choose), not under `extern "C"`, not from a macro invocation, not always-inline. Empty
-// otherwise.
-static std::string store_anchor_text(const FunctionInfo& fn,
-                                     const std::vector<FunctionInfo>& siblings,
-                                     const std::string& abs_header,
-                                     std::string& why_not) {
+// Whether a header definition can be shared: inline, external, nameable, not under
+// `extern "C"`, not from a macro invocation, not always-inline, not a special member.
+// Empty `why_not` when it can. The piece is the body as written, so overloads share as
+// any other function does.
+static bool store_sharable(const FunctionInfo& fn, std::string& why_not) {
     why_not.clear();
     if (!fn.is_inlined) why_not = "not inline";
     else if (!fn.external_linkage || fn.is_static || fn.in_unnamed_ns) why_not = "internal linkage";
@@ -4311,72 +4330,20 @@ static std::string store_anchor_text(const FunctionInfo& fn,
     else if (fn.is_ctor_or_dtor || fn.is_conversion || fn.is_virtual) why_not = "special member";
     else if (fn.kept_with_variable) why_not = "kept with a variable";
     else if (!fn.always_inline_ranges.empty()) why_not = "always_inline";
-    else if (fn.name.empty() || fn.name.rfind("operator", 0) == 0) why_not = "operator";
-    if (!why_not.empty()) return "";
-    std::string qualified;
-    for (const auto& part : fn.scope_chain) qualified += part.name + "::";
-    qualified += fn.name;
-    unsigned same = 0;
-    for (const auto& other : siblings) {
-        if (other.name != fn.name || other.scope_chain.size() != fn.scope_chain.size()) continue;
-        bool eq = true;
-        for (size_t i = 0; i < fn.scope_chain.size(); ++i)
-            if (other.scope_chain[i].name != fn.scope_chain[i].name) { eq = false; break; }
-        if (eq) ++same;
-    }
-    // Overloaded in its scope: the address alone is ambiguous, so the anchor names the
-    // type -- the return type and the parameter list the display name carries -- and lets
-    // static_cast choose. Spelled at namespace scope, so a class-scope typedef in the
-    // parameter list fails the compile, which marks the key and leaves the unit its own
-    // piece. A member's pointer type carries the class and the const.
-    std::string anchor;
-    if (same == 1) {
-        anchor = "&" + qualified;
-    } else {
-        const size_t paren = fn.qualified_name.find('(');
-        if (paren == std::string::npos || fn.return_type.empty()) {
-            why_not = "overloaded in its scope";
-            return "";
-        }
-        const std::string params = fn.qualified_name.substr(paren);
-        const bool member = !fn.scope_chain.empty() &&
-                            fn.scope_chain.back().kind == ScopeKind::Class && !fn.is_static_member;
-        std::string type;
-        if (member) {
-            std::string cls;
-            for (size_t i = 0; i < fn.scope_chain.size(); ++i)
-                cls += (i ? "::" : "") + fn.scope_chain[i].name;
-            type = fn.return_type + " (" + cls + "::*)" + params + (fn.is_const_member ? " const" : "");
-        } else {
-            type = fn.return_type + " (*)" + params;
-        }
-        anchor = "static_cast<" + type + ">(&" + qualified + ")";
-    }
-    return anchor;
+    return why_not.empty();
 }
 
-// The shared piece's text, from the header and the anchor alone: the per-unit twin
-// carries both, so a launcher that has the twin and not the store -- the split was
-// produced on the cluster, whose store stayed there -- writes the piece again, with the
-// same key. No line numbers, no signature: the key must survive an edit to the body.
-static std::string store_piece_text(const std::string& abs_header, const std::string& anchor) {
-    std::ostringstream text;
-    text << "// Shared piece of " << abs_header << "\n"
-         << "#include \"" << abs_header << "\"\n"
-         << "__attribute__((used)) static const auto cpp_splitter_anchor = " << anchor << ";\n";
-    return text.str();
-}
-
-// Writes the anchor piece to the store and returns its key.
-static std::string store_write_piece(const std::string& anchor_text) {
-    const std::string key = hash_bytes(anchor_text);
-    const std::string path = store_dir() + "/" + key + ".cpp";
-    if (!fs::exists(path) || read_file(path) != anchor_text) {
+// Writes `text` to the store under the hash of its content, with the extension given, and
+// returns the key. The same text from any unit lands on the same file.
+static std::string store_write_text(const std::string& text, const char* ext) {
+    const std::string key = hash_bytes(text);
+    const std::string path = store_dir() + "/" + key + ext;
+    if (!fs::exists(path) || read_file(path) != text) {
         const std::string tmp = path + ".tmp." + std::to_string(::getpid());
         {
             std::ofstream ofs(tmp);
             if (!ofs.is_open()) return "";
-            ofs << anchor_text;
+            ofs << text;
         }
         std::error_code ec;
         fs::rename(tmp, path, ec);
@@ -4385,29 +4352,75 @@ static std::string store_write_piece(const std::string& anchor_text) {
     return key;
 }
 
+// The store's copy of the header this unit is splitting, set by split_unit() for the
+// duration of emit_split_files(): every sharable body moved out, whatever this unit emits.
+static std::string g_store_header_key;
+
 struct StorePiece {
-    std::string key;        // from the twin's `// Store:` line
-    std::string header;     // the original header, from `// Header:`
-    std::string anchor;     // the anchor expression, from `// Anchor:`
-    std::string twin_obj;   // the per-unit object this stands in for
-    std::string obj;        // the shared object, once resolved; empty when it failed
+    std::string key;           // from the twin's `// Store:` line: the shared piece's text hash
+    std::string header;        // the original header, from `// Header:`
+    std::string store_header;  // the store's copy of it, from `// StoreHeader:`
+    std::string twin_obj;      // the per-unit object this stands in for
+    std::string obj;           // the shared object, once resolved; empty when it failed
 };
 
-// What a per-unit piece says about its shared twin, or false when it has none. The
-// piece is written to the store if it is not there.
+// What a per-unit piece says about its shared twin, or false when it has none -- or when
+// the store does not hold the piece and the copy it names: they are written by the split,
+// and a split produced elsewhere (on the cluster) leaves this store without them, in
+// which case the twin is compiled as before.
+static void store_refresh_twin(const std::string& twin_path);
 static bool store_piece_of(const std::string& twin_cpp, StorePiece& sp) {
     std::ifstream ifs(twin_cpp);
     std::string line;
-    sp.key.clear(); sp.header.clear(); sp.anchor.clear();
+    sp.key.clear(); sp.header.clear(); sp.store_header.clear();
     for (int i = 0; i < 8 && std::getline(ifs, line); ++i) {
         if (line.rfind("// Store: ", 0) == 0) sp.key = line.substr(10);
         else if (line.rfind("// Header: ", 0) == 0) sp.header = line.substr(11);
-        else if (line.rfind("// Anchor: ", 0) == 0) sp.anchor = line.substr(11);
+        else if (line.rfind("// StoreHeader: ", 0) == 0) sp.store_header = line.substr(16);
     }
-    if (sp.key.empty() || sp.header.empty() || sp.anchor.empty()) return false;
-    if (!fs::exists(store_dir() + "/" + sp.key + ".cpp"))
-        store_write_piece(store_piece_text(sp.header, sp.anchor));
+    if (sp.key.empty() || sp.header.empty() || sp.store_header.empty()) return false;
+    if (!fs::exists(store_dir() + "/" + sp.store_header + ".h")) return false;
+    // The piece itself is the twin's own text behind the copy: written again when the
+    // store lost it, with the same key.
+    if (!fs::exists(store_dir() + "/" + sp.key + ".cpp")) {
+        ifs.close();
+        store_refresh_twin(twin_cpp);
+        return store_piece_of(twin_cpp, sp);
+    }
     return true;
+}
+
+// The line a twin puts between its includes and its piece proper.
+static const char* const kStorePieceMarker = "// ===\n";
+
+// After a twin's piece proper changed on disk -- a body re-sliced into it, its #line
+// renumbered -- the shared piece it names has to change with it: the shared piece is the
+// store's copy of the header plus that same text, keyed on the whole, so a new text is a
+// new key. Written to the store and recorded in the twin, exactly as emit_split_files()
+// would have for a full split, so the two paths leave identical files. TODO/51.
+static void store_refresh_twin(const std::string& twin_path) {
+    std::string text = read_file(twin_path);
+    auto line_value = [&](const char* prefix) -> std::string {
+        const size_t at = text.find(prefix);
+        if (at == std::string::npos || (at != 0 && text[at - 1] != '\n')) return "";
+        const size_t eol = text.find('\n', at);
+        return text.substr(at + std::strlen(prefix), eol == std::string::npos ? std::string::npos : eol - at - std::strlen(prefix));
+    };
+    const std::string old_key = line_value("// Store: ");
+    const std::string header = line_value("// Header: ");
+    const std::string store_header = line_value("// StoreHeader: ");
+    if (old_key.empty() || header.empty() || store_header.empty()) return;
+    const size_t mark = text.find(std::string("\n") + kStorePieceMarker);
+    if (mark == std::string::npos) return;
+    const std::string section = text.substr(mark + 1 + std::strlen(kStorePieceMarker));
+    const std::string shared = "// Shared piece of " + header + "\n#include \"" + store_dir() +
+                               "/" + store_header + ".h\"\n\n" + section;
+    const std::string key = store_write_text(shared, ".cpp");   // writes it if it is not there
+    if (key.empty() || key == old_key) return;
+    const size_t at = text.find("// Store: " + old_key);
+    text = text.substr(0, at + 10) + key + text.substr(at + 10 + old_key.size());
+    std::ofstream ofs(twin_path);
+    if (ofs.is_open()) ofs << text;
 }
 
 // Resolves each piece to a shared object: current in the store, compiled now, or -- when
@@ -4447,20 +4460,24 @@ static void ensure_store_objects(std::vector<StorePiece>& pieces,
         const std::string obj = obj_of(sp);
         return fs::exists(obj) && store_deps_current(obj + ".deps", include_dirs);
     };
-    // The header's own PCH: one per (header, flags), built under its lock. Waiting on it
-    // is safe, its holder waits on nothing.
+    // The PCH of the store's copy of the header: one per (copy, flags), built under its
+    // lock. Waiting on it is safe, its holder waits on nothing. The copy sits in the store,
+    // not beside the original, so the original's directory is searched for the quoted
+    // includes it carries -- last, after the build's own directories.
     std::set<std::string> pch_ready;
-    auto header_pch = [&](const std::string& header) -> std::string {
-        const std::string hfile = store + "/" + hash_bytes(header + "\n" + all_flags_hash) + ".h";
+    auto header_dir = [](const StorePiece& sp) { return fs::path(sp.header).parent_path().string(); };
+    auto header_pch = [&](const StorePiece& sp) -> std::string {
+        const std::string copy = store + "/" + sp.store_header + ".h";
+        const std::string hfile = store + "/" + hash_bytes(sp.store_header + "\n" + all_flags_hash) + ".h";
         if (!pch_ready.count(hfile)) {
-            const std::string text = "#include \"" + header + "\"\n";
+            const std::string text = "#include \"" + copy + "\"\n";
             if (!fs::exists(hfile) || read_file(hfile) != text) {
                 std::ofstream ofs(hfile);
                 if (ofs.is_open()) ofs << text;
             }
             store_wait_unlocked(hfile + ".lock");
             if (store_try_lock(hfile + ".lock")) {
-                build_pch(hfile, pch_compiler, "", compile_flags, "", verbose, out);
+                build_pch(hfile, pch_compiler, "", compile_flags, header_dir(sp), verbose, out);
                 store_unlock(hfile + ".lock");
             } else {
                 store_wait_unlocked(hfile + ".lock");
@@ -4481,9 +4498,10 @@ static void ensure_store_objects(std::vector<StorePiece>& pieces,
     auto start_compile = [&](size_t i) {
         StorePiece& sp = pieces[i];
         const std::string obj = obj_of(sp);
-        const std::string pch = header_pch(sp.header);
+        const std::string pch = header_pch(sp);
         std::string cmd = compile_prefix;
         for (const auto& f : compile_flags) cmd += " " + shell_quote(f);
+        cmd += " -I" + shell_quote(header_dir(sp));
         if (!pch.empty()) cmd += " -include " + shell_quote(pch);
         cmd += " -MD -MF " + shell_quote(obj + ".d") + " -MT " + shell_quote(obj);
         cmd += " -c -o " + shell_quote(obj + ".tmp") + " " + shell_quote(store + "/" + sp.key + ".cpp");
@@ -5793,6 +5811,32 @@ static SplitResult split_unit(CXTranslationUnit tu,
     const std::string unit_tag = sanitize_filename(fs::path(abs_path).filename().string());
     const std::string preamble_path = (fs::path(unit_dir) / preamble_filename).string();
 
+    // The store's copy of a header: the same rewrite as this unit's, decided as if every
+    // definition were emitted, so every sharable body is a declaration in it whatever the
+    // includer -- one text for all of them, and byte-identical across body edits. Computed
+    // on copies of the harvest before this unit's own classification, which depends on
+    // what the unit emits. TODO/51.
+    g_store_header_key.clear();
+    if (input_is_header && inclusion <= 1 && !g_module_unit.interface && g_unit_imports.empty() &&
+        !std::getenv("CPP_SPLITTER_NO_STORE")) {
+        std::vector<FunctionInfo> all = functions;
+        std::vector<VariableInfo> all_vars = variables;
+        std::set<std::string> all_referenced;
+        for (const auto& fn : all) if (!fn.usr.empty()) all_referenced.insert(fn.usr);
+        prepare_functions(all, source, all_referenced, true);
+        const std::string unmovable = g_unmovable_static_variable;
+        prepare_variables(all_vars, all, source, "cpp_splitter_store", true);
+        g_unmovable_static_variable = unmovable;
+        std::string why;
+        for (auto& fn : all)
+            if (!fn.keep_in_header && !store_sharable(fn, why)) fn.keep_in_header = true;
+        const bool need_variant = g_definitions_need_variant;
+        const std::string copy = generate_preamble(source, all, all_vars, "cpp_splitter_store",
+                                                   abs_path, StaticRenameMap(), nullptr);
+        g_definitions_need_variant = need_variant;
+        g_store_header_key = store_write_text(copy, ".h");
+    }
+
     prepare_functions(functions, source, referenced, input_is_header);
     g_unmovable_static_variable.clear();
     prepare_variables(variables, functions, source, unit_tag, input_is_header);
@@ -6600,26 +6644,18 @@ static void emit_split_files(CXTranslationUnit tu,
         std::string out_path = (fs::path(output_dir) / out_filename).string();
         current_files.push_back(out_path);
 
-        std::ostringstream content;
-        content << "// Function: " << fn.signature << "\n";
-        content << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
+        // Three parts, because the shared piece (TODO/51) is the same piece with another
+        // head: what the twin says about itself, what it includes, and the body it carries.
+        std::ostringstream head, content, piece;
+        head << "// Function: " << fn.signature << "\n";
+        head << "// Source: " << input_path << " (lines " << fn.start_line << "-" << fn.end_line << ")\n";
         if (should_keep_in_header(fn))
-            content << "// Note: kept in the preamble, not compiled -- "
-                    << keep_reason(fn) << "\n";
-        // A header definition every includer can share: the anchor piece goes to the store,
-        // and this per-unit piece is compiled only if that one cannot be. TODO/51.
-        std::string store_key, store_anchor, not_shared;
-        if (input_is_header && !should_keep_in_header(fn) && inclusion <= 1 &&
-            !g_module_unit.interface && g_unit_imports.empty()) {
-            store_anchor = store_anchor_text(fn, functions, abs_path, not_shared);
-            if (!store_anchor.empty())
-                store_key = store_write_piece(store_piece_text(abs_path, store_anchor));
-        }
-        if (!store_key.empty())
-            content << "// Store: " << store_key << "\n"
-                    << "// Header: " << abs_path << "\n"
-                    << "// Anchor: " << store_anchor << "\n";
-        content << "// ---\n\n";
+            head << "// Note: kept in the preamble, not compiled -- "
+                 << keep_reason(fn) << "\n";
+        std::string not_shared;
+        const bool shareable = input_is_header && !should_keep_in_header(fn) && inclusion <= 1 &&
+                               !g_module_unit.interface && g_unit_imports.empty() &&
+                               !g_store_header_key.empty() && store_sharable(fn, not_shared);
         // A header is not necessarily self-contained: it is written to be included at a
         // particular point, after earlier includes have completed the types it uses.
         // Including its rewritten copy on its own reimposes a self-containedness
@@ -6648,6 +6684,9 @@ static void emit_split_files(CXTranslationUnit tu,
             definitions_emitted = true;
         }
         content << "\n";
+        // What follows is the piece proper, and what a shared piece carries after the
+        // store's copy of the header; store_refresh_twin() cuts here. TODO/51.
+        content << kStorePieceMarker;
 
         // Members are emitted in their out-of-line form; everything else as written. An
         // out-of-line form was rebuilt from the declarator and no longer carries the
@@ -6701,7 +6740,7 @@ static void emit_split_files(CXTranslationUnit tu,
             body = "__attribute__((used))\n" + body;
 
         for (const auto& c : fn.conditionals)
-            content << c << "\n";
+            piece << c << "\n";
 
         // The linkage specification the definition was written under, restated: the
         // FunctionDecl's own extent starts after `extern "C"`, so the piece would otherwise
@@ -6710,9 +6749,9 @@ static void emit_split_files(CXTranslationUnit tu,
             body = "extern \"C\" {\n" + body + "\n}";
 
         if (!fn.scope_chain.empty()) {
-            content << wrap_in_namespaces(body, fn.scope_chain) << "\n";
+            piece << wrap_in_namespaces(body, fn.scope_chain) << "\n";
         } else {
-            content << body << "\n";
+            piece << body << "\n";
         }
 
         {
@@ -6720,11 +6759,25 @@ static void emit_split_files(CXTranslationUnit tu,
             const size_t to_close =
                 fn.conditionals.size() > closed ? fn.conditionals.size() - closed : 0;
             for (size_t ci = 0; ci < to_close; ++ci)
-                content << "#endif\n";
+                piece << "#endif\n";
         }
 
-        std::string new_content = content.str();
+        // The shared piece: the store's copy of the header, then the same body. Its key is
+        // its text, so this body's edit changes this key alone. The twin records it and is
+        // compiled only when the store cannot serve the object. TODO/51.
         const bool kept = should_keep_in_header(fn);
+        std::string store_key;
+        if (shareable && !kept) {
+            const std::string shared = "// Shared piece of " + abs_path + "\n#include \"" +
+                                       store_dir() + "/" + g_store_header_key + ".h\"\n\n" + piece.str();
+            store_key = store_write_text(shared, ".cpp");
+            if (!store_key.empty())
+                head << "// Store: " << store_key << "\n"
+                     << "// Header: " << abs_path << "\n"
+                     << "// StoreHeader: " << g_store_header_key << "\n";
+        }
+        head << "// ---\n\n";
+        std::string new_content = head.str() + content.str() + piece.str();
 
         // A kept definition's piece is never compiled -- there is no object to be had from a
         // function template, and nothing to gain from one. Writing it anyway cost 97.6% of
@@ -7679,9 +7732,12 @@ static bool try_incremental_split(const std::string& split_dir,
         const size_t sp = updated.find(old_span);
         if (sp == std::string::npos) return refuse("the piece has no source-line comment");
         updated = updated.substr(0, sp) + new_span + updated.substr(sp + old_span.size());
-        std::ofstream ofs(d.piece);
-        if (!ofs.is_open()) return refuse("the piece cannot be written");
-        ofs << updated;
+        {
+            std::ofstream ofs(d.piece);
+            if (!ofs.is_open()) return refuse("the piece cannot be written");
+            ofs << updated;
+        }
+        store_refresh_twin(d.piece);
     }
 
     // A definition kept in the preamble can sit *inside* the edited one -- a member of a
@@ -7730,8 +7786,11 @@ static bool try_incremental_split(const std::string& split_dir,
             at = piece.find(old_line);
             if (at != std::string::npos)
                 piece = piece.substr(0, at) + new_line + piece.substr(at + old_line.size());
-            std::ofstream ofs(o.piece);
-            if (ofs.is_open()) ofs << piece;
+            {
+                std::ofstream ofs(o.piece);
+                if (ofs.is_open()) ofs << piece;
+            }
+            store_refresh_twin(o.piece);
         }
 
         if (fs::exists(keeps_path)) {
