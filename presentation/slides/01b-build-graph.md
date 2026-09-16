@@ -1,5 +1,5 @@
 ---
-chapter: Opening
+chapter: Build Atomiticity
 chapter-label: Translation Unit (TU) Fission
 notes: Before the atom, the thing it is an atom of. A build is a graph — files are the nodes, the actions that make one file from others are the edges. The build system's whole job is this graph — run an edge when one of its inputs is newer than its output, skip it otherwise, and the cache and the cluster key on the same edges. Here is ours for use_mylib.cpp — the fixture the rest of the talk splits. One compile edge — every header the unit includes goes in, one object comes out. One link edge. The compile edge is the atom — nothing inside it is visible to the build system, the cache or the scheduler. Touch anything on its input side and the whole edge reruns.
 ---

@@ -149,13 +149,45 @@ def lines(block, minimum=1):
     return values
 
 def inline(text):
-    """Escape input first, then permit emphasis and {tone} semantic spans."""
+    """Escape input first, then permit GitHub-flavoured `code`, **bold**, *italic* / _italic_
+    and {tone} semantic spans. Code spans are lifted out first, so nothing inside them is
+    read as markup -- `v * 2` keeps its asterisk."""
     text = html.escape(text, quote=False)
+    codes = []
+    def stash(match):
+        codes.append(f"<code>{match.group(1)}</code>")
+        return f"\x00{len(codes) - 1}\x00"
+    text = re.sub(r"`([^`\n]+)`", stash, text)
     text = text.replace("  \n", "<br>")
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    # Italic: `*x*` anywhere, `_x_` only between non-word characters, so use_mylib.cpp and
+    # a lone `*.o` are left alone.
+    text = re.sub(r"\*(?!\s)([^*\n]+?)(?<!\s)\*", r"<em>\1</em>", text)
+    text = re.sub(r"(?<![\w])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w])", r"<em>\1</em>", text)
     text = re.sub(r"\{(accent|violet|split|red)\}(.+?)\{/\1\}",
                   r'<span class="\1">\2</span>', text)
-    return text
+    text = re.sub(r":fa-([a-z0-9-]+):", fa_icon, text)
+    # Links: `[text](url)`, and a bare http(s) URL on its own. Opened in a new tab, so the
+    # deck stays where it is. The text was escaped above, so the URL only needs its quotes.
+    def anchor(url, label):
+        if not re.match(r"(https?://|mailto:|#)", url):
+            fail(*_inline_at, f"link to '{url}': only http(s), mailto and # links are allowed")
+        return f'<a href="{url.replace(chr(34), "&quot;")}" target="_blank" rel="noopener">{label}</a>'
+    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", lambda m: anchor(m.group(2), m.group(1)), text)
+    text = re.sub(r"(?<![\w\"'>/])(https?://[^\s<]*[^\s<.,;:)\]])", lambda m: anchor(m.group(1), m.group(1)), text)
+    return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], text)
+
+def fa_icon(match):
+    """`:fa-github:` -> Font Awesome's SVG for it, inlined from presentation/icons/<name>.svg
+    (the deck is offline, so no webfont). Add an icon by dropping its SVG from Font Awesome's
+    `svgs/` tree there; the glyph takes the text's colour and size."""
+    name = match.group(1)
+    path = HERE / "icons" / f"{name}.svg"
+    if not path.exists():
+        fail(*_inline_at, f"unknown icon :fa-{name}: (no presentation/icons/{name}.svg)")
+    svg = re.sub(r"<!--.*?-->", "", path.read_text(), flags=re.S).strip()
+    svg = svg.replace("<svg ", '<svg class="fa-icon" aria-hidden="true" fill="currentColor" ', 1)
+    return svg
 
 def pipe_rows(block, count, labels):
     result = []
@@ -173,7 +205,13 @@ def popup_attrs(reference):
         return ""
     return f' tabindex="0" role="button" data-popup="{html.escape(reference, quote=True)}"'
 
+# Where inline() is working, for the errors it raises: it is called from every kind of
+# block and does not take the block.
+_inline_at = ("slide", 0)
+
 def render_block(block, snippets):
+    global _inline_at
+    _inline_at = (getattr(block, "path", "slide"), block.line)
     k, a, b = block.kind, block.arg, block.body
     if k == "semantic":
         labels = [x.strip() for x in a.split("|")]
