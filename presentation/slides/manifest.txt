@@ -33,6 +33,8 @@
 18-paired-sizes.md
 19-convergence.md
 19a-fission-quote.md
+19b-boost-spirit.md
+19c-spirit-body-edit.md
 20-benchmark-wall.md
 21-benchmark-actions.md
 22-benchmark-remote.md
