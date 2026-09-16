@@ -22,7 +22,26 @@ def blocks(text):
 def digest(source):
     return hashlib.sha1(source.strip().encode()).hexdigest()[:12]
 
+# The deck's semantic colours as mermaid classes, appended to every flowchart so a slide can
+# write `class launcher,worker split` -- the same names as the {split}/{violet}/{accent}/{red}
+# text tones, plus `warn` and `muted`.
+DECK_CLASSES = """
+    classDef split fill:#12211f,stroke:#55ddc3,stroke-width:2px,color:#e8eeea
+    classDef accent fill:#12211f,stroke:#55ddc3,stroke-width:2px,color:#e8eeea
+    classDef violet fill:#1a1830,stroke:#b4a0ff,stroke-width:2px,color:#e8eeea
+    classDef warn fill:#2a2116,stroke:#ffbf7c,stroke-width:2px,color:#e8eeea
+    classDef red fill:#2b1916,stroke:#ff826d,stroke-width:2px,color:#e8eeea
+    classDef muted fill:#172321,stroke:#31433f,stroke-width:1px,color:#9aaba5
+"""
+
+def with_deck_classes(source):
+    head = source.lstrip().split("\n", 1)[0]
+    if head.startswith(("flowchart", "graph")):
+        return source.rstrip() + "\n" + DECK_CLASSES
+    return source
+
 def render(source):
+    source = with_deck_classes(source)
     page = f"""<!doctype html><html><body>
 <pre class="mermaid">{html.escape(source)}</pre>
 <script type="module">
@@ -30,7 +49,7 @@ import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.mi
 mermaid.initialize({{ startOnLoad: false, theme: 'dark', fontFamily: 'system-ui, sans-serif',
   themeVariables: {{ background: 'transparent', primaryColor: '#172321', primaryBorderColor: '#55ddc3',
     primaryTextColor: '#e8eeea', lineColor: '#9aaba5', secondaryColor: '#1f2d2a', tertiaryColor: '#111c19',
-    fontSize: '18px', clusterBkg: '#111c19', clusterBorder: '#3c5558', titleColor: '#9aaba5' }} }});
+    fontSize: '18px', clusterBkg: '#111c19', clusterBorder: '#3c5558', titleColor: '#9aaba5', edgeLabelBackground: '#101817' }} }});
 try {{ await mermaid.run(); document.title = 'OK'; }} catch (e) {{ document.title = 'ERR ' + e.message; }}
 </script></body></html>"""
     with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as f:

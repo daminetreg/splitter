@@ -50,7 +50,9 @@ The small layout vocabulary is shown by the migrated slides:
 * `mermaid` holds a mermaid diagram as its body; the build draws it once to
   `diagrams/<hash>.svg` (`render-mermaid.py`: headless Chrome, dark theme) and inlines the
   SVG, so the deck stays offline. `--watch` re-renders an edited diagram by itself; commit
-  the SVG, since a machine without Chrome can only build from it. See `01b-build-graph.md`. `mermaid-columns`
+  the SVG, since a machine without Chrome can only build from it. See `01b-build-graph.md`. Every flowchart gets the deck's colours as
+  mermaid classes -- `class node1,node2 split` (teal), `violet`, `accent`, `warn`, `red`,
+  `muted` -- see `14-remote.md`. `mermaid-columns`
   holds two diagrams separated by `---`, side by side with a large → between them: the
   graph before and after a transformation (`01c-unity-build.md`); an optional `l:r` argument
   sets the two widths (`01ca-split-build.md` uses `2:3`).
