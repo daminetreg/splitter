@@ -56,6 +56,9 @@ h3{font-size:clamp(1rem,1.4vw,1.3rem);letter-spacing:-.02em}
 .bar.s{background:var(--teal)}
 .barlabel{font-size:.7rem;color:var(--muted);margin-left:.4rem;white-space:nowrap}
 .bars{margin-top:2rem;max-width:900px}
+.bars:has(.singlebar){max-width:1200px}
+.barrow.singlebar{grid-template-columns:115px minmax(0,1fr) minmax(0,1.6fr)}
+.singlebar-detail{background:none;border:0;overflow:visible}
 .legend{font:.68rem var(--mono);color:var(--muted);display:flex;gap:1.2rem;margin-top:1.3rem}
 .legend i{display:inline-block;width:11px;height:11px;background:var(--violet);margin-right:.3rem}
 .legend i.s{background:var(--teal)}

@@ -1,15 +1,15 @@
 ---
 chapter: Benchmarks
 chapter-label: Set 1 / what changed
-notes: Set 1 actions: body edit executes 271 plain remote compiles vs 1 split remote compile, with 1575 cache hits. 194 units reach header and exactly one emits.
+notes: Set 1 actions, the body edit. standard_wide::toucs4() is edited; 268 units include its header. Plain executes 271 remote compiles, one per includer. Split executes 51 — the header's 15 sharable functions and 36 of three headers whose include closure reaches it, once each — and the 268 units link the store's objects; 1575 actions come from the cache. The day before, with one piece per includer, the same edit was 267 remote actions and 129.8s. 136.2s against 38.8s, 3.5x.
 ---
-## {split}194{/split} units reach it.  
-{accent}One{/accent} emits it.
+## {split}268{/split} units reach it.  
+{accent}51{/accent} compiles, shared by all.
 
 ::: metrics 3
 - 271 |  | plain remote compiles
-- 1 | accent | split remote compile
+- 51 | accent | split remote compiles
 - 1575 | violet | split cached actions
 :::
 
-The body-edit comparison is 136.2s versus 74.9s, within this single end-to-end set.
+The body-edit comparison is 136.2s versus 38.8s within this single end-to-end set — {split}3.5x faster{/split}
