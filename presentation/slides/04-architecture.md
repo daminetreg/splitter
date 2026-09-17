@@ -3,7 +3,7 @@ chapter: Architecture
 notes: UML
 ---
 
-## Architecture
+## Architecture & Demo
 
 ::: mermaid
 classDiagram

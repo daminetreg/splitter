@@ -7,7 +7,7 @@ eyebrow: Co-founder tipi.build by EngFlow
 ## {accent}@daminetreg{/accent}
 ::: logo
 :::
-What keeps us awake:  
+What I'm passionate about:
 
 ::: cards 2
 - Boring and Slow builds?  | teal | {violet}**No Space Left on Device?**{/violet} {accent}**AI Agent producing too much code to build?**{/accent}

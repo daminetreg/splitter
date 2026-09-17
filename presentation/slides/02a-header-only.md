@@ -3,7 +3,7 @@ chapter: splitter waltkthrough
 chapter-label: Translation Unit (TU) Fission
 notes: Before the atom, the thing every atom carries a copy of. Header-only libraries — Boost, Eigen, fmt, the test frameworks, most of what people write themselves — put function bodies in headers. mylib.h is the fixture the rest of the talk splits: inline functions and a template, included by every unit that uses them. Edit one body and every including translation unit recompiles, misses the cache, goes out again. That is the cost the fission goes after.
 ---
-## mylib.b an {violet}header only{/violet} library
+## mylib.h an {violet}header only{/violet} library
 
 ::: code-columns
 ```cpp

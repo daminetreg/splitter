@@ -3,7 +3,7 @@ chapter: Conclusions
 chapter-label: Improvements
 notes: Limitations: single runs, noise; chosen function reach-to-use 194:1; no general distribution; host has no per-action records; no runtime performance claim.
 ---
-## Current Limitations
+## Next Steps
 
 ::: list
 - There are no relocating linker on Windows 
@@ -12,4 +12,5 @@ notes: Limitations: single runs, noise; chosen function reach-to-use 194:1; no g
 - Too much split pieces produced that are never used in complex builds
   - Uses a lot more disk space than necessary
 - This is a very early prototype
+- Bazel Integration: CMake Only for the moment 
 :::
